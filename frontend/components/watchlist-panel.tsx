@@ -1,0 +1,264 @@
+"use client";
+
+import { FormEvent, useEffect, useMemo, useState } from "react";
+
+import StatusBadge from "@/components/status-badge";
+import {
+  createWatchlist,
+  fetchWatchlist,
+  removeWatchlist,
+  searchStocks,
+  StockSearchItem,
+  WatchlistItem,
+} from "@/lib/api";
+
+function formatPrice(value: number | null): string {
+  if (value === null) {
+    return "--";
+  }
+  return value.toFixed(2);
+}
+
+function formatChangePct(value: number | null): string {
+  if (value === null) {
+    return "--";
+  }
+  const sign = value > 0 ? "+" : "";
+  return `${sign}${value.toFixed(2)}%`;
+}
+
+export default function WatchlistPanel() {
+  const [watchlist, setWatchlist] = useState<WatchlistItem[]>([]);
+  const [watchlistLoading, setWatchlistLoading] = useState(true);
+  const [query, setQuery] = useState("");
+  const [searchResults, setSearchResults] = useState<StockSearchItem[]>([]);
+  const [searchLoading, setSearchLoading] = useState(false);
+  const [showAddPanel, setShowAddPanel] = useState(false);
+  const [addingCode, setAddingCode] = useState<string | null>(null);
+  const [removingCode, setRemovingCode] = useState<string | null>(null);
+  const [message, setMessage] = useState("");
+
+  useEffect(() => {
+    void loadWatchlist();
+  }, []);
+
+  async function loadWatchlist() {
+    setWatchlistLoading(true);
+    try {
+      const data = await fetchWatchlist();
+      setWatchlist(data);
+    } catch {
+      setMessage("自选列表加载失败，请稍后重试");
+    } finally {
+      setWatchlistLoading(false);
+    }
+  }
+
+  async function onSearch(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+
+    const q = query.trim();
+    if (!q) {
+      setSearchResults([]);
+      setMessage("请输入代码、拼音首字母或名称");
+      return;
+    }
+
+    setSearchLoading(true);
+    setMessage("");
+
+    try {
+      const data = await searchStocks(q, 20);
+      setSearchResults(data);
+      if (data.length === 0) {
+        setMessage("未找到相关股票");
+      }
+    } catch {
+      setMessage("搜索失败，请稍后重试");
+      setSearchResults([]);
+    } finally {
+      setSearchLoading(false);
+    }
+  }
+
+  async function onAdd(item: StockSearchItem) {
+    setAddingCode(item.stock_code);
+    setMessage("");
+    try {
+      const result = await createWatchlist(item.stock_code, item.stock_name);
+      if (result.message === "已存在") {
+        setMessage(`${item.stock_name} 已在自选列表中`);
+      } else {
+        setMessage(`已添加 ${item.stock_name} 到自选列表`);
+      }
+      await loadWatchlist();
+    } catch {
+      setMessage("添加失败，请稍后重试");
+    } finally {
+      setAddingCode(null);
+    }
+  }
+
+  async function onRemove(item: WatchlistItem) {
+    const confirmed = window.confirm(`确认移除 ${item.stock_name} (${item.stock_code}) 吗？`);
+    if (!confirmed) {
+      return;
+    }
+
+    setRemovingCode(item.stock_code);
+    setMessage("");
+    try {
+      await removeWatchlist(item.stock_code);
+      setMessage(`已移除 ${item.stock_name}`);
+      await loadWatchlist();
+    } catch {
+      setMessage("移除失败，请稍后重试");
+    } finally {
+      setRemovingCode(null);
+    }
+  }
+
+  const watchlistCodes = useMemo(
+    () => new Set(watchlist.map((item) => item.stock_code)),
+    [watchlist],
+  );
+
+  return (
+    <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm md:p-6">
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <h1 className="text-2xl font-semibold tracking-tight text-slate-900 md:text-3xl">关注列表</h1>
+          <p className="text-xs text-slate-500">{watchlistLoading ? "加载中..." : `${watchlist.length} 只`}</p>
+        </div>
+        <button
+          type="button"
+          onClick={() => setShowAddPanel((prev) => !prev)}
+          className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-sm font-medium text-slate-700 transition-colors hover:bg-slate-100"
+        >
+          {showAddPanel ? "收起添加" : "添加股票"}
+        </button>
+      </div>
+
+      {showAddPanel ? (
+        <div className="mb-4 rounded-xl border border-slate-200 bg-slate-50 p-3">
+          <form onSubmit={onSearch} className="flex flex-wrap gap-2">
+            <input
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder="输入 600519 / GZMT / 贵州茅台"
+              className="min-w-[240px] flex-1 rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 outline-none ring-sky-200 transition focus:ring"
+            />
+            <button
+              type="submit"
+              disabled={searchLoading}
+              className="rounded-lg bg-sky-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-sky-700 disabled:cursor-not-allowed disabled:bg-sky-300"
+            >
+              {searchLoading ? "搜索中..." : "搜索"}
+            </button>
+          </form>
+
+          <div className="mt-3 overflow-x-auto">
+            {searchResults.length > 0 ? (
+              <table className="w-full min-w-[560px] border-collapse text-sm">
+                <thead>
+                  <tr className="border-b border-slate-200 text-slate-500">
+                    <th className="py-2 text-left font-medium">代码</th>
+                    <th className="py-2 text-left font-medium">名称</th>
+                    <th className="py-2 text-left font-medium">交易所</th>
+                    <th className="py-2 text-left font-medium">操作</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {searchResults.map((item) => {
+                    const isInWatchlist = watchlistCodes.has(item.stock_code);
+                    return (
+                      <tr key={item.stock_code} className="border-b border-slate-100">
+                        <td className="py-2 pr-2 text-slate-700">{item.stock_code}</td>
+                        <td className="py-2 pr-2 text-slate-900">{item.stock_name}</td>
+                        <td className="py-2 pr-2 text-slate-700">{item.exchange}</td>
+                        <td className="py-2">
+                          <button
+                            type="button"
+                            onClick={() => void onAdd(item)}
+                            disabled={isInWatchlist || addingCode === item.stock_code}
+                            className="rounded-md border border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-100 disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-400"
+                          >
+                            {isInWatchlist ? "已加入" : addingCode === item.stock_code ? "添加中..." : "加入自选"}
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            ) : (
+              <p className="py-2 text-sm text-slate-500">
+                {searchLoading ? "正在搜索，请稍候" : "输入关键词后即可搜索股票并加入自选"}
+              </p>
+            )}
+          </div>
+        </div>
+      ) : null}
+
+      <div className="overflow-x-auto">
+        {watchlist.length > 0 ? (
+          <table className="w-full min-w-[760px] border-collapse text-sm">
+            <thead>
+              <tr className="border-b border-slate-200 text-slate-500">
+                <th className="py-2 text-left font-medium">代码</th>
+                <th className="py-2 text-left font-medium">名称</th>
+                <th className="py-2 text-left font-medium">最新价</th>
+                <th className="py-2 text-left font-medium">涨跌幅</th>
+                <th className="py-2 text-left font-medium">状态</th>
+                <th className="py-2 text-left font-medium">备注</th>
+                <th className="py-2 text-left font-medium">操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              {watchlist.map((item) => (
+                <tr key={item.stock_code} className="border-b border-slate-100">
+                  <td className="py-2 pr-2 text-slate-700">{item.stock_code}</td>
+                  <td className="py-2 pr-2 text-slate-900">{item.stock_name}</td>
+                  <td className="py-2 pr-2 text-slate-700">{formatPrice(item.latest_price)}</td>
+                  <td
+                    className={
+                      item.change_pct !== null && item.change_pct > 0
+                        ? "py-2 pr-2 text-emerald-700"
+                        : item.change_pct !== null && item.change_pct < 0
+                          ? "py-2 pr-2 text-rose-700"
+                          : "py-2 pr-2 text-slate-700"
+                    }
+                  >
+                    {formatChangePct(item.change_pct)}
+                  </td>
+                  <td className="py-2 pr-2">
+                    <StatusBadge status={item.status} />
+                  </td>
+                  <td className="py-2 pr-2 text-slate-600">
+                    {item.insufficient_days && item.insufficient_days > 0 ? `数据不足 ${item.insufficient_days} 天` : "--"}
+                  </td>
+                  <td className="py-2">
+                    <button
+                      type="button"
+                      onClick={() => void onRemove(item)}
+                      disabled={removingCode === item.stock_code}
+                      className="rounded-md border border-rose-300 px-3 py-1.5 text-xs font-medium text-rose-700 transition-colors hover:bg-rose-50 disabled:cursor-not-allowed disabled:bg-rose-50 disabled:text-rose-300"
+                    >
+                      {removingCode === item.stock_code ? "移除中..." : "移除"}
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ) : (
+          <p className="py-2 text-sm text-slate-500">当前还没有添加股票</p>
+        )}
+      </div>
+
+      {message ? (
+        <div className="mt-4 rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-700 shadow-sm">{message}</div>
+      ) : null}
+    </section>
+  );
+}

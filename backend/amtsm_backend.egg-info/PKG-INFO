@@ -1,0 +1,16 @@
+Metadata-Version: 2.4
+Name: amtsm-backend
+Version: 0.1.0
+Summary: AMTSM backend API and engine
+Requires-Python: <3.13,>=3.12
+Requires-Dist: fastapi>=0.116.0
+Requires-Dist: uvicorn[standard]>=0.35.0
+Requires-Dist: pydantic-settings>=2.10.0
+Requires-Dist: apscheduler>=3.10.4
+Requires-Dist: httpx>=0.28.1
+Requires-Dist: wechatpy>=1.8.18
+Requires-Dist: akshare>=1.17.48
+Requires-Dist: pypinyin>=0.55.0
+Provides-Extra: dev
+Requires-Dist: pytest>=8.3.0; extra == "dev"
+Requires-Dist: ruff>=0.6.0; extra == "dev"

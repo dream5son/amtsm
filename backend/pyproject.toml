@@ -1,0 +1,39 @@
+[project]
+name = "amtsm-backend"
+version = "0.1.0"
+description = "AMTSM backend API and engine"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "fastapi>=0.116.0",
+  "uvicorn[standard]>=0.35.0",
+  "pydantic-settings>=2.10.0",
+  "apscheduler>=3.10.4",
+  "httpx>=0.28.1",
+  "wechatpy>=1.8.18",
+  "akshare>=1.17.48",
+  "pypinyin>=0.55.0"
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.3.0",
+  "ruff>=0.6.0"
+]
+
+[dependency-groups]
+dev = [
+  "pytest>=8.3.0",
+  "ruff>=0.6.0"
+]
+
+[tool.uv]
+default-groups = ["dev"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["app*"]
+namespaces = false
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"

@@ -1,0 +1,95 @@
+from app.config import settings
+from app.db.connection import get_db
+from app.db.init_db import init_db
+from app.schemas.watchlist import WatchlistCreate
+from app.services.watchlist_service import (
+    add_watchlist,
+    list_watchlist,
+    remove_watchlist,
+)
+
+
+def test_add_watchlist_normalizes_code_and_rejects_duplicates(tmp_path, monkeypatch) -> None:
+    sqlite_path = tmp_path / "amtsm.db"
+    monkeypatch.setattr(settings, "sqlite_path", str(sqlite_path))
+
+    init_db()
+
+    payload = WatchlistCreate(stock_code="600519", stock_name="贵州茅台")
+    add_watchlist(payload)
+
+    rows = list_watchlist()
+    assert rows == [
+        {
+            "stock_code": "sh600519",
+            "stock_name": "贵州茅台",
+            "status": "NORMAL",
+            "created_at": rows[0]["created_at"],
+            "latest_price": None,
+            "change_pct": None,
+            "actual_n": None,
+            "effective_n": 60,
+            "insufficient_days": None,
+        }
+    ]
+
+    duplicate = WatchlistCreate(stock_code="sh600519", stock_name="贵州茅台")
+    try:
+        add_watchlist(duplicate)
+    except ValueError as exc:
+        assert str(exc) == "stock already exists"
+    else:
+        raise AssertionError("expected duplicate add to fail")
+
+
+def test_remove_watchlist_normalizes_code(tmp_path, monkeypatch) -> None:
+    sqlite_path = tmp_path / "amtsm.db"
+    monkeypatch.setattr(settings, "sqlite_path", str(sqlite_path))
+
+    init_db()
+    add_watchlist(WatchlistCreate(stock_code="600519", stock_name="贵州茅台"))
+
+    assert remove_watchlist("sh600519") == 1
+    assert list_watchlist() == []
+
+
+def test_list_watchlist_includes_market_fields_and_insufficient_days(tmp_path, monkeypatch) -> None:
+    sqlite_path = tmp_path / "amtsm.db"
+    monkeypatch.setattr(settings, "sqlite_path", str(sqlite_path))
+
+    init_db()
+    add_watchlist(WatchlistCreate(stock_code="600519", stock_name="贵州茅台"))
+
+    with get_db() as conn:
+        conn.execute(
+            """
+            UPDATE watchlist
+            SET custom_n = 10
+            WHERE stock_code = 'sh600519'
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO daily_market_snapshots (
+                stock_code, trade_date, open_price, high_price, low_price, close_price, volume
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            ("sh600519", "2026-08-01", 100.0, 101.0, 99.0, 104.0, 1000000.0),
+        )
+        conn.execute(
+            """
+            INSERT INTO daily_baselines (stock_code, trade_date, low_min, high_max, actual_n)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            ("sh600519", "2026-08-01", 90.0, 120.0, 6),
+        )
+        conn.commit()
+
+    rows = list_watchlist()
+    assert len(rows) == 1
+    item = rows[0]
+    assert item["latest_price"] == 104.0
+    assert item["change_pct"] == 4.0
+    assert item["actual_n"] == 6
+    assert item["effective_n"] == 10
+    assert item["insufficient_days"] == 4
