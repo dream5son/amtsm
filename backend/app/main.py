@@ -5,6 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
 from app.api.health import router as health_router
+from app.api.jobs import router as jobs_router
 from app.api.stocks import router as stocks_router
 from app.api.strategy import router as strategy_router
 from app.api.watchlist import router as watchlist_router
@@ -36,6 +37,7 @@ app.add_middleware(
 )
 
 app.include_router(health_router)
+app.include_router(jobs_router)
 app.include_router(stocks_router)
 app.include_router(watchlist_router)
 app.include_router(strategy_router)

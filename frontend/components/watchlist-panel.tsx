@@ -2,10 +2,12 @@
 
 import { FormEvent, useEffect, useMemo, useState } from "react";
 
+import JobLogDialog from "@/components/job-log-dialog";
 import StatusBadge from "@/components/status-badge";
 import {
   createWatchlist,
   fetchWatchlist,
+  getJobStatusSSEUrl,
   removeWatchlist,
   searchStocks,
   StockSearchItem,
@@ -37,9 +39,26 @@ export default function WatchlistPanel() {
   const [addingCode, setAddingCode] = useState<string | null>(null);
   const [removingCode, setRemovingCode] = useState<string | null>(null);
   const [message, setMessage] = useState("");
+  const [jobStatus, setJobStatus] = useState("未开始");
+  const [sseError, setSseError] = useState(false);
+  const [logDialogOpen, setLogDialogOpen] = useState(false);
 
   useEffect(() => {
     void loadWatchlist();
+  }, []);
+
+  // SSE subscription for job status
+  useEffect(() => {
+    const url = getJobStatusSSEUrl();
+    const es = new EventSource(url);
+    es.onmessage = (event) => {
+      setJobStatus(event.data);
+      setSseError(false);
+    };
+    es.onerror = () => {
+      setSseError(true);
+    };
+    return () => es.close();
   }, []);
 
   async function loadWatchlist() {
@@ -210,6 +229,7 @@ export default function WatchlistPanel() {
                 <th className="py-2 text-left font-medium">最新价</th>
                 <th className="py-2 text-left font-medium">涨跌幅</th>
                 <th className="py-2 text-left font-medium">状态</th>
+                <th className="py-2 text-left font-medium">定时任务</th>
                 <th className="py-2 text-left font-medium">备注</th>
                 <th className="py-2 text-left font-medium">操作</th>
               </tr>
@@ -233,6 +253,28 @@ export default function WatchlistPanel() {
                   </td>
                   <td className="py-2 pr-2">
                     <StatusBadge status={item.status} />
+                  </td>
+                  <td className="py-2 pr-2">
+                    <span
+                      className={
+                        jobStatus === "执行中"
+                          ? "inline-flex items-center gap-1 rounded-full bg-blue-100 px-2 py-0.5 text-xs text-blue-700"
+                          : jobStatus === "执行失败"
+                            ? "inline-flex items-center rounded-full bg-rose-100 px-2 py-0.5 text-xs text-rose-700"
+                            : "inline-flex items-center rounded-full bg-slate-100 px-2 py-0.5 text-xs text-slate-600"
+                      }
+                    >
+                      {jobStatus === "执行中" && <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-blue-500" />}
+                      {jobStatus}
+                    </span>
+                    {sseError && <span className="ml-1 text-xs text-amber-600">⚠</span>}
+                    <button
+                      type="button"
+                      onClick={() => setLogDialogOpen(true)}
+                      className="ml-2 text-xs text-sky-600 underline hover:text-sky-800"
+                    >
+                      查看日志
+                    </button>
                   </td>
                   <td className="py-2 pr-2 text-slate-600">
                     {item.insufficient_days && item.insufficient_days > 0 ? `数据不足 ${item.insufficient_days} 天` : "--"}
@@ -259,6 +301,8 @@ export default function WatchlistPanel() {
       {message ? (
         <div className="mt-4 rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-700 shadow-sm">{message}</div>
       ) : null}
+
+      <JobLogDialog open={logDialogOpen} onClose={() => setLogDialogOpen(false)} />
     </section>
   );
 }

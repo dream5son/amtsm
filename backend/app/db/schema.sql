@@ -57,3 +57,33 @@ CREATE TABLE IF NOT EXISTS alert_logs (
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_freq_limit
 ON alert_logs(stock_code, trade_date, signal_type);
+
+CREATE TABLE IF NOT EXISTS baseline_job_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_name VARCHAR(50) NOT NULL,
+    trade_date DATE NOT NULL,
+    status VARCHAR(10) NOT NULL DEFAULT 'RUNNING',
+    started_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    finished_at DATETIME,
+    total_count INTEGER DEFAULT 0,
+    success_count INTEGER DEFAULT 0,
+    failed_count INTEGER DEFAULT 0,
+    error_summary TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS baseline_job_log_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_log_id INTEGER NOT NULL,
+    stock_code VARCHAR(10) NOT NULL,
+    stock_name VARCHAR(50),
+    strategy_n INTEGER NOT NULL,
+    actual_n INTEGER,
+    status VARCHAR(10) NOT NULL,
+    low_min REAL,
+    high_max REAL,
+    error_message TEXT,
+    processed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (job_log_id) REFERENCES baseline_job_logs(id)
+);
