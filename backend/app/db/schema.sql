@@ -57,12 +57,3 @@ CREATE TABLE IF NOT EXISTS alert_logs (
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_freq_limit
 ON alert_logs(stock_code, trade_date, signal_type);
-
-INSERT OR IGNORE INTO strategy_config (
-    id,
-    global_buy_n,
-    global_buy_x,
-    global_sell_n,
-    global_sell_y
-)
-VALUES (1, 60, 1.10, 60, 0.90);

@@ -40,5 +40,17 @@ def init_db() -> None:
     with get_db() as conn:
         conn.executescript(sql)
         _ensure_strategy_columns(conn)
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO strategy_config (
+                id,
+                global_buy_n,
+                global_buy_x,
+                global_sell_n,
+                global_sell_y
+            )
+            VALUES (1, 60, 1.10, 60, 0.90)
+            """
+        )
         conn.commit()
 
