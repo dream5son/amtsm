@@ -6,6 +6,7 @@ from app.config import settings
 from app.db.baseline_job_log_repo import create_job_log, finish_job_log, insert_log_item
 from app.db.connection import get_db
 from app.db.daily_baseline_repo import get_baselines_by_date, upsert_baseline
+from app.db.daily_snapshot_repo import upsert_snapshot
 from app.engine.baseline_calculator import InsufficientDataError, compute_baseline
 from app.engine.market_hours import (
     SH_TZ,
@@ -20,9 +21,11 @@ from app.services.alert_service import (
 )
 from app.services.market_data_service import (
     MarketDataUnavailableError,
+    MissingTradeDayBarError,
     StockDataFetchError,
     fetch_daily_bars,
     fetch_realtime_quotes_batch,
+    fetch_trade_day_bar,
 )
 
 logger = logging.getLogger(__name__)
@@ -343,4 +346,108 @@ def _emit_signal_candidates(candidates: list[dict]) -> None:
 
 
 def daily_snapshot_task() -> None:
-    logger.info("daily_snapshot_task triggered")
+    """Post-close job: persist OHLCV + turnover snapshots for NORMAL watchlist stocks."""
+    today = datetime.now(SH_TZ).date()
+    trade_date = today.isoformat()
+    logger.info("daily_snapshot_task triggered trade_date=%s", trade_date)
+
+    if not is_trading_day(today):
+        logger.info(
+            "daily_snapshot_task skipped: not trading day (%s)", trade_date
+        )
+        return
+
+    with get_db() as conn:
+        rows = conn.execute(
+            """
+            SELECT stock_code, stock_name
+            FROM watchlist
+            WHERE status = 'NORMAL'
+            ORDER BY stock_code
+            """
+        ).fetchall()
+    stocks = [dict(row) for row in rows]
+
+    total = len(stocks)
+    if total == 0:
+        logger.info(
+            "daily_snapshot_task finished: no NORMAL stocks (trade_date=%s)",
+            trade_date,
+        )
+        return
+
+    success_count = 0
+    failed_count = 0
+    skipped_count = 0
+
+    for stock in stocks:
+        code = stock["stock_code"]
+        name = stock["stock_name"]
+        try:
+            bar = fetch_trade_day_bar(
+                code,
+                today,
+                retries=settings.snapshot_fetch_retries,
+                retry_backoff_seconds=settings.snapshot_fetch_retry_backoff_seconds,
+            )
+            upsert_snapshot(
+                stock_code=code,
+                trade_date=trade_date,
+                open_price=float(bar["open"]),
+                high_price=float(bar["high"]),
+                low_price=float(bar["low"]),
+                close_price=float(bar["close"]),
+                volume=float(bar["volume"]),
+                turnover_rate=(
+                    float(bar["turnover_rate"])
+                    if bar.get("turnover_rate") is not None
+                    else None
+                ),
+            )
+            success_count += 1
+            logger.debug(
+                "daily_snapshot_task upserted %s (%s) close=%.4f",
+                code,
+                name,
+                float(bar["close"]),
+            )
+        except MissingTradeDayBarError as exc:
+            skipped_count += 1
+            logger.warning(
+                "daily_snapshot_task skipped %s (%s): %s", code, name, exc
+            )
+        except MarketDataUnavailableError as exc:
+            remaining = total - success_count - failed_count - skipped_count
+            failed_count += remaining
+            logger.error(
+                "daily_snapshot_task aborted: market data unavailable at %s: %s "
+                "(success=%d failed=%d skipped=%d)",
+                code,
+                exc,
+                success_count,
+                failed_count,
+                skipped_count,
+            )
+            break
+        except (StockDataFetchError, Exception) as exc:  # noqa: BLE001
+            failed_count += 1
+            logger.warning(
+                "daily_snapshot_task failed %s (%s): %s", code, name, exc
+            )
+
+    logger.info(
+        "daily_snapshot_task finished trade_date=%s total=%d success=%d failed=%d skipped=%d",
+        trade_date,
+        total,
+        success_count,
+        failed_count,
+        skipped_count,
+    )
+    if failed_count > 0:
+        logger.error(
+            "daily_snapshot_task alert: %d failure(s) on %s (success=%d skipped=%d)",
+            failed_count,
+            trade_date,
+            success_count,
+            skipped_count,
+        )

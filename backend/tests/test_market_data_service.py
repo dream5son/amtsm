@@ -33,6 +33,7 @@ def _make_em_df() -> pd.DataFrame:
         "最低": 9.5,
         "收盘": 10.5,
         "成交量": 100000,
+        "换手率": 3.14,
     }])
 
 
@@ -62,6 +63,7 @@ def test_high_available_akshare_uses_first_source() -> None:
 
     assert len(bars) == 1
     assert bars[0]["close"] == 10.5
+    assert bars[0]["turnover_rate"] == pytest.approx(3.14)
     mock_em.assert_called_once()
 
 
