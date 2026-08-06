@@ -9,6 +9,7 @@ from app.db.connection import get_db
 from app.db.daily_baseline_repo import get_baselines_by_date, upsert_baseline
 from app.engine.baseline_calculator import InsufficientDataError, compute_baseline
 from app.engine.state import runtime_state
+from app.services.alert_service import process_buy_candidates
 from app.services.market_data_service import (
     MarketDataUnavailableError,
     StockDataFetchError,
@@ -226,6 +227,14 @@ def market_polling_task() -> None:
 
             if signal_type:
                 runtime_state.signal_state[code] = signal_type
+                if signal_type == "BUY":
+                    baseline_price = float(baseline["low_min"])
+                    used_coeff = float(stock["effective_x"])
+                    buy_candidates += 1
+                else:
+                    baseline_price = float(baseline["high_max"])
+                    used_coeff = float(stock["effective_y"])
+                    sell_candidates += 1
                 candidates.append(
                     {
                         "stock_code": code,
@@ -233,12 +242,11 @@ def market_polling_task() -> None:
                         "signal_type": signal_type,
                         "price": price,
                         "trade_date": trade_date,
+                        "baseline_price": baseline_price,
+                        "used_coeff": used_coeff,
+                        "actual_n": int(baseline["actual_n"]),
                     }
                 )
-                if signal_type == "BUY":
-                    buy_candidates += 1
-                else:
-                    sell_candidates += 1
 
     _emit_signal_candidates(candidates)
 
@@ -284,6 +292,8 @@ def _emit_signal_candidates(candidates: list[dict]) -> None:
     if not candidates:
         return
     logger.info("market_polling_task candidates count=%d", len(candidates))
+    # User story 08: BUY WeChat alerts. SELL handoff is user story 09.
+    process_buy_candidates(candidates)
 
 
 def daily_snapshot_task() -> None:
