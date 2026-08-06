@@ -1,13 +1,14 @@
 import logging
+import sqlite3
 from datetime import date, datetime, time
 from zoneinfo import ZoneInfo
 
+from app.config import settings
 from app.db.baseline_job_log_repo import create_job_log, finish_job_log, insert_log_item
-from app.db.daily_baseline_repo import get_baselines_by_date, upsert_baseline
 from app.db.connection import get_db
+from app.db.daily_baseline_repo import get_baselines_by_date, upsert_baseline
 from app.engine.baseline_calculator import InsufficientDataError, compute_baseline
 from app.engine.state import runtime_state
-from app.config import settings
 from app.services.market_data_service import (
     MarketDataUnavailableError,
     StockDataFetchError,
@@ -27,7 +28,7 @@ AFTERNOON_END = time(15, 0, 0)
 
 def baseline_precompute_task() -> None:
     logger.info("baseline_precompute_task triggered")
-    today = date.today().isoformat()
+    today = datetime.now(SH_TZ).date().isoformat()
 
     runtime_state.job_status = "RUNNING"
 
@@ -69,7 +70,7 @@ def baseline_precompute_task() -> None:
 
             try:
                 insert_log_item(job_log_id, code, name, n, actual_n, "SUCCESS", low_min, high_max)
-            except Exception as log_exc:
+            except sqlite3.Error as log_exc:
                 logger.error("Failed to write log item for %s: %s", code, log_exc)
 
             success_count += 1
@@ -81,8 +82,8 @@ def baseline_precompute_task() -> None:
             errors.append(f"Market data unavailable: {exc}")
             try:
                 insert_log_item(job_log_id, code, name, n, None, "FAILED", error_message=str(exc))
-            except Exception:
-                pass
+            except sqlite3.Error as log_exc:
+                logger.error("Failed to write failed log item for %s: %s", code, log_exc)
             break
 
         except (StockDataFetchError, InsufficientDataError) as exc:
@@ -91,17 +92,17 @@ def baseline_precompute_task() -> None:
             errors.append(f"{code}: {exc}")
             try:
                 insert_log_item(job_log_id, code, name, n, None, "FAILED", error_message=str(exc))
-            except Exception:
-                pass
+            except sqlite3.Error as log_exc:
+                logger.error("Failed to write failed log item for %s: %s", code, log_exc)
 
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             logger.warning("Unexpected error for %s: %s", code, exc)
             failed_count += 1
             errors.append(f"{code}: {exc}")
             try:
                 insert_log_item(job_log_id, code, name, n, None, "FAILED", error_message=str(exc))
-            except Exception:
-                pass
+            except sqlite3.Error as log_exc:
+                logger.error("Failed to write failed log item for %s: %s", code, log_exc)
 
     final_status = "FAILED" if failed_count > 0 else "SUCCESS"
     error_summary = "; ".join(errors[:10]) if errors else None

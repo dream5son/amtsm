@@ -1,7 +1,8 @@
 """Market data service - fetches forward-adjusted daily bar data via akshare."""
 
 import logging
-from datetime import date, timedelta
+import math
+from datetime import UTC, date, datetime, timedelta
 
 import akshare as ak
 import httpx
@@ -56,7 +57,7 @@ def fetch_realtime_quotes_batch(
             )
             response.raise_for_status()
             return _parse_sina_realtime_quotes(response.text, stock_codes)
-        except Exception as exc:
+        except (httpx.HTTPError, ValueError) as exc:
             last_exc = exc
 
     msg = str(last_exc) if last_exc else "unknown error"
@@ -119,10 +120,10 @@ def _parse_sina_realtime_quotes(raw_text: str, stock_codes: list[str]) -> dict[s
 def _to_float(value: str) -> float | None:
     try:
         number = float(value)
-        if number != number:
+        if math.isnan(number):
             return None
         return number
-    except Exception:
+    except (TypeError, ValueError):
         return None
 
 
@@ -133,7 +134,7 @@ def fetch_daily_bars(stock_code: str, n: int, end_date: date | None = None) -> l
     The list is ordered oldest-first and does NOT include end_date itself.
     """
     if end_date is None:
-        end_date = date.today()
+        end_date = datetime.now(UTC).date()
 
     # We fetch extra days to account for non-trading days
     start_date = end_date - timedelta(days=n * 3 + 30)

@@ -1,7 +1,11 @@
 from apscheduler.schedulers.background import BackgroundScheduler
 
 from app.config import settings
-from app.engine.tasks import baseline_precompute_task, daily_snapshot_task, market_polling_task
+from app.engine.tasks import (
+    baseline_precompute_task,
+    daily_snapshot_task,
+    market_polling_task,
+)
 
 
 def create_scheduler() -> BackgroundScheduler:

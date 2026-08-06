@@ -135,7 +135,7 @@ class _FrozenDateTime:
     def __init__(self, now: datetime) -> None:
         self._now = now
 
-    def now(self, tz=None) -> datetime:  # noqa: ANN001
+    def now(self, tz=None) -> datetime:
         if tz is None:
             return self._now
         return self._now.astimezone(tz)
