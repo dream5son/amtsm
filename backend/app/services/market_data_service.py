@@ -246,9 +246,12 @@ def high_available_akshare(
 def fetch_realtime_quotes_batch(
     stock_codes: list[str],
     timeout_seconds: float = 3.0,
-    retries: int = 1,
+    retries: int = 3,
+    retry_backoff_seconds: float = 0.5,
 ) -> dict[str, dict]:
-    """Fetch realtime quotes from Sina in batch.
+    """Fetch realtime quotes from Sina in batch with exponential backoff.
+
+    Retries up to ``retries`` times after the first failure (user story 12).
 
     Returns mapping:
       code -> {
@@ -259,6 +262,7 @@ def fetch_realtime_quotes_batch(
         "quote_date": str | None,
         "quote_time": str | None,
         "is_halted": bool,
+        "has_quote": bool,
       }
     """
     if not stock_codes:
@@ -272,8 +276,10 @@ def fetch_realtime_quotes_batch(
     url = f"https://hq.sinajs.cn/list={query_codes}"
     headers = {"Referer": "https://finance.sina.com.cn"}
 
+    attempts = max(1, retries + 1)
+    backoff = max(0.0, float(retry_backoff_seconds))
     last_exc: Exception | None = None
-    for _ in range(max(1, retries + 1)):
+    for attempt in range(attempts):
         try:
             response = httpx.get(
                 url,
@@ -284,9 +290,22 @@ def fetch_realtime_quotes_batch(
             return _parse_sina_realtime_quotes(response.text, stock_codes)
         except (httpx.HTTPError, ValueError) as exc:
             last_exc = exc
+            if attempt + 1 >= attempts:
+                break
+            sleep_seconds = backoff * (2**attempt)
+            logger.warning(
+                "fetch_realtime_quotes_batch retry %d/%d codes=%s sleep=%.2fs error=%s",
+                attempt + 1,
+                retries,
+                ",".join(stock_codes[:5]),
+                sleep_seconds,
+                exc,
+            )
+            if sleep_seconds > 0:
+                time.sleep(sleep_seconds)
 
     msg = str(last_exc) if last_exc else "unknown error"
-    if "timed out" in msg.lower() or "connection" in msg.lower():
+    if "timed out" in msg.lower() or "timeout" in msg.lower() or "connection" in msg.lower():
         raise MarketDataUnavailableError(f"Realtime market data unavailable: {msg}") from last_exc
     raise StockDataFetchError(f"Failed to fetch realtime quotes: {msg}") from last_exc
 
@@ -306,14 +325,16 @@ def _parse_sina_realtime_quotes(raw_text: str, stock_codes: list[str]) -> dict[s
         if code not in stock_codes:
             continue
 
-        name = fields[0].strip() if len(fields) >= 1 else code
+        # Empty payload means the code was acknowledged but has no usable fields.
+        has_quote = bool(payload) and len(fields) >= 4
+        name = fields[0].strip() if len(fields) >= 1 and fields[0].strip() else code
         open_price = _to_float(fields[1]) if len(fields) >= 2 else None
         prev_close = _to_float(fields[2]) if len(fields) >= 3 else None
         price = _to_float(fields[3]) if len(fields) >= 4 else None
         quote_date = fields[30].strip() if len(fields) >= 31 and fields[30].strip() else None
         quote_time = fields[31].strip() if len(fields) >= 32 and fields[31].strip() else None
 
-        is_halted = price is None or price <= 0
+        is_halted = has_quote and (price is None or price <= 0)
 
         result[code] = {
             "stock_name": name,
@@ -323,6 +344,7 @@ def _parse_sina_realtime_quotes(raw_text: str, stock_codes: list[str]) -> dict[s
             "quote_date": quote_date,
             "quote_time": quote_time,
             "is_halted": is_halted,
+            "has_quote": has_quote,
         }
 
     for code in stock_codes:
@@ -335,7 +357,8 @@ def _parse_sina_realtime_quotes(raw_text: str, stock_codes: list[str]) -> dict[s
                 "prev_close": None,
                 "quote_date": None,
                 "quote_time": None,
-                "is_halted": True,
+                "is_halted": False,
+                "has_quote": False,
             },
         )
 

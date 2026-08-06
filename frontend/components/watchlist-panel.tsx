@@ -6,6 +6,7 @@ import JobLogDialog from "@/components/job-log-dialog";
 import StatusBadge from "@/components/status-badge";
 import {
   createWatchlist,
+  fetchSystemStatus,
   fetchWatchlist,
   getJobStatusSSEUrl,
   removeWatchlist,
@@ -52,9 +53,34 @@ export default function WatchlistPanel() {
   const [jobStatus, setJobStatus] = useState("未开始");
   const [sseError, setSseError] = useState(false);
   const [logDialogOpen, setLogDialogOpen] = useState(false);
+  const [quoteDelay, setQuoteDelay] = useState(false);
 
   useEffect(() => {
     void loadWatchlist();
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function pollSystemStatus() {
+      try {
+        const status = await fetchSystemStatus();
+        if (!cancelled) {
+          setQuoteDelay(Boolean(status.quote_delay));
+        }
+      } catch {
+        // Keep last known flag; health endpoint is best-effort.
+      }
+    }
+
+    void pollSystemStatus();
+    const timer = window.setInterval(() => {
+      void pollSystemStatus();
+    }, 5000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
   }, []);
 
   // SSE subscription for job status
@@ -167,6 +193,15 @@ export default function WatchlistPanel() {
           {showAddPanel ? "收起添加" : "添加股票"}
         </button>
       </div>
+
+      {quoteDelay ? (
+        <div
+          role="status"
+          className="mb-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900"
+        >
+          行情延迟：实时行情接口连续失败，系统已标记延迟状态，信号判定可能滞后。
+        </div>
+      ) : null}
 
       {showAddPanel ? (
         <div className="mb-4 rounded-xl border border-slate-200 bg-slate-50 p-3">

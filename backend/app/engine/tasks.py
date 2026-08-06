@@ -13,6 +13,10 @@ from app.engine.market_hours import (
     is_in_trading_session,
     is_trading_day,
 )
+from app.engine.resilience import (
+    record_poll_round_failure,
+    record_poll_round_success,
+)
 from app.engine.state import runtime_state
 from app.services.alert_service import (
     is_limit_up,
@@ -26,6 +30,10 @@ from app.services.market_data_service import (
     fetch_daily_bars,
     fetch_realtime_quotes_batch,
     fetch_trade_day_bar,
+)
+from app.services.watchlist_service import (
+    restore_halted_to_normal,
+    update_watchlist_status,
 )
 
 logger = logging.getLogger(__name__)
@@ -43,6 +51,11 @@ __all__ = [
 
 
 def baseline_precompute_task() -> None:
+    """Pre-market baseline job using forward-adjusted (qfq) daily bars.
+
+    Also attempts to restore HALT stocks to NORMAL for the new session so
+    monitoring can resume after prior halt markings (user story 12).
+    """
     logger.info("baseline_precompute_task triggered")
     today = datetime.now(SH_TZ).date().isoformat()
 
@@ -50,28 +63,31 @@ def baseline_precompute_task() -> None:
 
     job_log_id = create_job_log(JOB_NAME, today)
 
-    # Load all NORMAL stocks with effective N
+    # Load NORMAL + HALT (exclude DELISTED). HALT may resume after pre-market.
     with get_db() as conn:
         rows = conn.execute(
-            """SELECT w.stock_code, w.stock_name,
+            """SELECT w.stock_code, w.stock_name, w.status,
                       COALESCE(w.custom_n, CASE WHEN sc.global_buy_n >= sc.global_sell_n THEN sc.global_buy_n ELSE sc.global_sell_n END) AS effective_n
                FROM watchlist w
                JOIN strategy_config sc ON sc.id = 1
-               WHERE w.status = 'NORMAL'"""
+               WHERE w.status IN ('NORMAL', 'HALT')"""
         ).fetchall()
     stocks = [dict(r) for r in rows]
 
     total = len(stocks)
     success_count = 0
     failed_count = 0
+    restored_codes: list[str] = []
     errors: list[str] = []
 
     for stock in stocks:
         code = stock["stock_code"]
         name = stock["stock_name"]
         n = stock["effective_n"]
+        prior_status = stock["status"]
 
         try:
+            # Always forward-adjusted so ex-dividend days stay aligned with realtime P.
             bars = fetch_daily_bars(code, n)
             low_min, high_max, actual_n = compute_baseline(bars, n)
             upsert_baseline(code, today, low_min, high_max, actual_n)
@@ -84,6 +100,15 @@ def baseline_precompute_task() -> None:
                 "trade_date": today,
             }
 
+            if prior_status == "HALT":
+                restored_codes.append(code)
+                logger.info(
+                    "halt_resume_candidate stock=%s trade_date=%s actual_n=%d",
+                    code,
+                    today,
+                    actual_n,
+                )
+
             try:
                 insert_log_item(
                     job_log_id, code, name, n, actual_n, "SUCCESS", low_min, high_max
@@ -91,11 +116,23 @@ def baseline_precompute_task() -> None:
             except sqlite3.Error as log_exc:
                 logger.error("Failed to write log item for %s: %s", code, log_exc)
 
+            if actual_n < n:
+                logger.info(
+                    "baseline_degraded stock=%s strategy_n=%d actual_n=%d "
+                    "insufficient_days=%d",
+                    code,
+                    n,
+                    actual_n,
+                    n - actual_n,
+                )
+
             success_count += 1
 
         except MarketDataUnavailableError as exc:
             # Global failure - mark all remaining as failed
-            logger.error("Market data unavailable: %s", exc)
+            logger.error(
+                "baseline_market_data_unavailable stock=%s error=%s", code, exc
+            )
             failed_count += total - success_count
             errors.append(f"Market data unavailable: {exc}")
             try:
@@ -109,7 +146,9 @@ def baseline_precompute_task() -> None:
             break
 
         except (StockDataFetchError, InsufficientDataError) as exc:
-            logger.warning("Failed for %s: %s", code, exc)
+            logger.warning(
+                "baseline_stock_failed stock=%s error=%s", code, exc
+            )
             failed_count += 1
             errors.append(f"{code}: {exc}")
             try:
@@ -122,7 +161,9 @@ def baseline_precompute_task() -> None:
                 )
 
         except Exception as exc:  # noqa: BLE001
-            logger.warning("Unexpected error for %s: %s", code, exc)
+            logger.warning(
+                "baseline_unexpected_error stock=%s error=%s", code, exc
+            )
             failed_count += 1
             errors.append(f"{code}: {exc}")
             try:
@@ -133,6 +174,14 @@ def baseline_precompute_task() -> None:
                 logger.error(
                     "Failed to write failed log item for %s: %s", code, log_exc
                 )
+
+    if restored_codes:
+        restored = restore_halted_to_normal(restored_codes)
+        logger.info(
+            "halt_status_restored count=%d codes=%s",
+            restored,
+            ",".join(restored_codes[:20]),
+        )
 
     final_status = "FAILED" if failed_count > 0 else "SUCCESS"
     error_summary = "; ".join(errors[:10]) if errors else None
@@ -209,9 +258,11 @@ def market_polling_task() -> None:
     total_batches = (len(valid_stocks) + batch_size - 1) // batch_size
 
     batch_errors = 0
+    batches_attempted = 0
     success_quotes = 0
     skipped_invalid_quote = 0
     skipped_halted = 0
+    halted_persisted = 0
     buy_candidates = 0
     sell_candidates = 0
     candidates: list[dict] = []
@@ -219,16 +270,20 @@ def market_polling_task() -> None:
     for i in range(0, len(valid_stocks), batch_size):
         batch = valid_stocks[i : i + batch_size]
         codes = [item["stock_code"] for item in batch]
+        batches_attempted += 1
         try:
             quotes = fetch_realtime_quotes_batch(
                 codes,
                 timeout_seconds=settings.polling_request_timeout_seconds,
                 retries=settings.polling_request_retries,
+                retry_backoff_seconds=settings.polling_request_retry_backoff_seconds,
             )
         except (MarketDataUnavailableError, StockDataFetchError, ValueError) as exc:
             batch_errors += 1
             logger.warning(
-                "market_polling_task batch failed (%s): %s", ",".join(codes), exc
+                "market_polling_batch_failed codes=%s error=%s",
+                ",".join(codes),
+                exc,
             )
             continue
 
@@ -238,11 +293,31 @@ def market_polling_task() -> None:
             price = quote.get("price")
             quote_date = quote.get("quote_date")
             is_halted = bool(quote.get("is_halted"))
+            if "has_quote" in quote:
+                has_quote = bool(quote["has_quote"])
+            else:
+                # Backward-compatible for callers/tests that omit has_quote.
+                has_quote = price is not None
 
-            if is_halted:
+            # Persist HALT only when the provider returned a quote payload indicating halt.
+            if is_halted and has_quote:
                 skipped_halted += 1
+                try:
+                    updated = update_watchlist_status(code, "HALT")
+                    if updated:
+                        halted_persisted += 1
+                        logger.info(
+                            "watchlist_status_halted stock=%s trade_date=%s",
+                            code,
+                            trade_date,
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "watchlist_halt_persist_failed stock=%s error=%s", code, exc
+                    )
                 continue
-            if price is None or price <= 0 or quote_date != trade_date:
+
+            if not has_quote or price is None or price <= 0 or quote_date != trade_date:
                 skipped_invalid_quote += 1
                 continue
 
@@ -291,20 +366,34 @@ def market_polling_task() -> None:
                     )
                 candidates.append(candidate)
 
+    if batches_attempted > 0 and batch_errors == batches_attempted:
+        record_poll_round_failure(
+            trade_date=trade_date,
+            reason=f"all {batches_attempted} realtime batch(es) failed",
+        )
+    elif batch_errors < batches_attempted:
+        # At least one batch succeeded — clear delay / failure streak.
+        record_poll_round_success()
+
     _emit_signal_candidates(candidates)
 
     logger.info(
-        "market_polling_task summary trade_date=%s batches=%d batch_errors=%d success_quotes=%d skipped_no_baseline=%d "
-        "skipped_halted=%d skipped_invalid_quote=%d buy_candidates=%d sell_candidates=%d",
+        "market_polling_task summary trade_date=%s batches=%d batch_errors=%d "
+        "success_quotes=%d skipped_no_baseline=%d skipped_halted=%d "
+        "halted_persisted=%d skipped_invalid_quote=%d buy_candidates=%d "
+        "sell_candidates=%d quote_delay=%s consecutive_failures=%d",
         trade_date,
         total_batches,
         batch_errors,
         success_quotes,
         skipped_no_baseline,
         skipped_halted,
+        halted_persisted,
         skipped_invalid_quote,
         buy_candidates,
         sell_candidates,
+        runtime_state.quote_delay,
+        runtime_state.consecutive_poll_failures,
     )
 
 

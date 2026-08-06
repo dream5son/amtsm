@@ -21,8 +21,10 @@ def test_parse_sina_realtime_quotes() -> None:
     assert data["sh600519"]["price"] == 101.0
     assert data["sh600519"]["quote_date"] == "2026-08-05"
     assert data["sh600519"]["is_halted"] is False
+    assert data["sh600519"]["has_quote"] is True
     assert data["sz000001"]["price"] is None
-    assert data["sz000001"]["is_halted"] is True
+    assert data["sz000001"]["has_quote"] is False
+    assert data["sz000001"]["is_halted"] is False
 
 
 def _make_em_df() -> pd.DataFrame:

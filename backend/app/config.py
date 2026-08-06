@@ -23,7 +23,11 @@ class Settings(BaseSettings):
     polling_interval_seconds: int = 5
     polling_batch_size: int = 50
     polling_request_timeout_seconds: float = 3.0
-    polling_request_retries: int = 1
+    # Max retry attempts after the first failed realtime fetch (user story 12).
+    polling_request_retries: int = 3
+    polling_request_retry_backoff_seconds: float = 0.5
+    # Consecutive failed poll rounds before marking quote delay.
+    polling_consecutive_failure_threshold: int = 5
 
     # WeChat enterprise notifier (user story 07)
     wechat_corp_id: str = ""

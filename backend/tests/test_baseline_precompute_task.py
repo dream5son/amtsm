@@ -12,7 +12,7 @@ def test_baseline_precompute_task_success(mock_get_db, mock_fetch):
     mock_conn.__enter__ = MagicMock(return_value=mock_conn)
     mock_conn.__exit__ = MagicMock(return_value=False)
 
-    mock_row = {"stock_code": "600519", "stock_name": "贵州茅台", "effective_n": 60}
+    mock_row = {"stock_code": "600519", "stock_name": "贵州茅台", "effective_n": 60, "status": "NORMAL"}
 
     class FakeRow:
         def __init__(self, data):
@@ -52,8 +52,8 @@ def test_baseline_precompute_task_individual_failure(mock_get_db, mock_fetch):
     mock_conn.__exit__ = MagicMock(return_value=False)
 
     rows = [
-        {"stock_code": "600519", "stock_name": "贵州茅台", "effective_n": 60},
-        {"stock_code": "000001", "stock_name": "平安银行", "effective_n": 60},
+        {"stock_code": "600519", "stock_name": "贵州茅台", "effective_n": 60, "status": "NORMAL"},
+        {"stock_code": "000001", "stock_name": "平安银行", "effective_n": 60, "status": "NORMAL"},
     ]
 
     class FakeRow:
