@@ -52,6 +52,8 @@ CREATE TABLE IF NOT EXISTS alert_logs (
     baseline_price REAL NOT NULL,
     used_coeff REAL NOT NULL,
     sent_status VARCHAR(10) NOT NULL,
+    error_code VARCHAR(32),
+    error_message TEXT,
     sent_time DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 

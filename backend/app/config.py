@@ -31,5 +31,9 @@ class Settings(BaseSettings):
     wechat_request_timeout_seconds: float = 10.0
     wechat_self_check_on_startup: bool = True
 
+    # Buy/sell alert delivery (user story 08+)
+    alert_send_max_retries: int = 3
+    alert_send_retry_backoff_seconds: float = 0.5
+
 
 settings = Settings()

@@ -33,6 +33,18 @@ def _ensure_strategy_columns(conn) -> None:
     )
 
 
+def _ensure_alert_log_columns(conn) -> None:
+    existing_columns = {
+        row["name"] for row in conn.execute("PRAGMA table_info(alert_logs)").fetchall()
+    }
+    if not existing_columns:
+        return
+    if "error_code" not in existing_columns:
+        conn.execute("ALTER TABLE alert_logs ADD COLUMN error_code VARCHAR(32)")
+    if "error_message" not in existing_columns:
+        conn.execute("ALTER TABLE alert_logs ADD COLUMN error_message TEXT")
+
+
 def init_db() -> None:
     schema_path = Path(__file__).with_name("schema.sql")
     sql = schema_path.read_text(encoding="utf-8")
@@ -40,6 +52,7 @@ def init_db() -> None:
     with get_db() as conn:
         conn.executescript(sql)
         _ensure_strategy_columns(conn)
+        _ensure_alert_log_columns(conn)
         conn.execute(
             """
             INSERT OR IGNORE INTO strategy_config (
