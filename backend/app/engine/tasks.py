@@ -1,13 +1,17 @@
 import logging
 import sqlite3
-from datetime import date, datetime, time
-from zoneinfo import ZoneInfo
+from datetime import datetime
 
 from app.config import settings
 from app.db.baseline_job_log_repo import create_job_log, finish_job_log, insert_log_item
 from app.db.connection import get_db
 from app.db.daily_baseline_repo import get_baselines_by_date, upsert_baseline
 from app.engine.baseline_calculator import InsufficientDataError, compute_baseline
+from app.engine.market_hours import (
+    SH_TZ,
+    is_in_trading_session,
+    is_trading_day,
+)
 from app.engine.state import runtime_state
 from app.services.alert_service import (
     is_limit_up,
@@ -24,11 +28,15 @@ from app.services.market_data_service import (
 logger = logging.getLogger(__name__)
 
 JOB_NAME = "daily-baseline-precompute"
-SH_TZ = ZoneInfo("Asia/Shanghai")
-MORNING_START = time(9, 30, 0)
-MORNING_END = time(11, 30, 0)
-AFTERNOON_START = time(13, 0, 0)
-AFTERNOON_END = time(15, 0, 0)
+
+# Re-export for existing tests / callers.
+__all__ = [
+    "baseline_precompute_task",
+    "daily_snapshot_task",
+    "is_in_trading_session",
+    "is_trading_day",
+    "market_polling_task",
+]
 
 
 def baseline_precompute_task() -> None:
@@ -137,16 +145,6 @@ def baseline_precompute_task() -> None:
         success_count,
         failed_count,
     )
-
-
-def is_trading_day(current_date: date) -> bool:
-    return current_date.weekday() < 5
-
-
-def is_in_trading_session(current_time: time) -> bool:
-    in_morning = MORNING_START <= current_time <= MORNING_END
-    in_afternoon = AFTERNOON_START <= current_time <= AFTERNOON_END
-    return in_morning or in_afternoon
 
 
 def market_polling_task() -> None:
@@ -311,6 +309,8 @@ def _sync_signal_trade_date(trade_date: str) -> None:
     if runtime_state.signal_trade_date != trade_date:
         runtime_state.signal_trade_date = trade_date
         runtime_state.signal_state.clear()
+        # Keys include trade_date; clear to keep the O(1) set bounded across days.
+        runtime_state.sent_signal_keys.clear()
 
 
 def _ensure_baseline_cache_for_trade_date(trade_date: str) -> bool:

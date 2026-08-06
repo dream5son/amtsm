@@ -6,6 +6,8 @@ from datetime import datetime
 from unittest.mock import MagicMock
 from zoneinfo import ZoneInfo
 
+import pytest
+
 from app.config import settings
 from app.db.connection import get_db
 from app.db.init_db import init_db
@@ -24,6 +26,15 @@ from app.services.alert_service import (
 )
 from app.services.watchlist_service import add_watchlist
 from app.services.wechat_notifier import ErrorCategory, SendResult
+
+
+@pytest.fixture(autouse=True)
+def _open_alert_window(monkeypatch) -> None:
+    """US09 focuses on sell content/limit-up; DND is covered by US10."""
+    monkeypatch.setattr(
+        "app.services.alert_service.is_alert_window_open",
+        lambda **_kwargs: True,
+    )
 
 
 def _candidate(**overrides) -> dict:

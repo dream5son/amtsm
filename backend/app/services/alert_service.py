@@ -1,8 +1,9 @@
-"""Buy/sell signal alert pipeline (user stories 08 & 09).
+"""Buy/sell signal alert pipeline (user stories 08, 09 & 10).
 
 Consumes BUY/SELL candidates from the intraday polling task, enforces
-once-per-day frequency control, sends WeChat text via ``WeChatNotifier``,
-and persists results to ``alert_logs``.
+trading-hours DND + once-per-day frequency control (memory Set + unique
+index claim), sends WeChat text via ``WeChatNotifier``, and persists
+results to ``alert_logs``.
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ from typing import Any
 
 from app.config import settings
 from app.db import alert_logs_repo
+from app.engine.market_hours import is_alert_window_open
 from app.engine.state import runtime_state
 from app.services.wechat_notifier import SendResult, wechat_notifier
 
@@ -22,6 +24,9 @@ logger = logging.getLogger(__name__)
 
 SIGNAL_BUY = "BUY"
 SIGNAL_SELL = "SELL"
+STATUS_PENDING = "PENDING"
+STATUS_SUCCESS = "SUCCESS"
+STATUS_FAILED = "FAILED"
 
 LIMIT_BOARD_NOTE = "（注：该股当前可能处于涨跌停状态，请注意流动性风险）"
 
@@ -29,6 +34,7 @@ LIMIT_BOARD_NOTE = "（注：该股当前可能处于涨跌停状态，请注意
 class AlertOutcome(str, Enum):
     SENT = "sent"
     FAILED = "failed"
+    SKIPPED_DND = "skipped_dnd"
     SKIPPED_MEMORY = "skipped_memory"
     SKIPPED_ALREADY_SENT = "skipped_already_sent"
     SKIPPED_RACE = "skipped_race"
@@ -181,32 +187,32 @@ def _send_with_retry(content: str, *, log_prefix: str) -> tuple[SendResult, floa
     return last, total_ms
 
 
-def _persist_result(
+def _claim_alert_slot(
     *,
-    existing: dict | None,
     stock_code: str,
     trade_date: str,
     signal_type: str,
     trigger_price: float,
     baseline_price: float,
     used_coeff: float,
-    sent_status: str,
-    error_code: str | None,
-    error_message: str | None,
     log_prefix: str,
-) -> AlertOutcome | None:
-    """Insert or update alert_logs. Returns SKIPPED_RACE when unique insert loses."""
+) -> tuple[dict | None, AlertOutcome | None]:
+    """Claim the once-per-day alert slot before sending.
+
+    Returns ``(row, None)`` when this caller owns the slot (new PENDING claim or
+    an existing FAILED/PENDING row eligible for retry). Returns
+    ``(None, SKIPPED_*)`` when the signal must be discarded.
+    """
+    existing = alert_logs_repo.get_alert(stock_code, trade_date, signal_type)
     if existing is not None:
-        alert_logs_repo.update_alert_result(
-            int(existing["id"]),
-            trigger_price=trigger_price,
-            baseline_price=baseline_price,
-            used_coeff=used_coeff,
-            sent_status=sent_status,
-            error_code=error_code,
-            error_message=error_message,
-        )
-        return None
+        status = existing.get("sent_status")
+        if status == STATUS_SUCCESS:
+            runtime_state.sent_signal_keys.add(
+                _freq_key(stock_code, trade_date, signal_type)
+            )
+            return None, AlertOutcome.SKIPPED_ALREADY_SENT
+        # FAILED / PENDING: allow retry without re-insert.
+        return existing, None
 
     row_id = alert_logs_repo.insert_alert(
         stock_code=stock_code,
@@ -215,19 +221,29 @@ def _persist_result(
         trigger_price=trigger_price,
         baseline_price=baseline_price,
         used_coeff=used_coeff,
-        sent_status=sent_status,
-        error_code=error_code,
-        error_message=error_message,
+        sent_status=STATUS_PENDING,
     )
     if row_id is None:
+        # Unique index race — expected under concurrent triggers.
         logger.info(
-            "%s unique constraint race stock=%s date=%s; discarding",
+            "%s unique constraint race stock=%s date=%s type=%s; discarding",
             log_prefix,
             stock_code,
             trade_date,
+            signal_type,
         )
-        return AlertOutcome.SKIPPED_RACE
-    return None
+        return None, AlertOutcome.SKIPPED_RACE
+
+    return (
+        {
+            "id": row_id,
+            "stock_code": stock_code,
+            "trade_date": trade_date,
+            "signal_type": signal_type,
+            "sent_status": STATUS_PENDING,
+        },
+        None,
+    )
 
 
 def _build_message(
@@ -312,7 +328,15 @@ def _parse_candidate(
 
 
 def process_alert(candidate: dict[str, Any], *, signal_type: str) -> AlertProcessResult:
-    """Process a single BUY or SELL candidate end-to-end."""
+    """Process a single BUY or SELL candidate end-to-end.
+
+    Decision tree (user story 10 / design §3.3):
+    1. Trading-hours DND check
+    2. Memory Set frequency check (O(1))
+    3. Claim ``alert_logs`` row (unique index); losers discard
+    4. Send WeChat only after a successful claim
+    5. Update row + memory Set on SUCCESS
+    """
     log_prefix = "buy_alert" if signal_type == SIGNAL_BUY else "sell_alert"
     parsed, invalid = _parse_candidate(candidate)
     if invalid is not None:
@@ -328,6 +352,20 @@ def process_alert(candidate: dict[str, Any], *, signal_type: str) -> AlertProces
     baseline_price = parsed["baseline_price"]
     used_coeff = parsed["used_coeff"]
 
+    if not is_alert_window_open():
+        logger.info(
+            "%s DND discard stock=%s date=%s type=%s (outside trading hours)",
+            log_prefix,
+            stock_code,
+            trade_date,
+            signal_type,
+        )
+        return AlertProcessResult(
+            outcome=AlertOutcome.SKIPPED_DND,
+            stock_code=stock_code,
+            message="outside trading hours (DND)",
+        )
+
     key = _freq_key(stock_code, trade_date, signal_type)
     if key in runtime_state.sent_signal_keys:
         return AlertProcessResult(
@@ -336,41 +374,41 @@ def process_alert(candidate: dict[str, Any], *, signal_type: str) -> AlertProces
             message="already sent today (memory)",
         )
 
-    existing = alert_logs_repo.get_alert(stock_code, trade_date, signal_type)
-    if existing and existing.get("sent_status") == "SUCCESS":
-        runtime_state.sent_signal_keys.add(key)
-        return AlertProcessResult(
-            outcome=AlertOutcome.SKIPPED_ALREADY_SENT,
-            stock_code=stock_code,
-            message="already sent today (db)",
-        )
-
-    content = _build_message(signal_type, candidate, parsed)
-    send_result, latency_ms = _send_with_retry(content, log_prefix=log_prefix)
-    error_code, error_message = _error_fields(send_result)
-    sent_status = "SUCCESS" if send_result.ok else "FAILED"
-
-    race = _persist_result(
-        existing=existing,
+    claimed, skip = _claim_alert_slot(
         stock_code=stock_code,
         trade_date=trade_date,
         signal_type=signal_type,
         trigger_price=price,
         baseline_price=baseline_price,
         used_coeff=used_coeff,
+        log_prefix=log_prefix,
+    )
+    if skip is not None:
+        return AlertProcessResult(
+            outcome=skip,
+            stock_code=stock_code,
+            message=(
+                "already sent today (db)"
+                if skip == AlertOutcome.SKIPPED_ALREADY_SENT
+                else "unique constraint race"
+            ),
+        )
+    assert claimed is not None
+
+    content = _build_message(signal_type, candidate, parsed)
+    send_result, latency_ms = _send_with_retry(content, log_prefix=log_prefix)
+    error_code, error_message = _error_fields(send_result)
+    sent_status = STATUS_SUCCESS if send_result.ok else STATUS_FAILED
+
+    alert_logs_repo.update_alert_result(
+        int(claimed["id"]),
+        trigger_price=price,
+        baseline_price=baseline_price,
+        used_coeff=used_coeff,
         sent_status=sent_status,
         error_code=error_code,
         error_message=error_message,
-        log_prefix=log_prefix,
     )
-    if race is not None:
-        return AlertProcessResult(
-            outcome=race,
-            stock_code=stock_code,
-            latency_ms=latency_ms,
-            error_code=error_code,
-            message="unique constraint race",
-        )
 
     if send_result.ok:
         runtime_state.sent_signal_keys.add(key)
