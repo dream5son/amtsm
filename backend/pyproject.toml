@@ -9,9 +9,9 @@ dependencies = [
   "pydantic-settings>=2.10.0",
   "apscheduler>=3.10.4",
   "httpx>=0.28.1",
-  "wechatpy>=1.8.18",
+  "wechatpy[cryptography]>=1.8.18",
   "akshare>=1.17.48",
-  "pypinyin>=0.55.0"
+  "pypinyin>=0.55.0",
 ]
 
 [project.optional-dependencies]

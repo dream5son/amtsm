@@ -89,7 +89,8 @@ Copy `.env.example` to `.env` in both `backend/` and `frontend/` and fill in val
 
 - `SQLITE_PATH` — path to the SQLite database file (default: `data/amtsm.db`)
 - `API_HOST` / `API_PORT` — backend bind address (default: `0.0.0.0:8000`)
-- WeChat / notification credentials for alert delivery
+- `WECHAT_CORP_ID` / `WECHAT_AGENT_ID` / `WECHAT_SECRET` / `WECHAT_TO_USER` — enterprise WeChat channel (see README)
+- `WECHAT_SELF_CHECK_ON_STARTUP` — run connectivity self-check on API boot (default: true)
 
 ## Architecture Notes
 
