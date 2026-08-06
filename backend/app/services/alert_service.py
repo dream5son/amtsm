@@ -1,8 +1,8 @@
-"""Buy-signal alert pipeline (user story 08).
+"""Buy/sell signal alert pipeline (user stories 08 & 09).
 
-Consumes BUY candidates from the intraday polling task, enforces once-per-day
-frequency control, sends WeChat text via ``WeChatNotifier``, and persists
-results to ``alert_logs``.
+Consumes BUY/SELL candidates from the intraday polling task, enforces
+once-per-day frequency control, sends WeChat text via ``WeChatNotifier``,
+and persists results to ``alert_logs``.
 """
 
 from __future__ import annotations
@@ -21,6 +21,9 @@ from app.services.wechat_notifier import SendResult, wechat_notifier
 logger = logging.getLogger(__name__)
 
 SIGNAL_BUY = "BUY"
+SIGNAL_SELL = "SELL"
+
+LIMIT_BOARD_NOTE = "（注：该股当前可能处于涨跌停状态，请注意流动性风险）"
 
 
 class AlertOutcome(str, Enum):
@@ -59,6 +62,58 @@ def format_buy_message(
     )
 
 
+def format_sell_message(
+    *,
+    stock_name: str,
+    stock_code: str,
+    price: float,
+    actual_n: int,
+    high_max: float,
+    used_coeff: float,
+    is_limit_up: bool = False,
+) -> str:
+    """PRD sell-signal template (plain text for enterprise WeChat)."""
+    text = (
+        f"【交易助手】发现卖出信号！"
+        f"您关注的{stock_name}({stock_code})当前价格{_fmt_price(price)}，"
+        f"已触及近{actual_n}日高点{_fmt_price(high_max)}的{_fmt_coeff(used_coeff)}倍，"
+        f"请考虑减仓。"
+    )
+    if is_limit_up:
+        text += LIMIT_BOARD_NOTE
+    return text
+
+
+def limit_up_ratio(stock_code: str, stock_name: str = "") -> float:
+    """Return the daily limit-up multiplier for an A-share code."""
+    name = (stock_name or "").upper()
+    if "ST" in name:
+        return 1.05
+
+    code = stock_code.lower()
+    numeric = code[2:] if len(code) >= 8 and code[:2] in {"sh", "sz", "bj"} else code
+
+    if code.startswith("bj") or numeric.startswith(("43", "83", "87", "88")):
+        return 1.30
+    if numeric.startswith(("30", "68")):
+        return 1.20
+    return 1.10
+
+
+def is_limit_up(
+    *,
+    stock_code: str,
+    price: float,
+    prev_close: float | None,
+    stock_name: str = "",
+) -> bool:
+    """Heuristic limit-up check using prev_close and board-specific ratio."""
+    if prev_close is None or prev_close <= 0 or price <= 0:
+        return False
+    limit_price = round(prev_close * limit_up_ratio(stock_code, stock_name), 2)
+    return price >= limit_price
+
+
 def _fmt_price(value: float) -> str:
     text = f"{value:.4f}".rstrip("0").rstrip(".")
     return text or "0"
@@ -85,7 +140,7 @@ def _error_fields(result: SendResult) -> tuple[str | None, str | None]:
     return code, message
 
 
-def _send_with_retry(content: str) -> tuple[SendResult, float]:
+def _send_with_retry(content: str, *, log_prefix: str) -> tuple[SendResult, float]:
     """Send WeChat text with exponential backoff; returns (result, total_latency_ms)."""
     max_retries = max(0, int(settings.alert_send_max_retries))
     backoff = max(0.0, float(settings.alert_send_retry_backoff_seconds))
@@ -100,7 +155,8 @@ def _send_with_retry(content: str) -> tuple[SendResult, float]:
         if last.ok:
             total_ms = (time.perf_counter() - started) * 1000
             logger.info(
-                "buy_alert WeChat send ok attempt=%d/%d latency_ms=%.1f total_ms=%.1f",
+                "%s WeChat send ok attempt=%d/%d latency_ms=%.1f total_ms=%.1f",
+                log_prefix,
                 attempt + 1,
                 attempts,
                 attempt_ms,
@@ -109,7 +165,8 @@ def _send_with_retry(content: str) -> tuple[SendResult, float]:
             return last, total_ms
 
         logger.warning(
-            "buy_alert WeChat send failed attempt=%d/%d latency_ms=%.1f category=%s errcode=%s",
+            "%s WeChat send failed attempt=%d/%d latency_ms=%.1f category=%s errcode=%s",
+            log_prefix,
             attempt + 1,
             attempts,
             attempt_ms,
@@ -129,12 +186,14 @@ def _persist_result(
     existing: dict | None,
     stock_code: str,
     trade_date: str,
+    signal_type: str,
     trigger_price: float,
     baseline_price: float,
     used_coeff: float,
     sent_status: str,
     error_code: str | None,
     error_message: str | None,
+    log_prefix: str,
 ) -> AlertOutcome | None:
     """Insert or update alert_logs. Returns SKIPPED_RACE when unique insert loses."""
     if existing is not None:
@@ -152,7 +211,7 @@ def _persist_result(
     row_id = alert_logs_repo.insert_alert(
         stock_code=stock_code,
         trade_date=trade_date,
-        signal_type=SIGNAL_BUY,
+        signal_type=signal_type,
         trigger_price=trigger_price,
         baseline_price=baseline_price,
         used_coeff=used_coeff,
@@ -162,7 +221,8 @@ def _persist_result(
     )
     if row_id is None:
         logger.info(
-            "buy_alert unique constraint race stock=%s date=%s; discarding",
+            "%s unique constraint race stock=%s date=%s; discarding",
+            log_prefix,
             stock_code,
             trade_date,
         )
@@ -170,8 +230,50 @@ def _persist_result(
     return None
 
 
-def process_buy_alert(candidate: dict[str, Any]) -> AlertProcessResult:
-    """Process a single BUY candidate end-to-end."""
+def _build_message(
+    signal_type: str, candidate: dict[str, Any], parsed: dict[str, Any]
+) -> str:
+    if signal_type == SIGNAL_BUY:
+        return format_buy_message(
+            stock_name=parsed["stock_name"],
+            stock_code=parsed["stock_code"],
+            price=parsed["price"],
+            actual_n=parsed["actual_n"],
+            low_min=parsed["baseline_price"],
+            used_coeff=parsed["used_coeff"],
+        )
+
+    limit_flag = candidate.get("is_limit_up")
+    if limit_flag is None:
+        limit_flag = is_limit_up(
+            stock_code=parsed["stock_code"],
+            price=parsed["price"],
+            prev_close=_optional_float(candidate.get("prev_close")),
+            stock_name=parsed["stock_name"],
+        )
+    return format_sell_message(
+        stock_name=parsed["stock_name"],
+        stock_code=parsed["stock_code"],
+        price=parsed["price"],
+        actual_n=parsed["actual_n"],
+        high_max=parsed["baseline_price"],
+        used_coeff=parsed["used_coeff"],
+        is_limit_up=bool(limit_flag),
+    )
+
+
+def _optional_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_candidate(
+    candidate: dict[str, Any],
+) -> tuple[dict[str, Any] | None, AlertProcessResult | None]:
     stock_code = str(candidate.get("stock_code") or "")
     trade_date = str(candidate.get("trade_date") or "")
     stock_name = str(candidate.get("stock_name") or stock_code)
@@ -182,21 +284,51 @@ def process_buy_alert(candidate: dict[str, Any]) -> AlertProcessResult:
         used_coeff = float(candidate["used_coeff"])
         actual_n = int(candidate["actual_n"])
     except (KeyError, TypeError, ValueError) as exc:
-        logger.error("buy_alert invalid candidate %s: %s", candidate, exc)
-        return AlertProcessResult(
+        return None, AlertProcessResult(
             outcome=AlertOutcome.SKIPPED_INVALID,
             stock_code=stock_code or "unknown",
             message=str(exc),
         )
 
     if not stock_code or not trade_date:
-        return AlertProcessResult(
+        return None, AlertProcessResult(
             outcome=AlertOutcome.SKIPPED_INVALID,
             stock_code=stock_code or "unknown",
             message="missing stock_code or trade_date",
         )
 
-    key = _freq_key(stock_code, trade_date, SIGNAL_BUY)
+    return (
+        {
+            "stock_code": stock_code,
+            "trade_date": trade_date,
+            "stock_name": stock_name,
+            "price": price,
+            "baseline_price": baseline_price,
+            "used_coeff": used_coeff,
+            "actual_n": actual_n,
+        },
+        None,
+    )
+
+
+def process_alert(candidate: dict[str, Any], *, signal_type: str) -> AlertProcessResult:
+    """Process a single BUY or SELL candidate end-to-end."""
+    log_prefix = "buy_alert" if signal_type == SIGNAL_BUY else "sell_alert"
+    parsed, invalid = _parse_candidate(candidate)
+    if invalid is not None:
+        logger.error(
+            "%s invalid candidate %s: %s", log_prefix, candidate, invalid.message
+        )
+        return invalid
+    assert parsed is not None
+
+    stock_code = parsed["stock_code"]
+    trade_date = parsed["trade_date"]
+    price = parsed["price"]
+    baseline_price = parsed["baseline_price"]
+    used_coeff = parsed["used_coeff"]
+
+    key = _freq_key(stock_code, trade_date, signal_type)
     if key in runtime_state.sent_signal_keys:
         return AlertProcessResult(
             outcome=AlertOutcome.SKIPPED_MEMORY,
@@ -204,7 +336,7 @@ def process_buy_alert(candidate: dict[str, Any]) -> AlertProcessResult:
             message="already sent today (memory)",
         )
 
-    existing = alert_logs_repo.get_alert(stock_code, trade_date, SIGNAL_BUY)
+    existing = alert_logs_repo.get_alert(stock_code, trade_date, signal_type)
     if existing and existing.get("sent_status") == "SUCCESS":
         runtime_state.sent_signal_keys.add(key)
         return AlertProcessResult(
@@ -213,16 +345,8 @@ def process_buy_alert(candidate: dict[str, Any]) -> AlertProcessResult:
             message="already sent today (db)",
         )
 
-    content = format_buy_message(
-        stock_name=stock_name,
-        stock_code=stock_code,
-        price=price,
-        actual_n=actual_n,
-        low_min=baseline_price,
-        used_coeff=used_coeff,
-    )
-
-    send_result, latency_ms = _send_with_retry(content)
+    content = _build_message(signal_type, candidate, parsed)
+    send_result, latency_ms = _send_with_retry(content, log_prefix=log_prefix)
     error_code, error_message = _error_fields(send_result)
     sent_status = "SUCCESS" if send_result.ok else "FAILED"
 
@@ -230,12 +354,14 @@ def process_buy_alert(candidate: dict[str, Any]) -> AlertProcessResult:
         existing=existing,
         stock_code=stock_code,
         trade_date=trade_date,
+        signal_type=signal_type,
         trigger_price=price,
         baseline_price=baseline_price,
         used_coeff=used_coeff,
         sent_status=sent_status,
         error_code=error_code,
         error_message=error_message,
+        log_prefix=log_prefix,
     )
     if race is not None:
         return AlertProcessResult(
@@ -249,7 +375,8 @@ def process_buy_alert(candidate: dict[str, Any]) -> AlertProcessResult:
     if send_result.ok:
         runtime_state.sent_signal_keys.add(key)
         logger.info(
-            "buy_alert SENT stock=%s date=%s price=%s latency_ms=%.1f",
+            "%s SENT stock=%s date=%s price=%s latency_ms=%.1f",
+            log_prefix,
             stock_code,
             trade_date,
             price,
@@ -264,7 +391,8 @@ def process_buy_alert(candidate: dict[str, Any]) -> AlertProcessResult:
 
     # FAILED: leave memory unset so a later poll can retry.
     logger.error(
-        "buy_alert FAILED stock=%s date=%s error_code=%s detail=%s latency_ms=%.1f",
+        "%s FAILED stock=%s date=%s error_code=%s detail=%s latency_ms=%.1f",
+        log_prefix,
         stock_code,
         trade_date,
         error_code,
@@ -280,21 +408,33 @@ def process_buy_alert(candidate: dict[str, Any]) -> AlertProcessResult:
     )
 
 
-def process_buy_candidates(
+def process_buy_alert(candidate: dict[str, Any]) -> AlertProcessResult:
+    """Process a single BUY candidate end-to-end."""
+    return process_alert(candidate, signal_type=SIGNAL_BUY)
+
+
+def process_sell_alert(candidate: dict[str, Any]) -> AlertProcessResult:
+    """Process a single SELL candidate end-to-end."""
+    return process_alert(candidate, signal_type=SIGNAL_SELL)
+
+
+def _process_candidates(
     candidates: list[dict[str, Any]],
+    *,
+    signal_type: str,
 ) -> list[AlertProcessResult]:
-    """Handle BUY candidates only; SELL is deferred to user story 09."""
     results: list[AlertProcessResult] = []
-    buy_candidates = [c for c in candidates if c.get("signal_type") == SIGNAL_BUY]
-    if not buy_candidates:
+    filtered = [c for c in candidates if c.get("signal_type") == signal_type]
+    if not filtered:
         return results
 
-    for candidate in buy_candidates:
+    log_prefix = "buy_alert" if signal_type == SIGNAL_BUY else "sell_alert"
+    for candidate in filtered:
         try:
-            results.append(process_buy_alert(candidate))
+            results.append(process_alert(candidate, signal_type=signal_type))
         except Exception as exc:
             code = str(candidate.get("stock_code") or "unknown")
-            logger.exception("buy_alert unexpected error stock=%s", code)
+            logger.exception("%s unexpected error stock=%s", log_prefix, code)
             results.append(
                 AlertProcessResult(
                     outcome=AlertOutcome.FAILED,
@@ -307,10 +447,25 @@ def process_buy_candidates(
     failed = sum(1 for r in results if r.outcome == AlertOutcome.FAILED)
     skipped = len(results) - sent - failed
     logger.info(
-        "buy_alert batch summary total=%d sent=%d failed=%d skipped=%d",
+        "%s batch summary total=%d sent=%d failed=%d skipped=%d",
+        log_prefix,
         len(results),
         sent,
         failed,
         skipped,
     )
     return results
+
+
+def process_buy_candidates(
+    candidates: list[dict[str, Any]],
+) -> list[AlertProcessResult]:
+    """Handle BUY candidates; failures never block the rest of the batch."""
+    return _process_candidates(candidates, signal_type=SIGNAL_BUY)
+
+
+def process_sell_candidates(
+    candidates: list[dict[str, Any]],
+) -> list[AlertProcessResult]:
+    """Handle SELL candidates; failures never block the rest of the batch."""
+    return _process_candidates(candidates, signal_type=SIGNAL_SELL)
