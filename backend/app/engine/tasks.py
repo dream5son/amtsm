@@ -9,7 +9,11 @@ from app.db.connection import get_db
 from app.db.daily_baseline_repo import get_baselines_by_date, upsert_baseline
 from app.engine.baseline_calculator import InsufficientDataError, compute_baseline
 from app.engine.state import runtime_state
-from app.services.alert_service import process_buy_candidates
+from app.services.alert_service import (
+    is_limit_up,
+    process_buy_candidates,
+    process_sell_candidates,
+)
 from app.services.market_data_service import (
     MarketDataUnavailableError,
     StockDataFetchError,
@@ -70,7 +74,9 @@ def baseline_precompute_task() -> None:
             }
 
             try:
-                insert_log_item(job_log_id, code, name, n, actual_n, "SUCCESS", low_min, high_max)
+                insert_log_item(
+                    job_log_id, code, name, n, actual_n, "SUCCESS", low_min, high_max
+                )
             except sqlite3.Error as log_exc:
                 logger.error("Failed to write log item for %s: %s", code, log_exc)
 
@@ -82,9 +88,13 @@ def baseline_precompute_task() -> None:
             failed_count += total - success_count
             errors.append(f"Market data unavailable: {exc}")
             try:
-                insert_log_item(job_log_id, code, name, n, None, "FAILED", error_message=str(exc))
+                insert_log_item(
+                    job_log_id, code, name, n, None, "FAILED", error_message=str(exc)
+                )
             except sqlite3.Error as log_exc:
-                logger.error("Failed to write failed log item for %s: %s", code, log_exc)
+                logger.error(
+                    "Failed to write failed log item for %s: %s", code, log_exc
+                )
             break
 
         except (StockDataFetchError, InsufficientDataError) as exc:
@@ -92,26 +102,41 @@ def baseline_precompute_task() -> None:
             failed_count += 1
             errors.append(f"{code}: {exc}")
             try:
-                insert_log_item(job_log_id, code, name, n, None, "FAILED", error_message=str(exc))
+                insert_log_item(
+                    job_log_id, code, name, n, None, "FAILED", error_message=str(exc)
+                )
             except sqlite3.Error as log_exc:
-                logger.error("Failed to write failed log item for %s: %s", code, log_exc)
+                logger.error(
+                    "Failed to write failed log item for %s: %s", code, log_exc
+                )
 
         except Exception as exc:  # noqa: BLE001
             logger.warning("Unexpected error for %s: %s", code, exc)
             failed_count += 1
             errors.append(f"{code}: {exc}")
             try:
-                insert_log_item(job_log_id, code, name, n, None, "FAILED", error_message=str(exc))
+                insert_log_item(
+                    job_log_id, code, name, n, None, "FAILED", error_message=str(exc)
+                )
             except sqlite3.Error as log_exc:
-                logger.error("Failed to write failed log item for %s: %s", code, log_exc)
+                logger.error(
+                    "Failed to write failed log item for %s: %s", code, log_exc
+                )
 
     final_status = "FAILED" if failed_count > 0 else "SUCCESS"
     error_summary = "; ".join(errors[:10]) if errors else None
 
-    finish_job_log(job_log_id, final_status, total, success_count, failed_count, error_summary)
+    finish_job_log(
+        job_log_id, final_status, total, success_count, failed_count, error_summary
+    )
 
     runtime_state.job_status = final_status
-    logger.info("baseline_precompute_task finished: %s (success=%d, failed=%d)", final_status, success_count, failed_count)
+    logger.info(
+        "baseline_precompute_task finished: %s (success=%d, failed=%d)",
+        final_status,
+        success_count,
+        failed_count,
+    )
 
 
 def is_trading_day(current_date: date) -> bool:
@@ -134,7 +159,9 @@ def market_polling_task() -> None:
         logger.debug("market_polling_task skipped: not trading day (%s)", trade_date)
         return
     if not is_in_trading_session(current_time):
-        logger.debug("market_polling_task skipped: out of session (%s)", current_time.isoformat())
+        logger.debug(
+            "market_polling_task skipped: out of session (%s)", current_time.isoformat()
+        )
         return
 
     _sync_signal_trade_date(trade_date)
@@ -171,7 +198,10 @@ def market_polling_task() -> None:
         valid_stocks.append(stock)
 
     if not valid_stocks:
-        logger.warning("market_polling_task: no valid stocks with baseline (trade_date=%s)", trade_date)
+        logger.warning(
+            "market_polling_task: no valid stocks with baseline (trade_date=%s)",
+            trade_date,
+        )
         return
 
     batch_size = max(1, min(50, settings.polling_batch_size))
@@ -196,7 +226,9 @@ def market_polling_task() -> None:
             )
         except (MarketDataUnavailableError, StockDataFetchError, ValueError) as exc:
             batch_errors += 1
-            logger.warning("market_polling_task batch failed (%s): %s", ",".join(codes), exc)
+            logger.warning(
+                "market_polling_task batch failed (%s): %s", ",".join(codes), exc
+            )
             continue
 
         for stock in batch:
@@ -235,18 +267,28 @@ def market_polling_task() -> None:
                     baseline_price = float(baseline["high_max"])
                     used_coeff = float(stock["effective_y"])
                     sell_candidates += 1
-                candidates.append(
-                    {
-                        "stock_code": code,
-                        "stock_name": stock["stock_name"],
-                        "signal_type": signal_type,
-                        "price": price,
-                        "trade_date": trade_date,
-                        "baseline_price": baseline_price,
-                        "used_coeff": used_coeff,
-                        "actual_n": int(baseline["actual_n"]),
-                    }
-                )
+                prev_close = quote.get("prev_close")
+                candidate: dict = {
+                    "stock_code": code,
+                    "stock_name": stock["stock_name"],
+                    "signal_type": signal_type,
+                    "price": price,
+                    "trade_date": trade_date,
+                    "baseline_price": baseline_price,
+                    "used_coeff": used_coeff,
+                    "actual_n": int(baseline["actual_n"]),
+                    "prev_close": prev_close,
+                }
+                if signal_type == "SELL":
+                    candidate["is_limit_up"] = is_limit_up(
+                        stock_code=code,
+                        price=float(price),
+                        prev_close=float(prev_close)
+                        if prev_close is not None
+                        else None,
+                        stock_name=str(stock["stock_name"] or ""),
+                    )
+                candidates.append(candidate)
 
     _emit_signal_candidates(candidates)
 
@@ -272,7 +314,10 @@ def _sync_signal_trade_date(trade_date: str) -> None:
 
 
 def _ensure_baseline_cache_for_trade_date(trade_date: str) -> bool:
-    has_today = any(item.get("trade_date") == trade_date for item in runtime_state.baseline_cache.values())
+    has_today = any(
+        item.get("trade_date") == trade_date
+        for item in runtime_state.baseline_cache.values()
+    )
     if has_today:
         return True
 
@@ -292,8 +337,9 @@ def _emit_signal_candidates(candidates: list[dict]) -> None:
     if not candidates:
         return
     logger.info("market_polling_task candidates count=%d", len(candidates))
-    # User story 08: BUY WeChat alerts. SELL handoff is user story 09.
+    # User stories 08/09: BUY and SELL WeChat alerts (failures isolated per stock).
     process_buy_candidates(candidates)
+    process_sell_candidates(candidates)
 
 
 def daily_snapshot_task() -> None:
