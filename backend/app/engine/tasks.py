@@ -1,20 +1,28 @@
 import logging
-from datetime import date
+from datetime import date, datetime, time
+from zoneinfo import ZoneInfo
 
 from app.db.baseline_job_log_repo import create_job_log, finish_job_log, insert_log_item
-from app.db.daily_baseline_repo import upsert_baseline
+from app.db.daily_baseline_repo import get_baselines_by_date, upsert_baseline
 from app.db.connection import get_db
 from app.engine.baseline_calculator import InsufficientDataError, compute_baseline
 from app.engine.state import runtime_state
+from app.config import settings
 from app.services.market_data_service import (
     MarketDataUnavailableError,
     StockDataFetchError,
     fetch_daily_bars,
+    fetch_realtime_quotes_batch,
 )
 
 logger = logging.getLogger(__name__)
 
 JOB_NAME = "daily-baseline-precompute"
+SH_TZ = ZoneInfo("Asia/Shanghai")
+MORNING_START = time(9, 30, 0)
+MORNING_END = time(11, 30, 0)
+AFTERNOON_START = time(13, 0, 0)
+AFTERNOON_END = time(15, 0, 0)
 
 
 def baseline_precompute_task() -> None:
@@ -104,8 +112,177 @@ def baseline_precompute_task() -> None:
     logger.info("baseline_precompute_task finished: %s (success=%d, failed=%d)", final_status, success_count, failed_count)
 
 
+def is_trading_day(current_date: date) -> bool:
+    return current_date.weekday() < 5
+
+
+def is_in_trading_session(current_time: time) -> bool:
+    in_morning = MORNING_START <= current_time <= MORNING_END
+    in_afternoon = AFTERNOON_START <= current_time <= AFTERNOON_END
+    return in_morning or in_afternoon
+
+
 def market_polling_task() -> None:
-    logger.info("market_polling_task placeholder")
+    now = datetime.now(SH_TZ)
+    today = now.date()
+    trade_date = today.isoformat()
+    current_time = now.time()
+
+    if not is_trading_day(today):
+        logger.debug("market_polling_task skipped: not trading day (%s)", trade_date)
+        return
+    if not is_in_trading_session(current_time):
+        logger.debug("market_polling_task skipped: out of session (%s)", current_time.isoformat())
+        return
+
+    _sync_signal_trade_date(trade_date)
+    if not _ensure_baseline_cache_for_trade_date(trade_date):
+        logger.warning("market_polling_task skipped: no baselines for %s", trade_date)
+        return
+
+    with get_db() as conn:
+        rows = conn.execute(
+            """
+            SELECT
+                w.stock_code,
+                w.stock_name,
+                COALESCE(w.custom_x, sc.global_buy_x) AS effective_x,
+                COALESCE(w.custom_y, sc.global_sell_y) AS effective_y
+            FROM watchlist w
+            JOIN strategy_config sc ON sc.id = 1
+            WHERE w.status = 'NORMAL'
+            """
+        ).fetchall()
+
+    stocks = [dict(row) for row in rows]
+    if not stocks:
+        logger.info("market_polling_task: no NORMAL stocks")
+        return
+
+    valid_stocks: list[dict] = []
+    skipped_no_baseline = 0
+    for stock in stocks:
+        baseline = runtime_state.baseline_cache.get(stock["stock_code"])
+        if not baseline or baseline.get("trade_date") != trade_date:
+            skipped_no_baseline += 1
+            continue
+        valid_stocks.append(stock)
+
+    if not valid_stocks:
+        logger.warning("market_polling_task: no valid stocks with baseline (trade_date=%s)", trade_date)
+        return
+
+    batch_size = max(1, min(50, settings.polling_batch_size))
+    total_batches = (len(valid_stocks) + batch_size - 1) // batch_size
+
+    batch_errors = 0
+    success_quotes = 0
+    skipped_invalid_quote = 0
+    skipped_halted = 0
+    buy_candidates = 0
+    sell_candidates = 0
+    candidates: list[dict] = []
+
+    for i in range(0, len(valid_stocks), batch_size):
+        batch = valid_stocks[i : i + batch_size]
+        codes = [item["stock_code"] for item in batch]
+        try:
+            quotes = fetch_realtime_quotes_batch(
+                codes,
+                timeout_seconds=settings.polling_request_timeout_seconds,
+                retries=settings.polling_request_retries,
+            )
+        except (MarketDataUnavailableError, StockDataFetchError, ValueError) as exc:
+            batch_errors += 1
+            logger.warning("market_polling_task batch failed (%s): %s", ",".join(codes), exc)
+            continue
+
+        for stock in batch:
+            code = stock["stock_code"]
+            quote = quotes.get(code) or {}
+            price = quote.get("price")
+            quote_date = quote.get("quote_date")
+            is_halted = bool(quote.get("is_halted"))
+
+            if is_halted:
+                skipped_halted += 1
+                continue
+            if price is None or price <= 0 or quote_date != trade_date:
+                skipped_invalid_quote += 1
+                continue
+
+            success_quotes += 1
+
+            baseline = runtime_state.baseline_cache[code]
+            buy_threshold = float(baseline["low_min"]) * float(stock["effective_x"])
+            sell_threshold = float(baseline["high_max"]) * float(stock["effective_y"])
+
+            signal_type: str | None = None
+            if price <= buy_threshold:
+                signal_type = "BUY"
+            if price >= sell_threshold:
+                signal_type = "SELL"
+
+            if signal_type:
+                runtime_state.signal_state[code] = signal_type
+                candidates.append(
+                    {
+                        "stock_code": code,
+                        "stock_name": stock["stock_name"],
+                        "signal_type": signal_type,
+                        "price": price,
+                        "trade_date": trade_date,
+                    }
+                )
+                if signal_type == "BUY":
+                    buy_candidates += 1
+                else:
+                    sell_candidates += 1
+
+    _emit_signal_candidates(candidates)
+
+    logger.info(
+        "market_polling_task summary trade_date=%s batches=%d batch_errors=%d success_quotes=%d skipped_no_baseline=%d "
+        "skipped_halted=%d skipped_invalid_quote=%d buy_candidates=%d sell_candidates=%d",
+        trade_date,
+        total_batches,
+        batch_errors,
+        success_quotes,
+        skipped_no_baseline,
+        skipped_halted,
+        skipped_invalid_quote,
+        buy_candidates,
+        sell_candidates,
+    )
+
+
+def _sync_signal_trade_date(trade_date: str) -> None:
+    if runtime_state.signal_trade_date != trade_date:
+        runtime_state.signal_trade_date = trade_date
+        runtime_state.signal_state.clear()
+
+
+def _ensure_baseline_cache_for_trade_date(trade_date: str) -> bool:
+    has_today = any(item.get("trade_date") == trade_date for item in runtime_state.baseline_cache.values())
+    if has_today:
+        return True
+
+    runtime_state.baseline_cache.clear()
+    baselines = get_baselines_by_date(trade_date)
+    for row in baselines:
+        runtime_state.baseline_cache[row["stock_code"]] = {
+            "low_min": row["low_min"],
+            "high_max": row["high_max"],
+            "actual_n": row["actual_n"],
+            "trade_date": row["trade_date"],
+        }
+    return bool(runtime_state.baseline_cache)
+
+
+def _emit_signal_candidates(candidates: list[dict]) -> None:
+    if not candidates:
+        return
+    logger.info("market_polling_task candidates count=%d", len(candidates))
 
 
 def daily_snapshot_task() -> None:

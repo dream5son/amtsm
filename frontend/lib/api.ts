@@ -10,6 +10,7 @@ export type WatchlistItem = {
   actual_n: number | null;
   effective_n: number;
   insufficient_days: number | null;
+  signal_type: "BUY" | "SELL" | null;
 };
 
 export type StockSearchItem = {

@@ -29,6 +29,16 @@ function formatChangePct(value: number | null): string {
   return `${sign}${value.toFixed(2)}%`;
 }
 
+function renderSignal(signal: "BUY" | "SELL" | null): { dot: string; label: string; cls: string } {
+  if (signal === "BUY") {
+    return { dot: "🟢", label: "买入", cls: "text-emerald-700" };
+  }
+  if (signal === "SELL") {
+    return { dot: "🔴", label: "卖出", cls: "text-rose-700" };
+  }
+  return { dot: "⚪", label: "无信号", cls: "text-slate-500" };
+}
+
 export default function WatchlistPanel() {
   const [watchlist, setWatchlist] = useState<WatchlistItem[]>([]);
   const [watchlistLoading, setWatchlistLoading] = useState(true);
@@ -221,7 +231,7 @@ export default function WatchlistPanel() {
 
       <div className="overflow-x-auto">
         {watchlist.length > 0 ? (
-          <table className="w-full min-w-[760px] border-collapse text-sm">
+          <table className="w-full min-w-[820px] border-collapse text-sm">
             <thead>
               <tr className="border-b border-slate-200 text-slate-500">
                 <th className="py-2 text-left font-medium">代码</th>
@@ -229,68 +239,78 @@ export default function WatchlistPanel() {
                 <th className="py-2 text-left font-medium">最新价</th>
                 <th className="py-2 text-left font-medium">涨跌幅</th>
                 <th className="py-2 text-left font-medium">状态</th>
+                <th className="py-2 text-left font-medium">信号</th>
                 <th className="py-2 text-left font-medium">定时任务</th>
                 <th className="py-2 text-left font-medium">备注</th>
                 <th className="py-2 text-left font-medium">操作</th>
               </tr>
             </thead>
             <tbody>
-              {watchlist.map((item) => (
-                <tr key={item.stock_code} className="border-b border-slate-100">
-                  <td className="py-2 pr-2 text-slate-700">{item.stock_code}</td>
-                  <td className="py-2 pr-2 text-slate-900">{item.stock_name}</td>
-                  <td className="py-2 pr-2 text-slate-700">{formatPrice(item.latest_price)}</td>
-                  <td
-                    className={
-                      item.change_pct !== null && item.change_pct > 0
-                        ? "py-2 pr-2 text-emerald-700"
-                        : item.change_pct !== null && item.change_pct < 0
-                          ? "py-2 pr-2 text-rose-700"
-                          : "py-2 pr-2 text-slate-700"
-                    }
-                  >
-                    {formatChangePct(item.change_pct)}
-                  </td>
-                  <td className="py-2 pr-2">
-                    <StatusBadge status={item.status} />
-                  </td>
-                  <td className="py-2 pr-2">
-                    <span
+              {watchlist.map((item) => {
+                const signal = renderSignal(item.signal_type);
+                return (
+                  <tr key={item.stock_code} className="border-b border-slate-100">
+                    <td className="py-2 pr-2 text-slate-700">{item.stock_code}</td>
+                    <td className="py-2 pr-2 text-slate-900">{item.stock_name}</td>
+                    <td className="py-2 pr-2 text-slate-700">{formatPrice(item.latest_price)}</td>
+                    <td
                       className={
-                        jobStatus === "执行中"
-                          ? "inline-flex items-center gap-1 rounded-full bg-blue-100 px-2 py-0.5 text-xs text-blue-700"
-                          : jobStatus === "执行失败"
-                            ? "inline-flex items-center rounded-full bg-rose-100 px-2 py-0.5 text-xs text-rose-700"
-                            : "inline-flex items-center rounded-full bg-slate-100 px-2 py-0.5 text-xs text-slate-600"
+                        item.change_pct !== null && item.change_pct > 0
+                          ? "py-2 pr-2 text-emerald-700"
+                          : item.change_pct !== null && item.change_pct < 0
+                            ? "py-2 pr-2 text-rose-700"
+                            : "py-2 pr-2 text-slate-700"
                       }
                     >
-                      {jobStatus === "执行中" && <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-blue-500" />}
-                      {jobStatus}
-                    </span>
-                    {sseError && <span className="ml-1 text-xs text-amber-600">⚠</span>}
-                    <button
-                      type="button"
-                      onClick={() => setLogDialogOpen(true)}
-                      className="ml-2 text-xs text-sky-600 underline hover:text-sky-800"
-                    >
-                      查看日志
-                    </button>
-                  </td>
-                  <td className="py-2 pr-2 text-slate-600">
-                    {item.insufficient_days && item.insufficient_days > 0 ? `数据不足 ${item.insufficient_days} 天` : "--"}
-                  </td>
-                  <td className="py-2">
-                    <button
-                      type="button"
-                      onClick={() => void onRemove(item)}
-                      disabled={removingCode === item.stock_code}
-                      className="rounded-md border border-rose-300 px-3 py-1.5 text-xs font-medium text-rose-700 transition-colors hover:bg-rose-50 disabled:cursor-not-allowed disabled:bg-rose-50 disabled:text-rose-300"
-                    >
-                      {removingCode === item.stock_code ? "移除中..." : "移除"}
-                    </button>
-                  </td>
-                </tr>
-              ))}
+                      {formatChangePct(item.change_pct)}
+                    </td>
+                    <td className="py-2 pr-2">
+                      <StatusBadge status={item.status} />
+                    </td>
+                    <td className={`py-2 pr-2 ${signal.cls}`}>
+                      <span className="inline-flex items-center gap-1">
+                        <span>{signal.dot}</span>
+                        <span className="text-xs">{signal.label}</span>
+                      </span>
+                    </td>
+                    <td className="py-2 pr-2">
+                      <span
+                        className={
+                          jobStatus === "执行中"
+                            ? "inline-flex items-center gap-1 rounded-full bg-blue-100 px-2 py-0.5 text-xs text-blue-700"
+                            : jobStatus === "执行失败"
+                              ? "inline-flex items-center rounded-full bg-rose-100 px-2 py-0.5 text-xs text-rose-700"
+                              : "inline-flex items-center rounded-full bg-slate-100 px-2 py-0.5 text-xs text-slate-600"
+                        }
+                      >
+                        {jobStatus === "执行中" && <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-blue-500" />}
+                        {jobStatus}
+                      </span>
+                      {sseError && <span className="ml-1 text-xs text-amber-600">⚠</span>}
+                      <button
+                        type="button"
+                        onClick={() => setLogDialogOpen(true)}
+                        className="ml-2 text-xs text-sky-600 underline hover:text-sky-800"
+                      >
+                        查看日志
+                      </button>
+                    </td>
+                    <td className="py-2 pr-2 text-slate-600">
+                      {item.insufficient_days && item.insufficient_days > 0 ? `数据不足 ${item.insufficient_days} 天` : "--"}
+                    </td>
+                    <td className="py-2">
+                      <button
+                        type="button"
+                        onClick={() => void onRemove(item)}
+                        disabled={removingCode === item.stock_code}
+                        className="rounded-md border border-rose-300 px-3 py-1.5 text-xs font-medium text-rose-700 transition-colors hover:bg-rose-50 disabled:cursor-not-allowed disabled:bg-rose-50 disabled:text-rose-300"
+                      >
+                        {removingCode === item.stock_code ? "移除中..." : "移除"}
+                      </button>
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         ) : (

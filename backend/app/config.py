@@ -16,6 +16,10 @@ class Settings(BaseSettings):
     baseline_minute: int = 30
     snapshot_hour: int = 15
     snapshot_minute: int = 30
+    polling_interval_seconds: int = 5
+    polling_batch_size: int = 50
+    polling_request_timeout_seconds: float = 3.0
+    polling_request_retries: int = 1
 
 
 settings = Settings()

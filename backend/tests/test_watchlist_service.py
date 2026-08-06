@@ -1,6 +1,7 @@
 from app.config import settings
 from app.db.connection import get_db
 from app.db.init_db import init_db
+from app.engine.state import runtime_state
 from app.schemas.watchlist import WatchlistCreate
 from app.services.watchlist_service import (
     add_watchlist,
@@ -14,6 +15,7 @@ def test_add_watchlist_normalizes_code_and_rejects_duplicates(tmp_path, monkeypa
     monkeypatch.setattr(settings, "sqlite_path", str(sqlite_path))
 
     init_db()
+    runtime_state.reset_daily()
 
     payload = WatchlistCreate(stock_code="600519", stock_name="贵州茅台")
     add_watchlist(payload)
@@ -30,6 +32,7 @@ def test_add_watchlist_normalizes_code_and_rejects_duplicates(tmp_path, monkeypa
             "actual_n": None,
             "effective_n": 60,
             "insufficient_days": None,
+            "signal_type": None,
         }
     ]
 
@@ -47,6 +50,7 @@ def test_remove_watchlist_normalizes_code(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(settings, "sqlite_path", str(sqlite_path))
 
     init_db()
+    runtime_state.reset_daily()
     add_watchlist(WatchlistCreate(stock_code="600519", stock_name="贵州茅台"))
 
     assert remove_watchlist("sh600519") == 1
@@ -58,6 +62,7 @@ def test_list_watchlist_includes_market_fields_and_insufficient_days(tmp_path, m
     monkeypatch.setattr(settings, "sqlite_path", str(sqlite_path))
 
     init_db()
+    runtime_state.reset_daily()
     add_watchlist(WatchlistCreate(stock_code="600519", stock_name="贵州茅台"))
 
     with get_db() as conn:
@@ -93,3 +98,18 @@ def test_list_watchlist_includes_market_fields_and_insufficient_days(tmp_path, m
     assert item["actual_n"] == 6
     assert item["effective_n"] == 10
     assert item["insufficient_days"] == 4
+    assert item["signal_type"] is None
+
+
+def test_list_watchlist_includes_runtime_signal_type(tmp_path, monkeypatch) -> None:
+    sqlite_path = tmp_path / "amtsm.db"
+    monkeypatch.setattr(settings, "sqlite_path", str(sqlite_path))
+
+    init_db()
+    runtime_state.reset_daily()
+    add_watchlist(WatchlistCreate(stock_code="600519", stock_name="贵州茅台"))
+    runtime_state.signal_state["sh600519"] = "BUY"
+    runtime_state.signal_trade_date = "2026-08-01"
+
+    rows = list_watchlist()
+    assert rows[0]["signal_type"] == "BUY"
