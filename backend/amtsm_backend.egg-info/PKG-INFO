@@ -8,7 +8,7 @@ Requires-Dist: uvicorn[standard]>=0.35.0
 Requires-Dist: pydantic-settings>=2.10.0
 Requires-Dist: apscheduler>=3.10.4
 Requires-Dist: httpx>=0.28.1
-Requires-Dist: wechatpy>=1.8.18
+Requires-Dist: wechatpy[cryptography]>=1.8.18
 Requires-Dist: akshare>=1.17.48
 Requires-Dist: pypinyin>=0.55.0
 Provides-Extra: dev

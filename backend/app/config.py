@@ -4,7 +4,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=".env", env_file_encoding="utf-8", extra="ignore"
+    )
 
     app_env: str = "development"
     api_host: str = "0.0.0.0"
@@ -20,6 +22,14 @@ class Settings(BaseSettings):
     polling_batch_size: int = 50
     polling_request_timeout_seconds: float = 3.0
     polling_request_retries: int = 1
+
+    # WeChat enterprise notifier (user story 07)
+    wechat_corp_id: str = ""
+    wechat_agent_id: str = ""
+    wechat_secret: str = ""
+    wechat_to_user: str = ""
+    wechat_request_timeout_seconds: float = 10.0
+    wechat_self_check_on_startup: bool = True
 
 
 settings = Settings()
