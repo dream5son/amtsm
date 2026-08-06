@@ -13,7 +13,18 @@ def test_baseline_precompute_task_success(mock_get_db, mock_fetch):
     mock_conn.__exit__ = MagicMock(return_value=False)
 
     mock_row = {"stock_code": "600519", "stock_name": "贵州茅台", "effective_n": 60}
-    mock_conn.execute.return_value.fetchall.return_value = [MagicMock(**{"__getitem__": lambda self, k: mock_row[k], "keys": lambda self: mock_row.keys()})]
+
+    class FakeRow:
+        def __init__(self, data):
+            self._data = data
+
+        def __getitem__(self, k):
+            return self._data[k]
+
+        def keys(self):
+            return self._data.keys()
+
+    mock_conn.execute.return_value.fetchall.return_value = [FakeRow(mock_row)]
     mock_get_db.return_value = mock_conn
 
     # Mock fetch_daily_bars

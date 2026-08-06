@@ -1,6 +1,7 @@
 import sqlite3
 
 from app.db.connection import get_db
+from app.engine.state import runtime_state
 from app.schemas.watchlist import WatchlistCreate
 from app.services.stock_search_service import normalize_stock_code
 
@@ -83,7 +84,10 @@ def list_watchlist(limit: int = 50, offset: int = 0) -> list[dict]:
             ,
             (limit, offset),
         ).fetchall()
-    return [dict(row) for row in rows]
+    data = [dict(row) for row in rows]
+    for item in data:
+        item["signal_type"] = runtime_state.signal_state.get(item["stock_code"])
+    return data
 
 
 def add_watchlist(payload: WatchlistCreate) -> None:

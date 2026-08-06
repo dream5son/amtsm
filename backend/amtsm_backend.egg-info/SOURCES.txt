@@ -36,5 +36,8 @@ app/services/watchlist_service.py
 tests/test_baseline_calculator.py
 tests/test_baseline_precompute_task.py
 tests/test_jobs_api.py
+tests/test_market_data_service.py
+tests/test_market_polling_task.py
+tests/test_scheduler.py
 tests/test_stock_search_service.py
 tests/test_watchlist_service.py

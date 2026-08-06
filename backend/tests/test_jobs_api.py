@@ -2,6 +2,7 @@ from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
+from app.engine.state import runtime_state
 from app.main import app
 
 client = TestClient(app)
@@ -9,6 +10,7 @@ client = TestClient(app)
 
 @patch("app.api.jobs.get_latest_job_log", return_value=None)
 def test_get_status_idle(mock_log):
+    runtime_state.job_status = "IDLE"
     response = client.get("/api/jobs/daily-baseline/status")
     assert response.status_code == 200
     data = response.json()
