@@ -165,6 +165,21 @@ export async function fetchJobLogLatest(page = 1, size = 50): Promise<JobLogDeta
   return (await res.json()) as JobLogDetail;
 }
 
+export type SystemStatus = {
+  quote_delay: boolean;
+  consecutive_poll_failures: number;
+  quote_delay_since: string | null;
+  failure_threshold: number;
+};
+
+export async function fetchSystemStatus(): Promise<SystemStatus> {
+  const res = await fetch(`${API_BASE}/api/system/status`, { cache: "no-store" });
+  if (!res.ok) {
+    throw new Error("failed to fetch system status");
+  }
+  return (await res.json()) as SystemStatus;
+}
+
 export function getJobStatusSSEUrl(): string {
   return `${API_BASE}/api/jobs/daily-baseline/status/stream`;
 }

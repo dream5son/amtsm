@@ -111,3 +111,37 @@ def remove_watchlist(stock_code: str) -> int:
         cursor = conn.execute("DELETE FROM watchlist WHERE stock_code = ?", (normalized_code,))
         conn.commit()
     return cursor.rowcount
+
+
+def update_watchlist_status(stock_code: str, status: str) -> int:
+    """Update watchlist status (NORMAL / HALT / DELISTED). Returns affected rows."""
+    normalized_code = normalize_stock_code(stock_code)
+    allowed = {"NORMAL", "HALT", "DELISTED"}
+    if status not in allowed:
+        raise ValueError(f"invalid status: {status}")
+
+    with get_db() as conn:
+        cursor = conn.execute(
+            "UPDATE watchlist SET status = ? WHERE stock_code = ?",
+            (status, normalized_code),
+        )
+        conn.commit()
+    return cursor.rowcount
+
+
+def restore_halted_to_normal(stock_codes: list[str]) -> int:
+    """Bulk restore HALT -> NORMAL for the given codes. Returns affected rows."""
+    if not stock_codes:
+        return 0
+    placeholders = ",".join("?" for _ in stock_codes)
+    with get_db() as conn:
+        cursor = conn.execute(
+            f"""
+            UPDATE watchlist
+            SET status = 'NORMAL'
+            WHERE status = 'HALT' AND stock_code IN ({placeholders})
+            """,
+            stock_codes,
+        )
+        conn.commit()
+    return cursor.rowcount
