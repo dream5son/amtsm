@@ -5,6 +5,7 @@ import math
 from collections.abc import Callable
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
+import time
 
 import akshare as ak
 import httpx
@@ -41,17 +42,35 @@ def _code_prefixed(numeric_code: str) -> str:
     return f"sh{numeric_code}"
 
 
+def _bar_date_str(value: object) -> str:
+    """Normalise a date-like value to ``YYYY-MM-DD``."""
+    return str(value).strip()[:10]
+
+
+def _optional_float(value: object) -> float | None:
+    try:
+        if value is None or (isinstance(value, float) and math.isnan(value)):
+            return None
+        if pd.isna(value):
+            return None
+        return float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+
+
 def _normalize_df_em(df: pd.DataFrame) -> list[dict]:
     """Normalise a stock_zh_a_hist (EastMoney) DataFrame to bar dicts."""
     bars = []
+    has_turnover = "换手率" in df.columns
     for _, row in df.iterrows():
         bars.append({
-            "date": str(row["日期"]),
+            "date": _bar_date_str(row["日期"]),
             "open": float(row["开盘"]),
             "high": float(row["最高"]),
             "low": float(row["最低"]),
             "close": float(row["收盘"]),
             "volume": float(row["成交量"]),
+            "turnover_rate": _optional_float(row["换手率"]) if has_turnover else None,
         })
     return bars
 
@@ -66,16 +85,19 @@ def _normalize_df_tx(df: pd.DataFrame) -> list[dict]:
         "low": ["low", "最低"],
         "close": ["close", "收盘"],
         "volume": ["volume", "成交量"],
+        "turnover_rate": ["turnover", "turnover_rate", "换手率"],
     }
     cols = {k: next((c for c in candidates if c in df.columns), None) for k, candidates in col_map.items()}
     for _, row in df.iterrows():
+        turnover_col = cols["turnover_rate"]
         bars.append({
-            "date": str(row[cols["date"]]),
+            "date": _bar_date_str(row[cols["date"]]),
             "open": float(row[cols["open"]]),
             "high": float(row[cols["high"]]),
             "low": float(row[cols["low"]]),
             "close": float(row[cols["close"]]),
             "volume": float(row[cols["volume"]]),
+            "turnover_rate": _optional_float(row[turnover_col]) if turnover_col else None,
         })
     return bars
 
@@ -90,18 +112,41 @@ def _normalize_df_sina(df: pd.DataFrame) -> list[dict]:
         "low": ["low", "最低"],
         "close": ["close", "收盘"],
         "volume": ["volume", "成交量"],
+        "turnover_rate": ["turnover", "turnover_rate", "换手率"],
     }
     cols = {k: next((c for c in candidates if c in df.columns), None) for k, candidates in col_map.items()}
     for _, row in df.iterrows():
+        turnover_col = cols["turnover_rate"]
         bars.append({
-            "date": str(row[cols["date"]]),
+            "date": _bar_date_str(row[cols["date"]]),
             "open": float(row[cols["open"]]),
             "high": float(row[cols["high"]]),
             "low": float(row[cols["low"]]),
             "close": float(row[cols["close"]]),
             "volume": float(row[cols["volume"]]),
+            "turnover_rate": _optional_float(row[turnover_col]) if turnover_col else None,
         })
     return bars
+
+
+def _to_numeric_code(stock_code: str) -> str:
+    """Strip exchange prefix from ``sh600519`` / ``600519.SH`` style codes."""
+    numeric_code = stock_code.split(".")[-1] if "." in stock_code else stock_code
+    if numeric_code[:2] in {"sh", "sz", "bj"}:
+        numeric_code = numeric_code[2:]
+    return numeric_code
+
+
+class MarketDataUnavailableError(Exception):
+    """Raised when the market data source is entirely unavailable."""
+
+
+class StockDataFetchError(Exception):
+    """Raised when fetching data for a specific stock fails."""
+
+
+class MissingTradeDayBarError(StockDataFetchError):
+    """Raised when OHLCV for the requested trade date is absent."""
 
 
 # Each entry: (source_name, akshare_fn, code_formatter, normaliser)
@@ -196,14 +241,6 @@ def high_available_akshare(
     raise MarketDataUnavailableError(
         f"All akshare sources unavailable for {numeric_code}: {msg}"
     ) from last_exc
-
-
-class MarketDataUnavailableError(Exception):
-    """Raised when the market data source is entirely unavailable."""
-
-
-class StockDataFetchError(Exception):
-    """Raised when fetching data for a specific stock fails."""
 
 
 def fetch_realtime_quotes_batch(
@@ -321,20 +358,16 @@ def fetch_daily_bars(stock_code: str, n: int, end_date: date | None = None) -> l
     Uses :func:`high_available_akshare` to try multiple akshare data sources
     with automatic failover.
 
-    Returns list of dicts with keys: date, open, high, low, close, volume.
-    The list is ordered oldest-first and does NOT include end_date itself.
+    Returns list of dicts with keys: date, open, high, low, close, volume,
+    turnover_rate (optional). The list is ordered oldest-first and does NOT
+    include end_date itself.
     """
     if end_date is None:
         end_date = datetime.now(UTC).date()
 
     # We fetch extra days to account for non-trading days
     start_date = end_date - timedelta(days=n * 3 + 30)
-
-    # akshare uses 6-digit numeric code; strip exchange prefix if present
-    numeric_code = stock_code.split(".")[-1] if "." in stock_code else stock_code
-    # Also strip sh/sz/bj text prefixes when passed with them
-    if numeric_code[:2] in {"sh", "sz", "bj"}:
-        numeric_code = numeric_code[2:]
+    numeric_code = _to_numeric_code(stock_code)
 
     try:
         return high_available_akshare(
@@ -348,3 +381,93 @@ def fetch_daily_bars(stock_code: str, n: int, end_date: date | None = None) -> l
     except Exception as exc:
         error_msg = str(exc)
         raise StockDataFetchError(f"Failed to fetch data for {stock_code}: {error_msg}") from exc
+
+
+def fetch_trade_day_bar(
+    stock_code: str,
+    trade_date: date,
+    *,
+    retries: int = 1,
+    retry_backoff_seconds: float = 0.5,
+) -> dict:
+    """Fetch unadjusted OHLCV (+ optional turnover) for a single trade date.
+
+    Includes ``trade_date`` itself. Used by the post-close daily snapshot job.
+
+    Returns:
+        dict with keys: date, open, high, low, close, volume, turnover_rate.
+
+    Raises:
+        MissingTradeDayBarError: When the bar for ``trade_date`` is not present.
+        MarketDataUnavailableError: When all data sources fail.
+        StockDataFetchError: On other per-stock fetch failures.
+    """
+    numeric_code = _to_numeric_code(stock_code)
+    day_str = trade_date.isoformat()
+    yyyymmdd = trade_date.strftime("%Y%m%d")
+    attempts = max(1, retries + 1)
+    last_exc: Exception | None = None
+
+    for attempt in range(attempts):
+        try:
+            # Unadjusted prices reflect the actual session OHLCV for archival.
+            bars = high_available_akshare(
+                numeric_code=numeric_code,
+                start_date=yyyymmdd,
+                end_date=yyyymmdd,
+                adjust="",
+            )
+            for bar in bars:
+                if _bar_date_str(bar.get("date")) == day_str:
+                    open_price = bar.get("open")
+                    high_price = bar.get("high")
+                    low_price = bar.get("low")
+                    close_price = bar.get("close")
+                    volume = bar.get("volume")
+                    if None in (open_price, high_price, low_price, close_price, volume):
+                        raise MissingTradeDayBarError(
+                            f"Incomplete OHLCV for {stock_code} on {day_str}"
+                        )
+                    return {
+                        "date": day_str,
+                        "open": float(open_price),
+                        "high": float(high_price),
+                        "low": float(low_price),
+                        "close": float(close_price),
+                        "volume": float(volume),
+                        "turnover_rate": bar.get("turnover_rate"),
+                    }
+            raise MissingTradeDayBarError(
+                f"No daily bar for {stock_code} on {day_str}"
+            )
+        except MissingTradeDayBarError:
+            raise
+        except MarketDataUnavailableError as exc:
+            last_exc = exc
+            if attempt + 1 >= attempts:
+                raise
+            logger.warning(
+                "fetch_trade_day_bar retry %d/%d for %s: %s",
+                attempt + 1,
+                attempts,
+                stock_code,
+                exc,
+            )
+            time.sleep(max(0.0, retry_backoff_seconds) * (attempt + 1))
+        except Exception as exc:
+            last_exc = exc
+            if attempt + 1 >= attempts:
+                raise StockDataFetchError(
+                    f"Failed to fetch trade-day bar for {stock_code}: {exc}"
+                ) from exc
+            logger.warning(
+                "fetch_trade_day_bar retry %d/%d for %s: %s",
+                attempt + 1,
+                attempts,
+                stock_code,
+                exc,
+            )
+            time.sleep(max(0.0, retry_backoff_seconds) * (attempt + 1))
+
+    msg = str(last_exc) if last_exc else "unknown error"
+    raise StockDataFetchError(f"Failed to fetch trade-day bar for {stock_code}: {msg}") from last_exc
