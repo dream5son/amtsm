@@ -7,6 +7,7 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
@@ -44,7 +45,46 @@ class StrategyConfig(Base):
     global_buy_x: Mapped[float] = mapped_column(Float, default=1.10)
     global_sell_n: Mapped[int] = mapped_column(Integer, default=60)
     global_sell_y: Mapped[float] = mapped_column(Float, default=0.90)
+    stop_loss_pct: Mapped[float] = mapped_column(Float, default=0.08)
     updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime, server_default=func.current_timestamp()
+    )
+
+
+class Position(Base):
+    __tablename__ = "positions"
+
+    stock_code: Mapped[str] = mapped_column(
+        String(10), ForeignKey("watchlist.stock_code"), primary_key=True
+    )
+    qty: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    avg_cost: Mapped[float | None] = mapped_column(Float, nullable=True)
+    highest_since_hold: Mapped[float | None] = mapped_column(Float, nullable=True)
+    stop_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    position_status: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="EMPTY"
+    )
+    opened_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime, server_default=func.current_timestamp()
+    )
+
+
+class PositionLedger(Base):
+    __tablename__ = "position_ledgers"
+    __table_args__ = (
+        Index("idx_ledger_stock_time", "stock_code", "trade_date", "id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    stock_code: Mapped[str] = mapped_column(String(10), nullable=False)
+    side: Mapped[str] = mapped_column(String(8), nullable=False)  # BUY | SELL
+    qty: Mapped[int] = mapped_column(Integer, nullable=False)
+    price: Mapped[float] = mapped_column(Float, nullable=False)
+    trade_date: Mapped[str] = mapped_column(String(10), nullable=False)
+    realized_pnl: Mapped[float | None] = mapped_column(Float, nullable=True)
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime | None] = mapped_column(
         DateTime, server_default=func.current_timestamp()
     )
 

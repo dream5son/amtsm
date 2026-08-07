@@ -34,6 +34,13 @@ def test_add_watchlist_normalizes_code_and_rejects_duplicates(tmp_path, monkeypa
             "effective_n": 60,
             "insufficient_days": None,
             "signal_type": None,
+            "position_status": "EMPTY",
+            "position_qty": 0,
+            "avg_cost": None,
+            "stop_price": None,
+            "unrealized_pnl": None,
+            "unrealized_pnl_pct": None,
+            "stop_distance_pct": None,
         }
     ]
 
@@ -100,6 +107,54 @@ def test_list_watchlist_includes_market_fields_and_insufficient_days(tmp_path, m
     assert item["effective_n"] == 10
     assert item["insufficient_days"] == 4
     assert item["signal_type"] is None
+    assert item["position_status"] == "EMPTY"
+    assert item["position_qty"] == 0
+    assert item["avg_cost"] is None
+    assert item["stop_price"] is None
+    assert item["unrealized_pnl"] is None
+    assert item["unrealized_pnl_pct"] is None
+    assert item["stop_distance_pct"] is None
+
+
+def test_list_watchlist_includes_position_pnl(tmp_path, monkeypatch) -> None:
+    from datetime import date
+
+    from app.schemas.position import PositionTradeRequest
+    from app.services.position_service import register_buy
+
+    sqlite_path = tmp_path / "amtsm.db"
+    monkeypatch.setattr(settings, "sqlite_path", str(sqlite_path))
+
+    init_db()
+    runtime_state.reset_daily()
+    add_watchlist(WatchlistCreate(stock_code="600519", stock_name="贵州茅台"))
+    register_buy(
+        "600519",
+        PositionTradeRequest(qty=100, price=100.0, trade_date=date(2026, 8, 1)),
+    )
+
+    with get_db() as session:
+        session.add(
+            DailyMarketSnapshot(
+                stock_code="sh600519",
+                trade_date="2026-08-02",
+                open_price=100.0,
+                high_price=110.0,
+                low_price=99.0,
+                close_price=110.0,
+                volume=1000000.0,
+            )
+        )
+        session.commit()
+
+    item = list_watchlist()[0]
+    assert item["position_status"] == "HOLDING"
+    assert item["position_qty"] == 100
+    assert item["avg_cost"] == 100.0
+    assert abs(item["unrealized_pnl"] - 1000.0) < 1e-9
+    assert abs(item["unrealized_pnl_pct"] - 0.1) < 1e-9
+    assert item["stop_price"] is not None
+    assert item["stop_distance_pct"] is not None
 
 
 def test_list_watchlist_includes_runtime_signal_type(tmp_path, monkeypatch) -> None:

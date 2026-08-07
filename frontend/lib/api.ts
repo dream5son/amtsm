@@ -11,6 +11,64 @@ export type WatchlistItem = {
   effective_n: number;
   insufficient_days: number | null;
   signal_type: "BUY" | "SELL" | null;
+  position_status: "EMPTY" | "HOLDING" | "PARTIAL";
+  position_qty: number;
+  avg_cost: number | null;
+  stop_price: number | null;
+  unrealized_pnl: number | null;
+  unrealized_pnl_pct: number | null;
+  stop_distance_pct: number | null;
+};
+
+export type BuyPreview = {
+  stock_code: string;
+  old_qty: number;
+  new_qty: number;
+  old_avg_cost: number | null;
+  new_avg_cost: number;
+  old_stop_price: number | null;
+  new_stop_price: number;
+  is_addon: boolean;
+};
+
+export type PositionSnapshot = {
+  stock_code: string;
+  qty: number;
+  avg_cost: number | null;
+  highest_since_hold: number | null;
+  stop_price: number | null;
+  position_status: "EMPTY" | "HOLDING" | "PARTIAL";
+  opened_at: string | null;
+};
+
+export type BuyResult = {
+  position: PositionSnapshot;
+  ledger_id: number;
+};
+
+export type SellResult = {
+  position: PositionSnapshot;
+  ledger_id: number;
+  realized_pnl: number;
+};
+
+export type LedgerItem = {
+  id: number;
+  stock_code: string;
+  side: "BUY" | "SELL";
+  qty: number;
+  price: number;
+  trade_date: string;
+  realized_pnl: number | null;
+  note: string | null;
+  created_at: string | null;
+};
+
+export type PositionTradePayload = {
+  qty: number;
+  price: number;
+  trade_date: string;
+  note?: string | null;
 };
 
 export type StockSearchItem = {
@@ -182,4 +240,85 @@ export async function fetchSystemStatus(): Promise<SystemStatus> {
 
 export function getJobStatusSSEUrl(): string {
   return `${API_BASE}/api/jobs/daily-baseline/status/stream`;
+}
+
+export async function previewBuy(
+  stock_code: string,
+  qty: number,
+  price: number,
+): Promise<BuyPreview> {
+  const params = new URLSearchParams({
+    qty: String(qty),
+    price: String(price),
+  });
+  const res = await fetch(
+    `${API_BASE}/api/positions/${encodeURIComponent(stock_code)}/preview-buy?${params}`,
+    { cache: "no-store" },
+  );
+  if (!res.ok) {
+    const detail = await res.text();
+    throw new Error(detail || "failed to preview buy");
+  }
+  return (await res.json()) as BuyPreview;
+}
+
+export async function registerBuy(
+  stock_code: string,
+  payload: PositionTradePayload,
+): Promise<BuyResult> {
+  const res = await fetch(
+    `${API_BASE}/api/positions/${encodeURIComponent(stock_code)}/buys`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    },
+  );
+  if (!res.ok) {
+    let message = "登记买入失败";
+    try {
+      const body = (await res.json()) as { detail?: string };
+      if (body.detail) message = body.detail;
+    } catch {
+      // ignore
+    }
+    throw new Error(message);
+  }
+  return (await res.json()) as BuyResult;
+}
+
+export async function registerSell(
+  stock_code: string,
+  payload: PositionTradePayload,
+): Promise<SellResult> {
+  const res = await fetch(
+    `${API_BASE}/api/positions/${encodeURIComponent(stock_code)}/sells`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    },
+  );
+  if (!res.ok) {
+    let message = "登记减持失败";
+    try {
+      const body = (await res.json()) as { detail?: string };
+      if (body.detail) message = body.detail;
+    } catch {
+      // ignore
+    }
+    throw new Error(message);
+  }
+  return (await res.json()) as SellResult;
+}
+
+export async function fetchLedgers(stock_code: string): Promise<LedgerItem[]> {
+  const res = await fetch(
+    `${API_BASE}/api/positions/${encodeURIComponent(stock_code)}/ledgers`,
+    { cache: "no-store" },
+  );
+  if (!res.ok) {
+    throw new Error("failed to fetch ledgers");
+  }
+  return (await res.json()) as LedgerItem[];
 }

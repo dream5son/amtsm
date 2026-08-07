@@ -4,9 +4,10 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
 from app.db.connection import get_db
-from app.db.models import Watchlist
+from app.db.models import Position, PositionLedger, Watchlist
 from app.engine.state import runtime_state
 from app.schemas.watchlist import WatchlistCreate
+from app.services.position_math import stop_distance_pct, unrealized_pnl
 from app.services.stock_search_service import normalize_stock_code
 
 
@@ -78,11 +79,16 @@ def list_watchlist(limit: int = 50, offset: int = 0) -> list[dict]:
                             END
                         ) - lb.actual_n
                         ELSE 0
-                    END AS insufficient_days
+                    END AS insufficient_days,
+                    COALESCE(p.position_status, 'EMPTY') AS position_status,
+                    COALESCE(p.qty, 0) AS position_qty,
+                    p.avg_cost,
+                    p.stop_price
                 FROM watchlist w
                 JOIN strategy_config sc ON sc.id = 1
                 LEFT JOIN latest_snapshots ls ON ls.stock_code = w.stock_code
                 LEFT JOIN latest_baselines lb ON lb.stock_code = w.stock_code
+                LEFT JOIN positions p ON p.stock_code = w.stock_code
                 ORDER BY w.created_at DESC
                 LIMIT :limit OFFSET :offset
                 """
@@ -92,8 +98,25 @@ def list_watchlist(limit: int = 50, offset: int = 0) -> list[dict]:
     data = [dict(row) for row in rows]
     for item in data:
         item["signal_type"] = runtime_state.signal_state.get(item["stock_code"])
+        qty = int(item.get("position_qty") or 0)
+        if qty <= 0 or item.get("position_status") == "EMPTY":
+            item["position_status"] = "EMPTY"
+            item["position_qty"] = 0
+            item["avg_cost"] = None
+            item["stop_price"] = None
+            item["unrealized_pnl"] = None
+            item["unrealized_pnl_pct"] = None
+            item["stop_distance_pct"] = None
+        else:
+            pnl, pnl_pct = unrealized_pnl(
+                item.get("latest_price"), item.get("avg_cost"), qty
+            )
+            item["unrealized_pnl"] = pnl
+            item["unrealized_pnl_pct"] = pnl_pct
+            item["stop_distance_pct"] = stop_distance_pct(
+                item.get("latest_price"), item.get("stop_price")
+            )
     return data
-
 
 def add_watchlist(payload: WatchlistCreate) -> None:
     normalized_code = normalize_stock_code(payload.stock_code)
@@ -117,6 +140,10 @@ def remove_watchlist(stock_code: str) -> int:
     normalized_code = normalize_stock_code(stock_code)
 
     with get_db() as session:
+        session.query(PositionLedger).filter(
+            PositionLedger.stock_code == normalized_code
+        ).delete()
+        session.query(Position).filter(Position.stock_code == normalized_code).delete()
         deleted = (
             session.query(Watchlist)
             .filter(Watchlist.stock_code == normalized_code)

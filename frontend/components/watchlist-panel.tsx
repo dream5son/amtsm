@@ -3,6 +3,9 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
 
 import JobLogDialog from "@/components/job-log-dialog";
+import PositionLedgerDrawer from "@/components/position-ledger-drawer";
+import RegisterBuyDialog from "@/components/register-buy-dialog";
+import RegisterSellDialog from "@/components/register-sell-dialog";
 import StatusBadge from "@/components/status-badge";
 import {
   createWatchlist,
@@ -30,6 +33,21 @@ function formatChangePct(value: number | null): string {
   return `${sign}${value.toFixed(2)}%`;
 }
 
+function formatPctRatio(value: number | null): string {
+  if (value === null) {
+    return "-";
+  }
+  const pct = value * 100;
+  const sign = pct > 0 ? "+" : "";
+  return `${sign}${pct.toFixed(2)}%`;
+}
+
+function positionStatusLabel(status: WatchlistItem["position_status"]): string {
+  if (status === "HOLDING") return "持仓中";
+  if (status === "PARTIAL") return "部分减持";
+  return "空仓监控";
+}
+
 function renderSignal(signal: "BUY" | "SELL" | null): { dot: string; label: string; cls: string } {
   if (signal === "BUY") {
     return { dot: "🟢", label: "买入", cls: "text-emerald-700" };
@@ -54,6 +72,9 @@ export default function WatchlistPanel() {
   const [sseError, setSseError] = useState(false);
   const [logDialogOpen, setLogDialogOpen] = useState(false);
   const [quoteDelay, setQuoteDelay] = useState(false);
+  const [buyTarget, setBuyTarget] = useState<WatchlistItem | null>(null);
+  const [sellTarget, setSellTarget] = useState<WatchlistItem | null>(null);
+  const [ledgerTarget, setLedgerTarget] = useState<WatchlistItem | null>(null);
 
   useEffect(() => {
     void loadWatchlist();
@@ -289,13 +310,19 @@ export default function WatchlistPanel() {
 
       <div className="overflow-x-auto">
         {watchlist.length > 0 ? (
-          <table className="w-full min-w-[820px] border-collapse text-sm">
+          <table className="w-full min-w-[1280px] border-collapse text-sm">
             <thead>
               <tr className="border-b border-slate-200 text-slate-500">
                 <th className="py-2 text-left font-medium">代码</th>
                 <th className="py-2 text-left font-medium">名称</th>
                 <th className="py-2 text-left font-medium">最新价</th>
                 <th className="py-2 text-left font-medium">涨跌幅</th>
+                <th className="py-2 text-left font-medium">持仓状态</th>
+                <th className="py-2 text-left font-medium">持仓数量</th>
+                <th className="py-2 text-left font-medium">成本价</th>
+                <th className="py-2 text-left font-medium">浮动盈亏</th>
+                <th className="py-2 text-left font-medium">止损参考价</th>
+                <th className="py-2 text-left font-medium">距止损</th>
                 <th className="py-2 text-left font-medium">状态</th>
                 <th className="py-2 text-left font-medium">信号</th>
                 <th className="py-2 text-left font-medium">定时任务</th>
@@ -306,6 +333,8 @@ export default function WatchlistPanel() {
             <tbody>
               {watchlist.map((item) => {
                 const signal = renderSignal(item.signal_type);
+                const holding = item.position_status !== "EMPTY" && item.position_qty > 0;
+                const riskCls = holding ? "py-2 pr-2 font-semibold text-slate-900" : "py-2 pr-2 text-slate-500";
                 return (
                   <tr key={item.stock_code} className="border-b border-slate-100">
                     <td className="py-2 pr-2 text-slate-700">{item.stock_code}</td>
@@ -321,6 +350,32 @@ export default function WatchlistPanel() {
                       }
                     >
                       {formatChangePct(item.change_pct)}
+                    </td>
+                    <td className={riskCls}>{positionStatusLabel(item.position_status)}</td>
+                    <td className={riskCls}>{holding ? item.position_qty : "0"}</td>
+                    <td className={riskCls}>
+                      {holding && item.avg_cost != null ? item.avg_cost.toFixed(3) : "-"}
+                    </td>
+                    <td
+                      className={
+                        !holding
+                          ? "py-2 pr-2 text-slate-500"
+                          : item.unrealized_pnl != null && item.unrealized_pnl > 0
+                            ? "py-2 pr-2 font-semibold text-emerald-700"
+                            : item.unrealized_pnl != null && item.unrealized_pnl < 0
+                              ? "py-2 pr-2 font-semibold text-rose-700"
+                              : "py-2 pr-2 font-semibold text-slate-900"
+                      }
+                    >
+                      {holding && item.unrealized_pnl != null
+                        ? `${item.unrealized_pnl.toFixed(2)} (${formatPctRatio(item.unrealized_pnl_pct)})`
+                        : "-"}
+                    </td>
+                    <td className={riskCls}>
+                      {holding && item.stop_price != null ? item.stop_price.toFixed(3) : "-"}
+                    </td>
+                    <td className={riskCls}>
+                      {holding ? formatPctRatio(item.stop_distance_pct) : "-"}
                     </td>
                     <td className="py-2 pr-2">
                       <StatusBadge status={item.status} />
@@ -357,14 +412,39 @@ export default function WatchlistPanel() {
                       {item.insufficient_days && item.insufficient_days > 0 ? `数据不足 ${item.insufficient_days} 天` : "--"}
                     </td>
                     <td className="py-2">
-                      <button
-                        type="button"
-                        onClick={() => void onRemove(item)}
-                        disabled={removingCode === item.stock_code}
-                        className="rounded-md border border-rose-300 px-3 py-1.5 text-xs font-medium text-rose-700 transition-colors hover:bg-rose-50 disabled:cursor-not-allowed disabled:bg-rose-50 disabled:text-rose-300"
-                      >
-                        {removingCode === item.stock_code ? "移除中..." : "移除"}
-                      </button>
+                      <div className="flex flex-wrap gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => setBuyTarget(item)}
+                          className="rounded-md border border-sky-300 px-2.5 py-1.5 text-xs font-medium text-sky-700 transition-colors hover:bg-sky-50"
+                        >
+                          登记买入
+                        </button>
+                        {holding ? (
+                          <button
+                            type="button"
+                            onClick={() => setSellTarget(item)}
+                            className="rounded-md border border-amber-300 px-2.5 py-1.5 text-xs font-medium text-amber-800 transition-colors hover:bg-amber-50"
+                          >
+                            登记减持
+                          </button>
+                        ) : null}
+                        <button
+                          type="button"
+                          onClick={() => setLedgerTarget(item)}
+                          className="rounded-md border border-slate-300 px-2.5 py-1.5 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-100"
+                        >
+                          流水
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void onRemove(item)}
+                          disabled={removingCode === item.stock_code}
+                          className="rounded-md border border-rose-300 px-2.5 py-1.5 text-xs font-medium text-rose-700 transition-colors hover:bg-rose-50 disabled:cursor-not-allowed disabled:bg-rose-50 disabled:text-rose-300"
+                        >
+                          {removingCode === item.stock_code ? "移除中..." : "移除"}
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 );
@@ -381,6 +461,32 @@ export default function WatchlistPanel() {
       ) : null}
 
       <JobLogDialog open={logDialogOpen} onClose={() => setLogDialogOpen(false)} />
+      <RegisterBuyDialog
+        open={buyTarget != null}
+        item={buyTarget}
+        onClose={() => setBuyTarget(null)}
+        onSuccess={() => {
+          setMessage(buyTarget ? `已登记买入 ${buyTarget.stock_name}` : "已登记买入");
+          void loadWatchlist();
+        }}
+      />
+      <RegisterSellDialog
+        open={sellTarget != null}
+        item={sellTarget}
+        onClose={() => setSellTarget(null)}
+        onSuccess={(realizedPnl) => {
+          const name = sellTarget?.stock_name ?? "";
+          setMessage(
+            `已登记减持 ${name}，本笔已实现盈亏 ${realizedPnl.toFixed(2)}`,
+          );
+          void loadWatchlist();
+        }}
+      />
+      <PositionLedgerDrawer
+        open={ledgerTarget != null}
+        item={ledgerTarget}
+        onClose={() => setLedgerTarget(null)}
+      />
     </section>
   );
 }

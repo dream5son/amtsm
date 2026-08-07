@@ -20,3 +20,10 @@ class WatchlistItem(BaseModel):
     effective_n: int
     insufficient_days: int | None = None
     signal_type: Literal["BUY", "SELL"] | None = None
+    position_status: Literal["EMPTY", "HOLDING", "PARTIAL"] = "EMPTY"
+    position_qty: int = 0
+    avg_cost: float | None = None
+    stop_price: float | None = None
+    unrealized_pnl: float | None = None
+    unrealized_pnl_pct: float | None = None
+    stop_distance_pct: float | None = None

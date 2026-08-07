@@ -66,11 +66,31 @@ def _ensure_alert_log_columns() -> None:
             conn.execute(text("ALTER TABLE alert_logs ADD COLUMN error_message TEXT"))
 
 
+def _ensure_stop_loss_pct_column() -> None:
+    existing_columns = _existing_columns("strategy_config")
+    if not existing_columns:
+        return
+
+    if "stop_loss_pct" in existing_columns:
+        return
+
+    with get_engine().begin() as conn:
+        conn.execute(
+            text("ALTER TABLE strategy_config ADD COLUMN stop_loss_pct REAL DEFAULT 0.08")
+        )
+        conn.execute(
+            text(
+                "UPDATE strategy_config SET stop_loss_pct = COALESCE(stop_loss_pct, 0.08)"
+            )
+        )
+
+
 def init_db() -> None:
     enable_wal()
     Base.metadata.create_all(get_engine())
     _ensure_strategy_columns()
     _ensure_alert_log_columns()
+    _ensure_stop_loss_pct_column()
 
     with get_db() as session:
         stmt = (
@@ -81,6 +101,7 @@ def init_db() -> None:
                 global_buy_x=1.10,
                 global_sell_n=60,
                 global_sell_y=0.90,
+                stop_loss_pct=0.08,
             )
             .on_conflict_do_nothing(index_elements=["id"])
         )
