@@ -13,7 +13,7 @@ from app.api.strategy import router as strategy_router
 from app.api.watchlist import router as watchlist_router
 from app.config import settings
 from app.db.init_db import init_db
-from app.engine.scheduler import create_scheduler
+from app.engine.scheduler import create_scheduler, get_scheduler
 from app.services.wechat_notifier import wechat_notifier
 
 logger = logging.getLogger(__name__)
@@ -32,11 +32,13 @@ async def lifespan(_: FastAPI):
             logger.exception(
                 "WeChat channel self-check raised unexpectedly; continuing startup"
             )
-    scheduler.start()
+    # Prefer module singleton (same instance as create_scheduler return).
+    active = get_scheduler() or scheduler
+    active.start()
     try:
         yield
     finally:
-        scheduler.shutdown(wait=False)
+        active.shutdown(wait=False)
 
 
 app = FastAPI(title="AMTSM API", lifespan=lifespan)

@@ -4,6 +4,7 @@ from zoneinfo import ZoneInfo
 from app.config import settings
 from app.db.connection import get_db
 from app.db.init_db import init_db
+from app.db.models import DailyBaseline, StrategyConfig
 from app.engine.state import runtime_state
 from app.engine.tasks import (
     _ensure_baseline_cache_for_trade_date,
@@ -37,14 +38,17 @@ def test_restore_baseline_cache_from_db(tmp_path, monkeypatch) -> None:
     init_db()
     runtime_state.reset_daily()
 
-    with get_db() as conn:
-        conn.execute(
-            """
-            INSERT INTO daily_baselines (stock_code, trade_date, low_min, high_max, actual_n)
-            VALUES ('sh600519', '2026-08-05', 100.0, 120.0, 60)
-            """
+    with get_db() as session:
+        session.add(
+            DailyBaseline(
+                stock_code="sh600519",
+                trade_date="2026-08-05",
+                low_min=100.0,
+                high_max=120.0,
+                actual_n=60,
+            )
         )
-        conn.commit()
+        session.commit()
 
     restored = _ensure_baseline_cache_for_trade_date("2026-08-05")
     assert restored
@@ -62,15 +66,20 @@ def test_market_polling_generates_signal_and_keeps_previous_signal(tmp_path, mon
     runtime_state.reset_daily()
     add_watchlist(WatchlistCreate(stock_code="600519", stock_name="贵州茅台"))
 
-    with get_db() as conn:
-        conn.execute("UPDATE strategy_config SET global_buy_x = 1.10, global_sell_y = 0.90 WHERE id = 1")
-        conn.execute(
-            """
-            INSERT INTO daily_baselines (stock_code, trade_date, low_min, high_max, actual_n)
-            VALUES ('sh600519', '2026-08-05', 100.0, 130.0, 60)
-            """
+    with get_db() as session:
+        cfg = session.get(StrategyConfig, 1)
+        cfg.global_buy_x = 1.10
+        cfg.global_sell_y = 0.90
+        session.add(
+            DailyBaseline(
+                stock_code="sh600519",
+                trade_date="2026-08-05",
+                low_min=100.0,
+                high_max=130.0,
+                actual_n=60,
+            )
         )
-        conn.commit()
+        session.commit()
 
     fake_now = datetime(2026, 8, 5, 10, 0, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
     monkeypatch.setattr("app.engine.tasks.datetime", _FrozenDateTime(fake_now))

@@ -1,12 +1,19 @@
 import logging
-import sqlite3
-from datetime import datetime
+from datetime import date, datetime, timedelta
+
+from sqlalchemy import select, text
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.exc import SQLAlchemyError
 
 from app.config import settings
-from app.db.baseline_job_log_repo import create_job_log, finish_job_log, insert_log_item
 from app.db.connection import get_db
-from app.db.daily_baseline_repo import get_baselines_by_date, upsert_baseline
-from app.db.daily_snapshot_repo import upsert_snapshot
+from app.db.models import (
+    BaselineJobLog,
+    BaselineJobLogItem,
+    DailyBaseline,
+    DailyMarketSnapshot,
+    Watchlist,
+)
 from app.engine.baseline_calculator import InsufficientDataError, compute_baseline
 from app.engine.market_hours import (
     SH_TZ,
@@ -43,11 +50,385 @@ JOB_NAME = "daily-baseline-precompute"
 # Re-export for existing tests / callers.
 __all__ = [
     "baseline_precompute_task",
+    "bootstrap_watchlist_snapshot",
     "daily_snapshot_task",
+    "intraday_snapshot_task",
     "is_in_trading_session",
     "is_trading_day",
     "market_polling_task",
+    "upsert_snapshot",
+    "get_snapshot",
 ]
+
+
+def _create_job_log(job_name: str, trade_date: str) -> int:
+    with get_db() as session:
+        row = BaselineJobLog(
+            job_name=job_name,
+            trade_date=trade_date,
+            status="RUNNING",
+            started_at=datetime.now(),
+        )
+        session.add(row)
+        session.commit()
+        return int(row.id)
+
+
+def _finish_job_log(
+    job_log_id: int,
+    status: str,
+    total_count: int,
+    success_count: int,
+    failed_count: int,
+    error_summary: str | None = None,
+) -> None:
+    now = datetime.now()
+    with get_db() as session:
+        row = session.get(BaselineJobLog, job_log_id)
+        if row is None:
+            return
+        row.status = status
+        row.finished_at = now
+        row.total_count = total_count
+        row.success_count = success_count
+        row.failed_count = failed_count
+        row.error_summary = error_summary
+        row.updated_at = now
+        session.commit()
+
+
+def _insert_log_item(
+    job_log_id: int,
+    stock_code: str,
+    stock_name: str | None,
+    strategy_n: int,
+    actual_n: int | None,
+    status: str,
+    low_min: float | None = None,
+    high_max: float | None = None,
+    error_message: str | None = None,
+) -> None:
+    with get_db() as session:
+        session.add(
+            BaselineJobLogItem(
+                job_log_id=job_log_id,
+                stock_code=stock_code,
+                stock_name=stock_name,
+                strategy_n=strategy_n,
+                actual_n=actual_n,
+                status=status,
+                low_min=low_min,
+                high_max=high_max,
+                error_message=error_message,
+            )
+        )
+        session.commit()
+
+
+def upsert_baseline(
+    stock_code: str, trade_date: str, low_min: float, high_max: float, actual_n: int
+) -> None:
+    now = datetime.now()
+    with get_db() as session:
+        stmt = (
+            sqlite_insert(DailyBaseline)
+            .values(
+                stock_code=stock_code,
+                trade_date=trade_date,
+                low_min=low_min,
+                high_max=high_max,
+                actual_n=actual_n,
+                updated_at=now,
+            )
+            .on_conflict_do_update(
+                index_elements=["stock_code", "trade_date"],
+                set_={
+                    "low_min": low_min,
+                    "high_max": high_max,
+                    "actual_n": actual_n,
+                    "updated_at": now,
+                },
+            )
+        )
+        session.execute(stmt)
+        session.commit()
+
+
+def get_baselines_by_date(trade_date: str) -> list[dict]:
+    with get_db() as session:
+        rows = session.scalars(
+            select(DailyBaseline).where(DailyBaseline.trade_date == trade_date)
+        ).all()
+        return [
+            {
+                "stock_code": r.stock_code,
+                "trade_date": r.trade_date,
+                "low_min": r.low_min,
+                "high_max": r.high_max,
+                "actual_n": r.actual_n,
+                "updated_at": r.updated_at,
+            }
+            for r in rows
+        ]
+
+
+def upsert_snapshot(
+    stock_code: str,
+    trade_date: str,
+    open_price: float,
+    high_price: float,
+    low_price: float,
+    close_price: float,
+    volume: float,
+    turnover_rate: float | None = None,
+) -> None:
+    """Insert or update a daily market snapshot (PK: stock_code + trade_date)."""
+    now = datetime.now()
+    with get_db() as session:
+        stmt = (
+            sqlite_insert(DailyMarketSnapshot)
+            .values(
+                stock_code=stock_code,
+                trade_date=trade_date,
+                open_price=open_price,
+                high_price=high_price,
+                low_price=low_price,
+                close_price=close_price,
+                volume=volume,
+                turnover_rate=turnover_rate,
+                updated_at=now,
+            )
+            .on_conflict_do_update(
+                index_elements=["stock_code", "trade_date"],
+                set_={
+                    "open_price": open_price,
+                    "high_price": high_price,
+                    "low_price": low_price,
+                    "close_price": close_price,
+                    "volume": volume,
+                    "turnover_rate": turnover_rate,
+                    "updated_at": now,
+                },
+            )
+        )
+        session.execute(stmt)
+        session.commit()
+
+
+def _upsert_snapshot_from_quote(stock_code: str, trade_date: str, quote: dict) -> bool:
+    """Write/update a snapshot row from a Sina realtime quote. Returns True on success."""
+    price = quote.get("price")
+    if not quote.get("has_quote") or price is None or float(price) <= 0:
+        return False
+
+    close_price = float(price)
+    open_raw = quote.get("open")
+    open_price = (
+        float(open_raw)
+        if open_raw is not None and float(open_raw) > 0
+        else close_price
+    )
+    high_raw = quote.get("high")
+    high_price = (
+        float(high_raw)
+        if high_raw is not None and float(high_raw) > 0
+        else max(open_price, close_price)
+    )
+    low_raw = quote.get("low")
+    low_price = (
+        float(low_raw)
+        if low_raw is not None and float(low_raw) > 0
+        else min(open_price, close_price)
+    )
+    volume_raw = quote.get("volume")
+    volume = float(volume_raw) if volume_raw is not None else 0.0
+
+    upsert_snapshot(
+        stock_code=stock_code,
+        trade_date=trade_date,
+        open_price=open_price,
+        high_price=high_price,
+        low_price=low_price,
+        close_price=close_price,
+        volume=volume,
+        turnover_rate=None,
+    )
+    return True
+
+
+def _bootstrap_from_daily_bars(stock_code: str, *, lookback_days: int = 5) -> bool:
+    """Fallback: find the nearest available unadjusted daily bar and upsert it."""
+    today = datetime.now(SH_TZ).date()
+    for offset in range(lookback_days):
+        candidate: date = today - timedelta(days=offset)
+        if not is_trading_day(candidate):
+            continue
+        try:
+            bar = fetch_trade_day_bar(
+                stock_code,
+                candidate,
+                retries=settings.snapshot_fetch_retries,
+                retry_backoff_seconds=settings.snapshot_fetch_retry_backoff_seconds,
+            )
+            upsert_snapshot(
+                stock_code=stock_code,
+                trade_date=candidate.isoformat(),
+                open_price=float(bar["open"]),
+                high_price=float(bar["high"]),
+                low_price=float(bar["low"]),
+                close_price=float(bar["close"]),
+                volume=float(bar["volume"]),
+                turnover_rate=(
+                    float(bar["turnover_rate"])
+                    if bar.get("turnover_rate") is not None
+                    else None
+                ),
+            )
+            return True
+        except MissingTradeDayBarError:
+            continue
+        except (MarketDataUnavailableError, StockDataFetchError) as exc:
+            logger.warning(
+                "bootstrap_watchlist_snapshot daily-bar fallback failed for %s on %s: %s",
+                stock_code,
+                candidate.isoformat(),
+                exc,
+            )
+            return False
+    return False
+
+
+def bootstrap_watchlist_snapshot(stock_code: str) -> None:
+    """Fetch and persist a market snapshot after a stock is added to the watchlist."""
+    today = datetime.now(SH_TZ).date()
+    trade_date = today.isoformat()
+    try:
+        quotes = fetch_realtime_quotes_batch(
+            [stock_code],
+            timeout_seconds=settings.polling_request_timeout_seconds,
+            retries=settings.polling_request_retries,
+            retry_backoff_seconds=settings.polling_request_retry_backoff_seconds,
+        )
+        quote = quotes.get(stock_code) or {}
+        quote_date = quote.get("quote_date")
+        if quote_date:
+            trade_date = str(quote_date)
+        if _upsert_snapshot_from_quote(stock_code, trade_date, quote):
+            logger.info(
+                "bootstrap_watchlist_snapshot upserted %s from realtime trade_date=%s",
+                stock_code,
+                trade_date,
+            )
+            return
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "bootstrap_watchlist_snapshot realtime failed for %s: %s",
+            stock_code,
+            exc,
+        )
+
+    try:
+        if _bootstrap_from_daily_bars(stock_code):
+            logger.info(
+                "bootstrap_watchlist_snapshot upserted %s from daily bar fallback",
+                stock_code,
+            )
+        else:
+            logger.warning(
+                "bootstrap_watchlist_snapshot found no snapshot data for %s",
+                stock_code,
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "bootstrap_watchlist_snapshot failed for %s: %s",
+            stock_code,
+            exc,
+        )
+
+
+def intraday_snapshot_task() -> None:
+    """During trading sessions, refresh today's snapshots from realtime quotes (~1min)."""
+    now = datetime.now(SH_TZ)
+    today = now.date()
+    trade_date = today.isoformat()
+
+    if not is_trading_day(today):
+        return
+    if not is_in_trading_session(now.time()):
+        return
+
+    with get_db() as session:
+        rows = session.scalars(
+            select(Watchlist)
+            .where(Watchlist.status == "NORMAL")
+            .order_by(Watchlist.stock_code)
+        ).all()
+        codes = [r.stock_code for r in rows]
+
+    if not codes:
+        return
+
+    batch_size = max(1, settings.polling_batch_size)
+    success_count = 0
+    skipped_count = 0
+
+    for start in range(0, len(codes), batch_size):
+        batch = codes[start : start + batch_size]
+        try:
+            quotes = fetch_realtime_quotes_batch(
+                batch,
+                timeout_seconds=settings.polling_request_timeout_seconds,
+                retries=settings.polling_request_retries,
+                retry_backoff_seconds=settings.polling_request_retry_backoff_seconds,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "intraday_snapshot_task batch fetch failed codes=%s error=%s",
+                ",".join(batch[:5]),
+                exc,
+            )
+            skipped_count += len(batch)
+            continue
+
+        for code in batch:
+            quote = quotes.get(code) or {}
+            try:
+                if _upsert_snapshot_from_quote(code, trade_date, quote):
+                    success_count += 1
+                else:
+                    skipped_count += 1
+            except Exception as exc:  # noqa: BLE001
+                skipped_count += 1
+                logger.warning(
+                    "intraday_snapshot_task upsert failed for %s: %s",
+                    code,
+                    exc,
+                )
+
+    logger.info(
+        "intraday_snapshot_task finished trade_date=%s total=%d success=%d skipped=%d",
+        trade_date,
+        len(codes),
+        success_count,
+        skipped_count,
+    )
+
+def get_snapshot(stock_code: str, trade_date: str) -> dict | None:
+    with get_db() as session:
+        row = session.get(DailyMarketSnapshot, (stock_code, trade_date))
+        if row is None:
+            return None
+        return {
+            "stock_code": row.stock_code,
+            "trade_date": row.trade_date,
+            "open_price": row.open_price,
+            "high_price": row.high_price,
+            "low_price": row.low_price,
+            "close_price": row.close_price,
+            "volume": row.volume,
+            "turnover_rate": row.turnover_rate,
+            "updated_at": row.updated_at,
+        }
 
 
 def baseline_precompute_task() -> None:
@@ -61,17 +442,27 @@ def baseline_precompute_task() -> None:
 
     runtime_state.job_status = "RUNNING"
 
-    job_log_id = create_job_log(JOB_NAME, today)
+    job_log_id = _create_job_log(JOB_NAME, today)
 
     # Load NORMAL + HALT (exclude DELISTED). HALT may resume after pre-market.
-    with get_db() as conn:
-        rows = conn.execute(
-            """SELECT w.stock_code, w.stock_name, w.status,
-                      COALESCE(w.custom_n, CASE WHEN sc.global_buy_n >= sc.global_sell_n THEN sc.global_buy_n ELSE sc.global_sell_n END) AS effective_n
-               FROM watchlist w
-               JOIN strategy_config sc ON sc.id = 1
-               WHERE w.status IN ('NORMAL', 'HALT')"""
-        ).fetchall()
+    with get_db() as session:
+        rows = session.execute(
+            text(
+                """
+                SELECT w.stock_code, w.stock_name, w.status,
+                       COALESCE(
+                           w.custom_n,
+                           CASE
+                               WHEN sc.global_buy_n >= sc.global_sell_n THEN sc.global_buy_n
+                               ELSE sc.global_sell_n
+                           END
+                       ) AS effective_n
+                FROM watchlist w
+                JOIN strategy_config sc ON sc.id = 1
+                WHERE w.status IN ('NORMAL', 'HALT')
+                """
+            )
+        ).mappings().all()
     stocks = [dict(r) for r in rows]
 
     total = len(stocks)
@@ -110,10 +501,10 @@ def baseline_precompute_task() -> None:
                 )
 
             try:
-                insert_log_item(
+                _insert_log_item(
                     job_log_id, code, name, n, actual_n, "SUCCESS", low_min, high_max
                 )
-            except sqlite3.Error as log_exc:
+            except SQLAlchemyError as log_exc:
                 logger.error("Failed to write log item for %s: %s", code, log_exc)
 
             if actual_n < n:
@@ -136,10 +527,10 @@ def baseline_precompute_task() -> None:
             failed_count += total - success_count
             errors.append(f"Market data unavailable: {exc}")
             try:
-                insert_log_item(
+                _insert_log_item(
                     job_log_id, code, name, n, None, "FAILED", error_message=str(exc)
                 )
-            except sqlite3.Error as log_exc:
+            except SQLAlchemyError as log_exc:
                 logger.error(
                     "Failed to write failed log item for %s: %s", code, log_exc
                 )
@@ -152,10 +543,10 @@ def baseline_precompute_task() -> None:
             failed_count += 1
             errors.append(f"{code}: {exc}")
             try:
-                insert_log_item(
+                _insert_log_item(
                     job_log_id, code, name, n, None, "FAILED", error_message=str(exc)
                 )
-            except sqlite3.Error as log_exc:
+            except SQLAlchemyError as log_exc:
                 logger.error(
                     "Failed to write failed log item for %s: %s", code, log_exc
                 )
@@ -167,10 +558,10 @@ def baseline_precompute_task() -> None:
             failed_count += 1
             errors.append(f"{code}: {exc}")
             try:
-                insert_log_item(
+                _insert_log_item(
                     job_log_id, code, name, n, None, "FAILED", error_message=str(exc)
                 )
-            except sqlite3.Error as log_exc:
+            except SQLAlchemyError as log_exc:
                 logger.error(
                     "Failed to write failed log item for %s: %s", code, log_exc
                 )
@@ -186,7 +577,7 @@ def baseline_precompute_task() -> None:
     final_status = "FAILED" if failed_count > 0 else "SUCCESS"
     error_summary = "; ".join(errors[:10]) if errors else None
 
-    finish_job_log(
+    _finish_job_log(
         job_log_id, final_status, total, success_count, failed_count, error_summary
     )
 
@@ -219,19 +610,21 @@ def market_polling_task() -> None:
         logger.warning("market_polling_task skipped: no baselines for %s", trade_date)
         return
 
-    with get_db() as conn:
-        rows = conn.execute(
-            """
-            SELECT
-                w.stock_code,
-                w.stock_name,
-                COALESCE(w.custom_x, sc.global_buy_x) AS effective_x,
-                COALESCE(w.custom_y, sc.global_sell_y) AS effective_y
-            FROM watchlist w
-            JOIN strategy_config sc ON sc.id = 1
-            WHERE w.status = 'NORMAL'
-            """
-        ).fetchall()
+    with get_db() as session:
+        rows = session.execute(
+            text(
+                """
+                SELECT
+                    w.stock_code,
+                    w.stock_name,
+                    COALESCE(w.custom_x, sc.global_buy_x) AS effective_x,
+                    COALESCE(w.custom_y, sc.global_sell_y) AS effective_y
+                FROM watchlist w
+                JOIN strategy_config sc ON sc.id = 1
+                WHERE w.status = 'NORMAL'
+                """
+            )
+        ).mappings().all()
 
     stocks = [dict(row) for row in rows]
     if not stocks:
@@ -446,16 +839,13 @@ def daily_snapshot_task() -> None:
         )
         return
 
-    with get_db() as conn:
-        rows = conn.execute(
-            """
-            SELECT stock_code, stock_name
-            FROM watchlist
-            WHERE status = 'NORMAL'
-            ORDER BY stock_code
-            """
-        ).fetchall()
-    stocks = [dict(row) for row in rows]
+    with get_db() as session:
+        rows = session.scalars(
+            select(Watchlist)
+            .where(Watchlist.status == "NORMAL")
+            .order_by(Watchlist.stock_code)
+        ).all()
+        stocks = [{"stock_code": r.stock_code, "stock_name": r.stock_name} for r in rows]
 
     total = len(stocks)
     if total == 0:

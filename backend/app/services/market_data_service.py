@@ -259,6 +259,9 @@ def fetch_realtime_quotes_batch(
         "price": float | None,
         "open": float | None,
         "prev_close": float | None,
+        "high": float | None,
+        "low": float | None,
+        "volume": float | None,
         "quote_date": str | None,
         "quote_time": str | None,
         "is_halted": bool,
@@ -331,6 +334,9 @@ def _parse_sina_realtime_quotes(raw_text: str, stock_codes: list[str]) -> dict[s
         open_price = _to_float(fields[1]) if len(fields) >= 2 else None
         prev_close = _to_float(fields[2]) if len(fields) >= 3 else None
         price = _to_float(fields[3]) if len(fields) >= 4 else None
+        high_price = _to_float(fields[4]) if len(fields) >= 5 else None
+        low_price = _to_float(fields[5]) if len(fields) >= 6 else None
+        volume = _to_float(fields[8]) if len(fields) >= 9 else None
         quote_date = fields[30].strip() if len(fields) >= 31 and fields[30].strip() else None
         quote_time = fields[31].strip() if len(fields) >= 32 and fields[31].strip() else None
 
@@ -341,6 +347,9 @@ def _parse_sina_realtime_quotes(raw_text: str, stock_codes: list[str]) -> dict[s
             "price": price,
             "open": open_price,
             "prev_close": prev_close,
+            "high": high_price,
+            "low": low_price,
+            "volume": volume,
             "quote_date": quote_date,
             "quote_time": quote_time,
             "is_halted": is_halted,
@@ -355,6 +364,9 @@ def _parse_sina_realtime_quotes(raw_text: str, stock_codes: list[str]) -> dict[s
                 "price": None,
                 "open": None,
                 "prev_close": None,
+                "high": None,
+                "low": None,
+                "volume": None,
                 "quote_date": None,
                 "quote_time": None,
                 "is_halted": False,

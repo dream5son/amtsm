@@ -6,8 +6,8 @@ import logging
 from datetime import UTC, datetime
 
 from app.config import settings
-from app.db.alert_logs_repo import get_alert, insert_alert
 from app.engine.state import runtime_state
+from app.services.alert_service import get_alert, insert_alert
 
 logger = logging.getLogger(__name__)
 

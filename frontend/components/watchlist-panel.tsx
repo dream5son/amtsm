@@ -62,6 +62,29 @@ export default function WatchlistPanel() {
   useEffect(() => {
     let cancelled = false;
 
+    async function silentRefreshWatchlist() {
+      try {
+        const data = await fetchWatchlist();
+        if (!cancelled) {
+          setWatchlist(data);
+        }
+      } catch {
+        // Keep last known list; refresh is best-effort.
+      }
+    }
+
+    const timer = window.setInterval(() => {
+      void silentRefreshWatchlist();
+    }, 60_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
     async function pollSystemStatus() {
       try {
         const status = await fetchSystemStatus();

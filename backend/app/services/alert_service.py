@@ -11,11 +11,16 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from enum import Enum
 from typing import Any
 
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
+
 from app.config import settings
-from app.db import alert_logs_repo
+from app.db.connection import get_db
+from app.db.models import AlertLog
 from app.engine.market_hours import is_alert_window_open
 from app.engine.state import runtime_state
 from app.services.wechat_notifier import SendResult, wechat_notifier
@@ -29,6 +34,98 @@ STATUS_SUCCESS = "SUCCESS"
 STATUS_FAILED = "FAILED"
 
 LIMIT_BOARD_NOTE = "（注：该股当前可能处于涨跌停状态，请注意流动性风险）"
+
+
+def _alert_to_dict(row: AlertLog) -> dict:
+    return {
+        "id": row.id,
+        "stock_code": row.stock_code,
+        "trade_date": row.trade_date,
+        "signal_type": row.signal_type,
+        "trigger_price": row.trigger_price,
+        "baseline_price": row.baseline_price,
+        "used_coeff": row.used_coeff,
+        "sent_status": row.sent_status,
+        "error_code": row.error_code,
+        "error_message": row.error_message,
+        "sent_time": row.sent_time,
+    }
+
+
+def get_alert(stock_code: str, trade_date: str, signal_type: str) -> dict | None:
+    with get_db() as session:
+        row = session.scalars(
+            select(AlertLog).where(
+                AlertLog.stock_code == stock_code,
+                AlertLog.trade_date == trade_date,
+                AlertLog.signal_type == signal_type,
+            )
+        ).first()
+        return _alert_to_dict(row) if row else None
+
+
+def insert_alert(
+    *,
+    stock_code: str,
+    trade_date: str,
+    signal_type: str,
+    trigger_price: float,
+    baseline_price: float,
+    used_coeff: float,
+    sent_status: str,
+    error_code: str | None = None,
+    error_message: str | None = None,
+) -> int | None:
+    """Insert an alert log row.
+
+    Returns the new row id, or ``None`` when the unique freq index rejects the insert.
+    """
+    now = datetime.now(UTC)
+    try:
+        with get_db() as session:
+            row = AlertLog(
+                stock_code=stock_code,
+                trade_date=trade_date,
+                signal_type=signal_type,
+                trigger_price=trigger_price,
+                baseline_price=baseline_price,
+                used_coeff=used_coeff,
+                sent_status=sent_status,
+                error_code=error_code,
+                error_message=error_message,
+                sent_time=now,
+            )
+            session.add(row)
+            session.commit()
+            return int(row.id)
+    except IntegrityError:
+        return None
+
+
+def update_alert_result(
+    alert_id: int,
+    *,
+    trigger_price: float,
+    baseline_price: float,
+    used_coeff: float,
+    sent_status: str,
+    error_code: str | None = None,
+    error_message: str | None = None,
+) -> None:
+    """Update an existing alert row after a (re)send attempt."""
+    now = datetime.now(UTC)
+    with get_db() as session:
+        row = session.get(AlertLog, alert_id)
+        if row is None:
+            return
+        row.trigger_price = trigger_price
+        row.baseline_price = baseline_price
+        row.used_coeff = used_coeff
+        row.sent_status = sent_status
+        row.error_code = error_code
+        row.error_message = error_message
+        row.sent_time = now
+        session.commit()
 
 
 class AlertOutcome(str, Enum):
@@ -203,7 +300,7 @@ def _claim_alert_slot(
     an existing FAILED/PENDING row eligible for retry). Returns
     ``(None, SKIPPED_*)`` when the signal must be discarded.
     """
-    existing = alert_logs_repo.get_alert(stock_code, trade_date, signal_type)
+    existing = get_alert(stock_code, trade_date, signal_type)
     if existing is not None:
         status = existing.get("sent_status")
         if status == STATUS_SUCCESS:
@@ -214,7 +311,7 @@ def _claim_alert_slot(
         # FAILED / PENDING: allow retry without re-insert.
         return existing, None
 
-    row_id = alert_logs_repo.insert_alert(
+    row_id = insert_alert(
         stock_code=stock_code,
         trade_date=trade_date,
         signal_type=signal_type,
@@ -400,7 +497,7 @@ def process_alert(candidate: dict[str, Any], *, signal_type: str) -> AlertProces
     error_code, error_message = _error_fields(send_result)
     sent_status = STATUS_SUCCESS if send_result.ok else STATUS_FAILED
 
-    alert_logs_repo.update_alert_result(
+    update_alert_result(
         int(claimed["id"]),
         trigger_price=price,
         baseline_price=baseline_price,

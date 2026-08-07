@@ -1,6 +1,7 @@
 fastapi>=0.116.0
 uvicorn[standard]>=0.35.0
 pydantic-settings>=2.10.0
+sqlalchemy>=2.0
 apscheduler>=3.10.4
 httpx>=0.28.1
 wechatpy[cryptography]>=1.8.18

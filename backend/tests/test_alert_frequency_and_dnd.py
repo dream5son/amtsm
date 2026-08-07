@@ -9,14 +9,15 @@ from unittest.mock import MagicMock
 from zoneinfo import ZoneInfo
 
 from app.config import settings
-from app.db import alert_logs_repo
 from app.db.connection import get_db
 from app.db.init_db import init_db
+from app.db.models import AlertLog
 from app.engine.market_hours import is_alert_window_open
 from app.engine.state import runtime_state
 from app.services import alert_service
 from app.services.alert_service import (
     AlertOutcome,
+    insert_alert,
     process_buy_alert,
     process_sell_alert,
 )
@@ -106,8 +107,8 @@ def test_second_buy_same_day_blocked(tmp_path, monkeypatch) -> None:
     assert second.outcome == AlertOutcome.SKIPPED_MEMORY
     assert mock_send.call_count == 1
 
-    with get_db() as conn:
-        count = conn.execute("SELECT COUNT(*) AS c FROM alert_logs").fetchone()["c"]
+    with get_db() as session:
+        count = session.query(AlertLog).count()
     assert count == 1
 
 
@@ -154,8 +155,8 @@ def test_dnd_outside_trading_hours_discards(tmp_path, monkeypatch) -> None:
     assert result.outcome == AlertOutcome.SKIPPED_DND
     mock_send.assert_not_called()
 
-    with get_db() as conn:
-        count = conn.execute("SELECT COUNT(*) AS c FROM alert_logs").fetchone()["c"]
+    with get_db() as session:
+        count = session.query(AlertLog).count()
     assert count == 0
 
 
@@ -180,13 +181,13 @@ def test_unique_constraint_race_only_one_sends(tmp_path, monkeypatch, caplog) ->
         send_count["n"] += 1
         return _ok_send()
 
-    original_insert = alert_logs_repo.insert_alert
+    original_insert = insert_alert
 
     def _insert_after_barrier(**kwargs):
         barrier.wait(timeout=5)
         return original_insert(**kwargs)
 
-    monkeypatch.setattr(alert_logs_repo, "insert_alert", _insert_after_barrier)
+    monkeypatch.setattr(alert_service, "insert_alert", _insert_after_barrier)
     monkeypatch.setattr(alert_service.wechat_notifier, "send_text", _slow_send)
 
     def _worker() -> None:
@@ -206,8 +207,8 @@ def test_unique_constraint_race_only_one_sends(tmp_path, monkeypatch, caplog) ->
     assert AlertOutcome.SKIPPED_RACE in results
     assert send_count["n"] == 1
 
-    with get_db() as conn:
-        count = conn.execute("SELECT COUNT(*) AS c FROM alert_logs").fetchone()["c"]
+    with get_db() as session:
+        count = session.query(AlertLog).count()
     assert count == 1
     assert any("unique constraint race" in rec.message for rec in caplog.records)
 

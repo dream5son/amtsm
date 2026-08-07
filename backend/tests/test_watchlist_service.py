@@ -1,6 +1,7 @@
 from app.config import settings
 from app.db.connection import get_db
 from app.db.init_db import init_db
+from app.db.models import DailyBaseline, DailyMarketSnapshot, Watchlist
 from app.engine.state import runtime_state
 from app.schemas.watchlist import WatchlistCreate
 from app.services.watchlist_service import (
@@ -65,30 +66,30 @@ def test_list_watchlist_includes_market_fields_and_insufficient_days(tmp_path, m
     runtime_state.reset_daily()
     add_watchlist(WatchlistCreate(stock_code="600519", stock_name="贵州茅台"))
 
-    with get_db() as conn:
-        conn.execute(
-            """
-            UPDATE watchlist
-            SET custom_n = 10
-            WHERE stock_code = 'sh600519'
-            """
+    with get_db() as session:
+        row = session.query(Watchlist).filter_by(stock_code="sh600519").one()
+        row.custom_n = 10
+        session.add(
+            DailyMarketSnapshot(
+                stock_code="sh600519",
+                trade_date="2026-08-01",
+                open_price=100.0,
+                high_price=101.0,
+                low_price=99.0,
+                close_price=104.0,
+                volume=1000000.0,
+            )
         )
-        conn.execute(
-            """
-            INSERT INTO daily_market_snapshots (
-                stock_code, trade_date, open_price, high_price, low_price, close_price, volume
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            ("sh600519", "2026-08-01", 100.0, 101.0, 99.0, 104.0, 1000000.0),
+        session.add(
+            DailyBaseline(
+                stock_code="sh600519",
+                trade_date="2026-08-01",
+                low_min=90.0,
+                high_max=120.0,
+                actual_n=6,
+            )
         )
-        conn.execute(
-            """
-            INSERT INTO daily_baselines (stock_code, trade_date, low_min, high_max, actual_n)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            ("sh600519", "2026-08-01", 90.0, 120.0, 6),
-        )
-        conn.commit()
+        session.commit()
 
     rows = list_watchlist()
     assert len(rows) == 1

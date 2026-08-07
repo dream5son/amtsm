@@ -21,6 +21,7 @@ class Settings(BaseSettings):
     snapshot_fetch_retries: int = 2
     snapshot_fetch_retry_backoff_seconds: float = 0.5
     polling_interval_seconds: int = 5
+    intraday_snapshot_interval_seconds: int = 60
     polling_batch_size: int = 50
     polling_request_timeout_seconds: float = 3.0
     # Max retry attempts after the first failed realtime fetch (user story 12).

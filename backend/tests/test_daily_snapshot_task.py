@@ -6,9 +6,9 @@ import pytest
 
 from app.config import settings
 from app.db.connection import get_db
-from app.db.daily_snapshot_repo import get_snapshot, upsert_snapshot
 from app.db.init_db import init_db
-from app.engine.tasks import daily_snapshot_task
+from app.db.models import DailyMarketSnapshot
+from app.engine.tasks import daily_snapshot_task, get_snapshot, upsert_snapshot
 from app.schemas.watchlist import WatchlistCreate
 from app.services.market_data_service import (
     MarketDataUnavailableError,
@@ -96,10 +96,8 @@ def test_upsert_snapshot_is_idempotent(tmp_path, monkeypatch) -> None:
     upsert_snapshot("sh600519", "2026-08-05", 10, 12, 9, 11, 1000, 1.1)
     upsert_snapshot("sh600519", "2026-08-05", 10.5, 12.5, 9.5, 11.5, 2000, 2.2)
 
-    with get_db() as conn:
-        rows = conn.execute(
-            "SELECT * FROM daily_market_snapshots WHERE stock_code='sh600519'"
-        ).fetchall()
+    with get_db() as session:
+        rows = session.query(DailyMarketSnapshot).filter_by(stock_code="sh600519").all()
     assert len(rows) == 1
     snap = get_snapshot("sh600519", "2026-08-05")
     assert snap is not None
@@ -243,10 +241,8 @@ def test_daily_snapshot_task_upsert_idempotent(tmp_path, monkeypatch) -> None:
     daily_snapshot_task()
     daily_snapshot_task()
 
-    with get_db() as conn:
-        count = conn.execute(
-            "SELECT COUNT(*) AS c FROM daily_market_snapshots WHERE stock_code='sh600519'"
-        ).fetchone()["c"]
+    with get_db() as session:
+        count = session.query(DailyMarketSnapshot).filter_by(stock_code="sh600519").count()
     assert count == 1
     assert get_snapshot("sh600519", "2026-08-05")["close_price"] == 102.0
 

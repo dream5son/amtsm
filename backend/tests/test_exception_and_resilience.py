@@ -7,9 +7,10 @@ import httpx
 import pytest
 
 from app.config import settings
-from app.db.alert_logs_repo import get_alert
 from app.db.connection import get_db
 from app.db.init_db import init_db
+from app.db.models import DailyBaseline, StrategyConfig, Watchlist
+from app.services.alert_service import get_alert
 from app.engine.baseline_calculator import compute_baseline
 from app.engine.resilience import (
     SYSTEM_ALERT_SIGNAL_TYPE,
@@ -87,14 +88,17 @@ def test_insufficient_days_exposed_on_watchlist(tmp_path, monkeypatch) -> None:
     _reset_runtime()
     add_watchlist(WatchlistCreate(stock_code="600519", stock_name="贵州茅台"))
 
-    with get_db() as conn:
-        conn.execute(
-            """
-            INSERT INTO daily_baselines (stock_code, trade_date, low_min, high_max, actual_n)
-            VALUES ('sh600519', '2026-08-05', 10.0, 12.0, 10)
-            """
+    with get_db() as session:
+        session.add(
+            DailyBaseline(
+                stock_code="sh600519",
+                trade_date="2026-08-05",
+                low_min=10.0,
+                high_max=12.0,
+                actual_n=10,
+            )
         )
-        conn.commit()
+        session.commit()
 
     items = list_watchlist()
     assert items[0]["actual_n"] == 10
@@ -167,15 +171,20 @@ def test_halt_persisted_and_excluded_from_polling(tmp_path, monkeypatch) -> None
     _reset_runtime()
     add_watchlist(WatchlistCreate(stock_code="600519", stock_name="贵州茅台"))
 
-    with get_db() as conn:
-        conn.execute("UPDATE strategy_config SET global_buy_x = 1.10, global_sell_y = 0.90 WHERE id = 1")
-        conn.execute(
-            """
-            INSERT INTO daily_baselines (stock_code, trade_date, low_min, high_max, actual_n)
-            VALUES ('sh600519', '2026-08-05', 100.0, 130.0, 60)
-            """
+    with get_db() as session:
+        cfg = session.get(StrategyConfig, 1)
+        cfg.global_buy_x = 1.10
+        cfg.global_sell_y = 0.90
+        session.add(
+            DailyBaseline(
+                stock_code="sh600519",
+                trade_date="2026-08-05",
+                low_min=100.0,
+                high_max=130.0,
+                actual_n=60,
+            )
         )
-        conn.commit()
+        session.commit()
 
     fake_now = datetime(2026, 8, 5, 10, 0, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
     monkeypatch.setattr("app.engine.tasks.datetime", _FrozenDateTime(fake_now))
@@ -199,10 +208,8 @@ def test_halt_persisted_and_excluded_from_polling(tmp_path, monkeypatch) -> None
 
     market_polling_task()
 
-    with get_db() as conn:
-        status = conn.execute(
-            "SELECT status FROM watchlist WHERE stock_code = 'sh600519'"
-        ).fetchone()["status"]
+    with get_db() as session:
+        status = session.query(Watchlist).filter_by(stock_code="sh600519").one().status
     assert status == "HALT"
     assert "sh600519" not in runtime_state.signal_state
 
@@ -227,14 +234,17 @@ def test_missing_quote_does_not_persist_halt(tmp_path, monkeypatch) -> None:
     _reset_runtime()
     add_watchlist(WatchlistCreate(stock_code="600519", stock_name="贵州茅台"))
 
-    with get_db() as conn:
-        conn.execute(
-            """
-            INSERT INTO daily_baselines (stock_code, trade_date, low_min, high_max, actual_n)
-            VALUES ('sh600519', '2026-08-05', 100.0, 130.0, 60)
-            """
+    with get_db() as session:
+        session.add(
+            DailyBaseline(
+                stock_code="sh600519",
+                trade_date="2026-08-05",
+                low_min=100.0,
+                high_max=130.0,
+                actual_n=60,
+            )
         )
-        conn.commit()
+        session.commit()
 
     fake_now = datetime(2026, 8, 5, 10, 0, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
     monkeypatch.setattr("app.engine.tasks.datetime", _FrozenDateTime(fake_now))
@@ -255,10 +265,8 @@ def test_missing_quote_does_not_persist_halt(tmp_path, monkeypatch) -> None:
     )
 
     market_polling_task()
-    with get_db() as conn:
-        status = conn.execute(
-            "SELECT status FROM watchlist WHERE stock_code = 'sh600519'"
-        ).fetchone()["status"]
+    with get_db() as session:
+        status = session.query(Watchlist).filter_by(stock_code="sh600519").one().status
     assert status == "NORMAL"
 
 
@@ -268,9 +276,9 @@ def test_baseline_restores_halt_stock(tmp_path, monkeypatch) -> None:
     init_db()
     _reset_runtime()
     add_watchlist(WatchlistCreate(stock_code="600519", stock_name="贵州茅台"))
-    with get_db() as conn:
-        conn.execute("UPDATE watchlist SET status = 'HALT' WHERE stock_code = 'sh600519'")
-        conn.commit()
+    with get_db() as session:
+        session.query(Watchlist).filter_by(stock_code="sh600519").update({"status": "HALT"})
+        session.commit()
 
     bars = [
         {
@@ -287,16 +295,12 @@ def test_baseline_restores_halt_stock(tmp_path, monkeypatch) -> None:
 
     baseline_precompute_task()
 
-    with get_db() as conn:
-        status = conn.execute(
-            "SELECT status FROM watchlist WHERE stock_code = 'sh600519'"
-        ).fetchone()["status"]
-        baseline = conn.execute(
-            "SELECT actual_n FROM daily_baselines WHERE stock_code = 'sh600519'"
-        ).fetchone()
+    with get_db() as session:
+        status = session.query(Watchlist).filter_by(stock_code="sh600519").one().status
+        baseline = session.query(DailyBaseline).filter_by(stock_code="sh600519").one_or_none()
     assert status == "NORMAL"
     assert baseline is not None
-    assert baseline["actual_n"] == 20
+    assert baseline.actual_n == 20
 
 
 def test_poll_round_records_quote_delay_on_all_batch_failures(tmp_path, monkeypatch) -> None:
@@ -309,14 +313,17 @@ def test_poll_round_records_quote_delay_on_all_batch_failures(tmp_path, monkeypa
     _reset_runtime()
     add_watchlist(WatchlistCreate(stock_code="600519", stock_name="贵州茅台"))
 
-    with get_db() as conn:
-        conn.execute(
-            """
-            INSERT INTO daily_baselines (stock_code, trade_date, low_min, high_max, actual_n)
-            VALUES ('sh600519', '2026-08-05', 100.0, 130.0, 60)
-            """
+    with get_db() as session:
+        session.add(
+            DailyBaseline(
+                stock_code="sh600519",
+                trade_date="2026-08-05",
+                low_min=100.0,
+                high_max=130.0,
+                actual_n=60,
+            )
         )
-        conn.commit()
+        session.commit()
 
     fake_now = datetime(2026, 8, 5, 10, 0, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
     monkeypatch.setattr("app.engine.tasks.datetime", _FrozenDateTime(fake_now))
