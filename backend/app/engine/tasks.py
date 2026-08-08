@@ -12,6 +12,8 @@ from app.db.models import (
     BaselineJobLogItem,
     DailyBaseline,
     DailyMarketSnapshot,
+    Position,
+    PositionLedger,
     Watchlist,
 )
 from app.engine.baseline_calculator import InsufficientDataError, compute_baseline
@@ -26,10 +28,15 @@ from app.engine.resilience import (
 )
 from app.engine.state import runtime_state
 from app.services.alert_service import (
+    SIGNAL_ADDON,
+    SIGNAL_PARTIAL_TP,
     is_limit_up,
     process_buy_candidates,
+    process_risk_candidates,
     process_sell_candidates,
 )
+from app.services.risk_rules import evaluate, risk_params_from_resolved
+from app.services.strategy_service import resolve_params
 from app.services.market_data_service import (
     MarketDataUnavailableError,
     MissingTradeDayBarError,
@@ -610,6 +617,8 @@ def market_polling_task() -> None:
         logger.warning("market_polling_task skipped: no baselines for %s", trade_date)
         return
 
+    _load_position_cache()
+
     with get_db() as session:
         rows = session.execute(
             text(
@@ -658,6 +667,7 @@ def market_polling_task() -> None:
     halted_persisted = 0
     buy_candidates = 0
     sell_candidates = 0
+    risk_candidates = 0
     candidates: list[dict] = []
 
     for i in range(0, len(valid_stocks), batch_size):
@@ -719,7 +729,146 @@ def market_polling_task() -> None:
             baseline = runtime_state.baseline_cache[code]
             buy_threshold = float(baseline["low_min"]) * float(stock["effective_x"])
             sell_threshold = float(baseline["high_max"]) * float(stock["effective_y"])
+            prev_close = quote.get("prev_close")
+            pos = runtime_state.position_cache.get(code) or {}
+            qty = int(pos.get("qty") or 0)
+            holding = qty > 0
 
+            if holding:
+                avg_cost = pos.get("avg_cost")
+                if avg_cost is None or float(avg_cost) <= 0:
+                    continue
+
+                params = resolve_params(code)
+
+                # Exit already fired today — skip further risk evaluation.
+                if code not in runtime_state.exit_fired_today:
+                    risk = risk_params_from_resolved(params)
+                    prev_ladder = runtime_state.partial_tp_ladder_idx.get(code)
+                    result = evaluate(
+                        avg_cost=float(avg_cost),
+                        highest_since_hold=pos.get("highest_since_hold"),
+                        prev_stop=pos.get("stop_price"),
+                        price=float(price),
+                        params=risk,
+                        prev_ladder_idx=prev_ladder,
+                    )
+
+                    changed = (
+                        pos.get("highest_since_hold") != result.highest_since_hold
+                        or pos.get("stop_price") != result.stop_price
+                    )
+                    if changed:
+                        try:
+                            _persist_position_risk(
+                                code,
+                                highest=result.highest_since_hold,
+                                stop_price=result.stop_price,
+                            )
+                        except Exception as exc:  # noqa: BLE001
+                            logger.warning(
+                                "position_risk_persist_failed stock=%s error=%s",
+                                code,
+                                exc,
+                            )
+
+                    if result.ladder_idx is not None:
+                        runtime_state.partial_tp_ladder_idx[code] = result.ladder_idx
+
+                    if result.exit_signal:
+                        runtime_state.signal_state[code] = result.exit_signal
+                        runtime_state.exit_fired_today.add(code)
+                        risk_candidates += 1
+                        candidates.append(
+                            {
+                                "stock_code": code,
+                                "stock_name": stock["stock_name"],
+                                "signal_type": result.exit_signal,
+                                "price": float(price),
+                                "trade_date": trade_date,
+                                "baseline_price": result.stop_price,
+                                "used_coeff": 1.0,
+                                "actual_n": int(baseline["actual_n"]),
+                                "prev_close": prev_close,
+                                "stop_price": result.stop_price,
+                                "avg_cost": float(avg_cost),
+                                "highest_since_hold": result.highest_since_hold,
+                                "pnl_pct": result.pnl_pct,
+                                "t1_note": _has_same_day_buy(code, trade_date),
+                            }
+                        )
+                    elif result.partial_tp is not None:
+                        runtime_state.signal_state[code] = SIGNAL_PARTIAL_TP
+                        risk_candidates += 1
+                        candidates.append(
+                            {
+                                "stock_code": code,
+                                "stock_name": stock["stock_name"],
+                                "signal_type": SIGNAL_PARTIAL_TP,
+                                "price": float(price),
+                                "trade_date": trade_date,
+                                "baseline_price": result.stop_price,
+                                "used_coeff": result.partial_tp.suggest_sell_pct,
+                                "actual_n": int(baseline["actual_n"]),
+                                "prev_close": prev_close,
+                                "stop_price": result.stop_price,
+                                "avg_cost": float(avg_cost),
+                                "highest_since_hold": result.highest_since_hold,
+                                "pnl_pct": result.partial_tp.pnl_pct,
+                                "suggest_sell_pct": result.partial_tp.suggest_sell_pct,
+                            }
+                        )
+
+                # Holding: optional ADDON / tech SELL (never plain BUY).
+                # Do not overwrite an exit signal already set for the list/UI.
+                current_signal = runtime_state.signal_state.get(code)
+                if current_signal not in {"STOP_LOSS", "TAKE_PROFIT"}:
+                    if params["enable_addon_alert"] and float(price) <= buy_threshold:
+                        runtime_state.signal_state[code] = SIGNAL_ADDON
+                        risk_candidates += 1
+                        candidates.append(
+                            {
+                                "stock_code": code,
+                                "stock_name": stock["stock_name"],
+                                "signal_type": SIGNAL_ADDON,
+                                "price": float(price),
+                                "trade_date": trade_date,
+                                "baseline_price": float(baseline["low_min"]),
+                                "used_coeff": float(stock["effective_x"]),
+                                "actual_n": int(baseline["actual_n"]),
+                                "prev_close": prev_close,
+                            }
+                        )
+                    elif (
+                        params["enable_tech_sell_while_holding"]
+                        and float(price) >= sell_threshold
+                    ):
+                        runtime_state.signal_state[code] = "SELL"
+                        sell_candidates += 1
+                        candidates.append(
+                            {
+                                "stock_code": code,
+                                "stock_name": stock["stock_name"],
+                                "signal_type": "SELL",
+                                "price": float(price),
+                                "trade_date": trade_date,
+                                "baseline_price": float(baseline["high_max"]),
+                                "used_coeff": float(stock["effective_y"]),
+                                "actual_n": int(baseline["actual_n"]),
+                                "prev_close": prev_close,
+                                "is_limit_up": is_limit_up(
+                                    stock_code=code,
+                                    price=float(price),
+                                    prev_close=float(prev_close)
+                                    if prev_close is not None
+                                    else None,
+                                    stock_name=str(stock["stock_name"] or ""),
+                                ),
+                            }
+                        )
+                continue
+
+            # EMPTY mode — V1 BUY/SELL
             signal_type: str | None = None
             if price <= buy_threshold:
                 signal_type = "BUY"
@@ -736,7 +885,6 @@ def market_polling_task() -> None:
                     baseline_price = float(baseline["high_max"])
                     used_coeff = float(stock["effective_y"])
                     sell_candidates += 1
-                prev_close = quote.get("prev_close")
                 candidate: dict = {
                     "stock_code": code,
                     "stock_name": stock["stock_name"],
@@ -774,7 +922,7 @@ def market_polling_task() -> None:
         "market_polling_task summary trade_date=%s batches=%d batch_errors=%d "
         "success_quotes=%d skipped_no_baseline=%d skipped_halted=%d "
         "halted_persisted=%d skipped_invalid_quote=%d buy_candidates=%d "
-        "sell_candidates=%d quote_delay=%s consecutive_failures=%d",
+        "sell_candidates=%d risk_candidates=%d quote_delay=%s consecutive_failures=%d",
         trade_date,
         total_batches,
         batch_errors,
@@ -785,6 +933,7 @@ def market_polling_task() -> None:
         skipped_invalid_quote,
         buy_candidates,
         sell_candidates,
+        risk_candidates,
         runtime_state.quote_delay,
         runtime_state.consecutive_poll_failures,
     )
@@ -796,6 +945,8 @@ def _sync_signal_trade_date(trade_date: str) -> None:
         runtime_state.signal_state.clear()
         # Keys include trade_date; clear to keep the O(1) set bounded across days.
         runtime_state.sent_signal_keys.clear()
+        runtime_state.partial_tp_ladder_idx.clear()
+        runtime_state.exit_fired_today.clear()
 
 
 def _ensure_baseline_cache_for_trade_date(trade_date: str) -> bool:
@@ -818,6 +969,52 @@ def _ensure_baseline_cache_for_trade_date(trade_date: str) -> bool:
     return bool(runtime_state.baseline_cache)
 
 
+def _load_position_cache() -> None:
+    with get_db() as session:
+        rows = session.scalars(select(Position)).all()
+        runtime_state.position_cache = {
+            row.stock_code: {
+                "qty": int(row.qty),
+                "avg_cost": row.avg_cost,
+                "highest_since_hold": row.highest_since_hold,
+                "stop_price": row.stop_price,
+                "position_status": row.position_status,
+            }
+            for row in rows
+        }
+
+
+def _persist_position_risk(
+    stock_code: str, *, highest: float, stop_price: float
+) -> None:
+    with get_db() as session:
+        pos = session.get(Position, stock_code)
+        if pos is None or pos.qty <= 0:
+            return
+        pos.highest_since_hold = highest
+        pos.stop_price = stop_price
+        pos.updated_at = datetime.now(SH_TZ)
+        session.commit()
+    cached = runtime_state.position_cache.get(stock_code)
+    if cached is not None:
+        cached["highest_since_hold"] = highest
+        cached["stop_price"] = stop_price
+
+
+def _has_same_day_buy(stock_code: str, trade_date: str) -> bool:
+    with get_db() as session:
+        row = (
+            session.query(PositionLedger.id)
+            .filter(
+                PositionLedger.stock_code == stock_code,
+                PositionLedger.side == "BUY",
+                PositionLedger.trade_date == trade_date,
+            )
+            .first()
+        )
+        return row is not None
+
+
 def _emit_signal_candidates(candidates: list[dict]) -> None:
     if not candidates:
         return
@@ -825,6 +1022,8 @@ def _emit_signal_candidates(candidates: list[dict]) -> None:
     # User stories 08/09: BUY and SELL WeChat alerts (failures isolated per stock).
     process_buy_candidates(candidates)
     process_sell_candidates(candidates)
+    # User stories 06/07: risk / partial / addon alerts.
+    process_risk_candidates(candidates)
 
 
 def daily_snapshot_task() -> None:

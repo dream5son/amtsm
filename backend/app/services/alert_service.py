@@ -1,6 +1,6 @@
-"""Buy/sell signal alert pipeline (user stories 08, 09 & 10).
+"""Signal alert pipeline (BUY/SELL + V2 risk signals).
 
-Consumes BUY/SELL candidates from the intraday polling task, enforces
+Consumes candidates from the intraday polling task, enforces
 trading-hours DND + once-per-day frequency control (memory Set + unique
 index claim), sends WeChat text via ``WeChatNotifier``, and persists
 results to ``alert_logs``.
@@ -29,11 +29,22 @@ logger = logging.getLogger(__name__)
 
 SIGNAL_BUY = "BUY"
 SIGNAL_SELL = "SELL"
+SIGNAL_STOP_LOSS = "STOP_LOSS"
+SIGNAL_TAKE_PROFIT = "TAKE_PROFIT"
+SIGNAL_PARTIAL_TP = "PARTIAL_TP"
+SIGNAL_ADDON = "ADDON"
+
+EXIT_SIGNAL_TYPES = frozenset({SIGNAL_STOP_LOSS, SIGNAL_TAKE_PROFIT})
+RISK_SIGNAL_TYPES = frozenset(
+    {SIGNAL_STOP_LOSS, SIGNAL_TAKE_PROFIT, SIGNAL_PARTIAL_TP, SIGNAL_ADDON}
+)
+
 STATUS_PENDING = "PENDING"
 STATUS_SUCCESS = "SUCCESS"
 STATUS_FAILED = "FAILED"
 
 LIMIT_BOARD_NOTE = "（注：该股当前可能处于涨跌停状态，请注意流动性风险）"
+T1_NOTE = "（注：当日买入部分暂受T+1限制，无法当日卖出）"
 
 
 def _alert_to_dict(row: AlertLog) -> dict:
@@ -187,6 +198,79 @@ def format_sell_message(
     return text
 
 
+def format_stop_loss_message(
+    *,
+    stock_name: str,
+    price: float,
+    stop_price: float,
+    avg_cost: float,
+    pnl_pct: float,
+    t1_note: bool = False,
+) -> str:
+    text = (
+        f"【交易助手】止损提醒！"
+        f"您持有的{stock_name}当前价格{_fmt_price(price)}，"
+        f"已跌破止损线{_fmt_price(stop_price)}"
+        f"（成本价{_fmt_price(avg_cost)}，浮亏{_fmt_pct(pnl_pct)}），"
+        f"建议及时止损离场，控制风险。"
+    )
+    if t1_note:
+        text += T1_NOTE
+    return text
+
+
+def format_take_profit_message(
+    *,
+    stock_name: str,
+    price: float,
+    stop_price: float,
+    highest_since_hold: float,
+    pnl_pct: float,
+    t1_note: bool = False,
+) -> str:
+    text = (
+        f"【交易助手】止盈提醒！"
+        f"您持有的{stock_name}当前价格{_fmt_price(price)}，"
+        f"已触及移动止盈线{_fmt_price(stop_price)}"
+        f"（持仓期间最高价{_fmt_price(highest_since_hold)}，当前浮盈{_fmt_pct(pnl_pct)}），"
+        f"建议及时锁定利润，可考虑减仓或清仓。"
+    )
+    if t1_note:
+        text += T1_NOTE
+    return text
+
+
+def format_partial_tp_message(
+    *,
+    stock_name: str,
+    pnl_pct: float,
+    suggest_sell_pct: float,
+) -> str:
+    return (
+        f"【交易助手】阶梯止盈提醒！"
+        f"您持有的{stock_name}浮盈已达{_fmt_pct(pnl_pct)}，"
+        f"建议减持{_fmt_pct(suggest_sell_pct)}仓位锁定部分利润，"
+        f"剩余仓位继续持有博取更大收益。"
+    )
+
+
+def format_addon_message(
+    *,
+    stock_name: str,
+    stock_code: str,
+    price: float,
+    actual_n: int,
+    low_min: float,
+    used_coeff: float,
+) -> str:
+    return (
+        f"【交易助手】发现加仓机会！"
+        f"您持有的{stock_name}({stock_code})当前价格{_fmt_price(price)}，"
+        f"已触及近{actual_n}日低点{_fmt_price(low_min)}的{_fmt_coeff(used_coeff)}倍，"
+        f"可考虑逢低加仓（与空仓买入提醒区分）。"
+    )
+
+
 def limit_up_ratio(stock_code: str, stock_name: str = "") -> float:
     """Return the daily limit-up multiplier for an A-share code."""
     name = (stock_name or "").upper()
@@ -225,6 +309,10 @@ def _fmt_price(value: float) -> str:
 def _fmt_coeff(value: float) -> str:
     text = f"{value:.4f}".rstrip("0").rstrip(".")
     return text or "0"
+
+
+def _fmt_pct(value: float) -> str:
+    return f"{value * 100:.2f}%"
 
 
 def _freq_key(
@@ -308,7 +396,6 @@ def _claim_alert_slot(
                 _freq_key(stock_code, trade_date, signal_type)
             )
             return None, AlertOutcome.SKIPPED_ALREADY_SENT
-        # FAILED / PENDING: allow retry without re-insert.
         return existing, None
 
     row_id = insert_alert(
@@ -321,7 +408,6 @@ def _claim_alert_slot(
         sent_status=STATUS_PENDING,
     )
     if row_id is None:
-        # Unique index race — expected under concurrent triggers.
         logger.info(
             "%s unique constraint race stock=%s date=%s type=%s; discarding",
             log_prefix,
@@ -346,6 +432,8 @@ def _claim_alert_slot(
 def _build_message(
     signal_type: str, candidate: dict[str, Any], parsed: dict[str, Any]
 ) -> str:
+    t1_note = bool(candidate.get("t1_note"))
+
     if signal_type == SIGNAL_BUY:
         return format_buy_message(
             stock_name=parsed["stock_name"],
@@ -354,6 +442,47 @@ def _build_message(
             actual_n=parsed["actual_n"],
             low_min=parsed["baseline_price"],
             used_coeff=parsed["used_coeff"],
+        )
+
+    if signal_type == SIGNAL_ADDON:
+        return format_addon_message(
+            stock_name=parsed["stock_name"],
+            stock_code=parsed["stock_code"],
+            price=parsed["price"],
+            actual_n=parsed["actual_n"],
+            low_min=parsed["baseline_price"],
+            used_coeff=parsed["used_coeff"],
+        )
+
+    if signal_type == SIGNAL_STOP_LOSS:
+        return format_stop_loss_message(
+            stock_name=parsed["stock_name"],
+            price=parsed["price"],
+            stop_price=float(candidate.get("stop_price") or parsed["baseline_price"]),
+            avg_cost=float(candidate.get("avg_cost") or 0),
+            pnl_pct=float(candidate.get("pnl_pct") or 0),
+            t1_note=t1_note,
+        )
+
+    if signal_type == SIGNAL_TAKE_PROFIT:
+        return format_take_profit_message(
+            stock_name=parsed["stock_name"],
+            price=parsed["price"],
+            stop_price=float(candidate.get("stop_price") or parsed["baseline_price"]),
+            highest_since_hold=float(
+                candidate.get("highest_since_hold") or parsed["baseline_price"]
+            ),
+            pnl_pct=float(candidate.get("pnl_pct") or 0),
+            t1_note=t1_note,
+        )
+
+    if signal_type == SIGNAL_PARTIAL_TP:
+        return format_partial_tp_message(
+            stock_name=parsed["stock_name"],
+            pnl_pct=float(candidate.get("pnl_pct") or 0),
+            suggest_sell_pct=float(
+                candidate.get("suggest_sell_pct") or parsed["used_coeff"]
+            ),
         )
 
     limit_flag = candidate.get("is_limit_up")
@@ -395,7 +524,7 @@ def _parse_candidate(
         price = float(candidate["price"])
         baseline_price = float(candidate["baseline_price"])
         used_coeff = float(candidate["used_coeff"])
-        actual_n = int(candidate["actual_n"])
+        actual_n = int(candidate.get("actual_n") or 0)
     except (KeyError, TypeError, ValueError) as exc:
         return None, AlertProcessResult(
             outcome=AlertOutcome.SKIPPED_INVALID,
@@ -424,17 +553,21 @@ def _parse_candidate(
     )
 
 
-def process_alert(candidate: dict[str, Any], *, signal_type: str) -> AlertProcessResult:
-    """Process a single BUY or SELL candidate end-to-end.
+def _log_prefix_for(signal_type: str) -> str:
+    mapping = {
+        SIGNAL_BUY: "buy_alert",
+        SIGNAL_SELL: "sell_alert",
+        SIGNAL_STOP_LOSS: "stop_loss_alert",
+        SIGNAL_TAKE_PROFIT: "take_profit_alert",
+        SIGNAL_PARTIAL_TP: "partial_tp_alert",
+        SIGNAL_ADDON: "addon_alert",
+    }
+    return mapping.get(signal_type, f"{signal_type.lower()}_alert")
 
-    Decision tree (user story 10 / design §3.3):
-    1. Trading-hours DND check
-    2. Memory Set frequency check (O(1))
-    3. Claim ``alert_logs`` row (unique index); losers discard
-    4. Send WeChat only after a successful claim
-    5. Update row + memory Set on SUCCESS
-    """
-    log_prefix = "buy_alert" if signal_type == SIGNAL_BUY else "sell_alert"
+
+def process_alert(candidate: dict[str, Any], *, signal_type: str) -> AlertProcessResult:
+    """Process a single signal candidate end-to-end."""
+    log_prefix = _log_prefix_for(signal_type)
     parsed, invalid = _parse_candidate(candidate)
     if invalid is not None:
         logger.error(
@@ -509,6 +642,8 @@ def process_alert(candidate: dict[str, Any], *, signal_type: str) -> AlertProces
 
     if send_result.ok:
         runtime_state.sent_signal_keys.add(key)
+        if signal_type in EXIT_SIGNAL_TYPES:
+            runtime_state.exit_fired_today.add(stock_code)
         logger.info(
             "%s SENT stock=%s date=%s price=%s latency_ms=%.1f",
             log_prefix,
@@ -524,7 +659,6 @@ def process_alert(candidate: dict[str, Any], *, signal_type: str) -> AlertProces
             message="sent",
         )
 
-    # FAILED: leave memory unset so a later poll can retry.
     logger.error(
         "%s FAILED stock=%s date=%s error_code=%s detail=%s latency_ms=%.1f",
         log_prefix,
@@ -563,7 +697,7 @@ def _process_candidates(
     if not filtered:
         return results
 
-    log_prefix = "buy_alert" if signal_type == SIGNAL_BUY else "sell_alert"
+    log_prefix = _log_prefix_for(signal_type)
     for candidate in filtered:
         try:
             results.append(process_alert(candidate, signal_type=signal_type))
@@ -604,3 +738,18 @@ def process_sell_candidates(
 ) -> list[AlertProcessResult]:
     """Handle SELL candidates; failures never block the rest of the batch."""
     return _process_candidates(candidates, signal_type=SIGNAL_SELL)
+
+
+def process_risk_candidates(
+    candidates: list[dict[str, Any]],
+) -> list[AlertProcessResult]:
+    """Handle STOP_LOSS / TAKE_PROFIT / PARTIAL_TP / ADDON candidates."""
+    results: list[AlertProcessResult] = []
+    for signal_type in (
+        SIGNAL_STOP_LOSS,
+        SIGNAL_TAKE_PROFIT,
+        SIGNAL_PARTIAL_TP,
+        SIGNAL_ADDON,
+    ):
+        results.extend(_process_candidates(candidates, signal_type=signal_type))
+    return results

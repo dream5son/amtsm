@@ -1,5 +1,13 @@
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
 
+export type SignalType =
+  | "BUY"
+  | "SELL"
+  | "STOP_LOSS"
+  | "TAKE_PROFIT"
+  | "PARTIAL_TP"
+  | "ADDON";
+
 export type WatchlistItem = {
   stock_code: string;
   stock_name: string;
@@ -10,7 +18,7 @@ export type WatchlistItem = {
   actual_n: number | null;
   effective_n: number;
   insufficient_days: number | null;
-  signal_type: "BUY" | "SELL" | null;
+  signal_type: SignalType | null;
   position_status: "EMPTY" | "HOLDING" | "PARTIAL";
   position_qty: number;
   avg_cost: number | null;
@@ -77,11 +85,64 @@ export type StockSearchItem = {
   exchange: string;
 };
 
+export type TrailingLadderLevel = {
+  min_pnl: number;
+  max_pnl: number | null;
+  drawdown: number;
+};
+
 export type StrategyConfig = {
   global_buy_n: number;
   global_buy_x: number;
   global_sell_n: number;
   global_sell_y: number;
+  stop_loss_pct: number;
+  break_even_trigger_pct: number;
+  break_even_buffer_pct: number;
+  trailing_ladder: TrailingLadderLevel[];
+  enable_partial_take_profit: boolean;
+  enable_addon_alert: boolean;
+  enable_tech_sell_while_holding: boolean;
+};
+
+export type StockStrategyOverride = {
+  stock_code?: string;
+  custom_n: number | null;
+  custom_x: number | null;
+  custom_y: number | null;
+  stop_loss_pct: number | null;
+  break_even_trigger_pct: number | null;
+  break_even_buffer_pct: number | null;
+  trailing_ladder: TrailingLadderLevel[] | null;
+  enable_partial_take_profit: boolean | null;
+  enable_addon_alert: boolean | null;
+  enable_tech_sell_while_holding: boolean | null;
+  has_override?: boolean;
+  resolved?: StrategyConfig & {
+    n: number;
+    x: number;
+    y: number;
+  };
+};
+
+export const DEFAULT_TRAILING_LADDER: TrailingLadderLevel[] = [
+  { min_pnl: 0.1, max_pnl: 0.2, drawdown: 0.15 },
+  { min_pnl: 0.2, max_pnl: 0.5, drawdown: 0.1 },
+  { min_pnl: 0.5, max_pnl: null, drawdown: 0.06 },
+];
+
+export const DEFAULT_STRATEGY: StrategyConfig = {
+  global_buy_n: 60,
+  global_buy_x: 1.1,
+  global_sell_n: 60,
+  global_sell_y: 0.9,
+  stop_loss_pct: 0.08,
+  break_even_trigger_pct: 0.1,
+  break_even_buffer_pct: 0.005,
+  trailing_ladder: DEFAULT_TRAILING_LADDER,
+  enable_partial_take_profit: false,
+  enable_addon_alert: false,
+  enable_tech_sell_while_holding: false,
 };
 
 export type JobStatus = {
@@ -204,6 +265,46 @@ export async function updateStrategy(payload: StrategyConfig): Promise<StrategyC
   }
 
   return (await res.json()) as StrategyConfig;
+}
+
+export async function fetchStrategyOverride(stockCode: string): Promise<StockStrategyOverride> {
+  const res = await fetch(
+    `${API_BASE}/api/strategy/overrides/${encodeURIComponent(stockCode)}`,
+    { cache: "no-store" },
+  );
+  if (!res.ok) {
+    throw new Error("failed to fetch strategy override");
+  }
+  return (await res.json()) as StockStrategyOverride;
+}
+
+export async function updateStrategyOverride(
+  stockCode: string,
+  payload: Omit<StockStrategyOverride, "stock_code" | "has_override" | "resolved">,
+): Promise<StockStrategyOverride> {
+  const res = await fetch(
+    `${API_BASE}/api/strategy/overrides/${encodeURIComponent(stockCode)}`,
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    },
+  );
+  if (!res.ok) {
+    throw new Error("failed to update strategy override");
+  }
+  return (await res.json()) as StockStrategyOverride;
+}
+
+export async function clearStrategyOverride(stockCode: string): Promise<StockStrategyOverride> {
+  const res = await fetch(
+    `${API_BASE}/api/strategy/overrides/${encodeURIComponent(stockCode)}`,
+    { method: "DELETE" },
+  );
+  if (!res.ok) {
+    throw new Error("failed to clear strategy override");
+  }
+  return (await res.json()) as StockStrategyOverride;
 }
 
 export async function fetchJobStatus(): Promise<JobStatus> {

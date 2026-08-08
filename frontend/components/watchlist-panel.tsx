@@ -14,6 +14,7 @@ import {
   getJobStatusSSEUrl,
   removeWatchlist,
   searchStocks,
+  SignalType,
   StockSearchItem,
   WatchlistItem,
 } from "@/lib/api";
@@ -48,17 +49,35 @@ function positionStatusLabel(status: WatchlistItem["position_status"]): string {
   return "空仓监控";
 }
 
-function renderSignal(signal: "BUY" | "SELL" | null): { dot: string; label: string; cls: string } {
+function renderSignal(
+  signal: SignalType | null,
+): { dot: string; label: string; cls: string } {
   if (signal === "BUY") {
     return { dot: "🟢", label: "买入", cls: "text-emerald-700" };
   }
   if (signal === "SELL") {
     return { dot: "🔴", label: "卖出", cls: "text-rose-700" };
   }
+  if (signal === "STOP_LOSS") {
+    return { dot: "🛑", label: "止损", cls: "text-rose-700" };
+  }
+  if (signal === "TAKE_PROFIT") {
+    return { dot: "💰", label: "止盈", cls: "text-emerald-700" };
+  }
+  if (signal === "PARTIAL_TP") {
+    return { dot: "🟡", label: "分批止盈", cls: "text-amber-700" };
+  }
+  if (signal === "ADDON") {
+    return { dot: "🔵", label: "加仓", cls: "text-sky-700" };
+  }
   return { dot: "⚪", label: "无信号", cls: "text-slate-500" };
 }
 
-export default function WatchlistPanel() {
+type WatchlistPanelProps = {
+  onOpenStrategy?: (item: WatchlistItem) => void;
+};
+
+export default function WatchlistPanel({ onOpenStrategy }: WatchlistPanelProps) {
   const [watchlist, setWatchlist] = useState<WatchlistItem[]>([]);
   const [watchlistLoading, setWatchlistLoading] = useState(true);
   const [query, setQuery] = useState("");
@@ -223,7 +242,7 @@ export default function WatchlistPanel() {
   );
 
   return (
-    <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm md:p-6">
+    <section className="min-w-0 overflow-hidden rounded-2xl border border-slate-200 bg-white p-5 shadow-sm md:p-6">
       <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight text-slate-900 md:text-3xl">关注列表</h1>
@@ -308,26 +327,26 @@ export default function WatchlistPanel() {
         </div>
       ) : null}
 
-      <div className="overflow-x-auto">
+      <div className="min-w-0 overflow-x-auto">
         {watchlist.length > 0 ? (
-          <table className="w-full min-w-[1280px] border-collapse text-sm">
+          <table className="w-full min-w-[1180px] border-collapse text-sm">
             <thead>
               <tr className="border-b border-slate-200 text-slate-500">
-                <th className="py-2 text-left font-medium">代码</th>
-                <th className="py-2 text-left font-medium">名称</th>
-                <th className="py-2 text-left font-medium">最新价</th>
-                <th className="py-2 text-left font-medium">涨跌幅</th>
-                <th className="py-2 text-left font-medium">持仓状态</th>
-                <th className="py-2 text-left font-medium">持仓数量</th>
-                <th className="py-2 text-left font-medium">成本价</th>
-                <th className="py-2 text-left font-medium">浮动盈亏</th>
-                <th className="py-2 text-left font-medium">止损参考价</th>
-                <th className="py-2 text-left font-medium">距止损</th>
-                <th className="py-2 text-left font-medium">状态</th>
-                <th className="py-2 text-left font-medium">信号</th>
-                <th className="py-2 text-left font-medium">定时任务</th>
-                <th className="py-2 text-left font-medium">备注</th>
-                <th className="py-2 text-left font-medium">操作</th>
+                <th className="whitespace-nowrap py-2 pr-2 text-left font-medium">代码</th>
+                <th className="whitespace-nowrap py-2 pr-2 text-left font-medium">名称</th>
+                <th className="whitespace-nowrap py-2 pr-2 text-left font-medium">最新价</th>
+                <th className="whitespace-nowrap py-2 pr-2 text-left font-medium">涨跌幅</th>
+                <th className="whitespace-nowrap py-2 pr-2 text-left font-medium">持仓状态</th>
+                <th className="whitespace-nowrap py-2 pr-2 text-left font-medium">持仓数量</th>
+                <th className="whitespace-nowrap py-2 pr-2 text-left font-medium">成本价</th>
+                <th className="whitespace-nowrap py-2 pr-2 text-left font-medium">浮动盈亏</th>
+                <th className="whitespace-nowrap py-2 pr-2 text-left font-medium">止损参考价</th>
+                <th className="whitespace-nowrap py-2 pr-2 text-left font-medium">距止损</th>
+                <th className="whitespace-nowrap py-2 pr-2 text-left font-medium">状态</th>
+                <th className="whitespace-nowrap py-2 pr-2 text-left font-medium">信号</th>
+                <th className="whitespace-nowrap py-2 pr-2 text-left font-medium">定时任务</th>
+                <th className="whitespace-nowrap py-2 pr-2 text-left font-medium">备注</th>
+                <th className="whitespace-nowrap py-2 text-left font-medium">操作</th>
               </tr>
             </thead>
             <tbody>
@@ -403,44 +422,69 @@ export default function WatchlistPanel() {
                       <button
                         type="button"
                         onClick={() => setLogDialogOpen(true)}
-                        className="ml-2 text-xs text-sky-600 underline hover:text-sky-800"
+                        title="查看日志"
+                        aria-label="查看日志"
+                        className="ml-2 inline-flex items-center justify-center rounded p-0.5 text-sky-600 hover:bg-sky-50 hover:text-sky-800"
                       >
-                        查看日志
+                        <svg
+                          xmlns="http://www.w3.org/2000/svg"
+                          viewBox="0 0 24 24"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="1.75"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          className="h-3.5 w-3.5"
+                          aria-hidden="true"
+                        >
+                          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                          <polyline points="14 2 14 8 20 8" />
+                          <line x1="8" y1="13" x2="16" y2="13" />
+                          <line x1="8" y1="17" x2="16" y2="17" />
+                          <line x1="8" y1="9" x2="10" y2="9" />
+                        </svg>
                       </button>
                     </td>
                     <td className="py-2 pr-2 text-slate-600">
                       {item.insufficient_days && item.insufficient_days > 0 ? `数据不足 ${item.insufficient_days} 天` : "--"}
                     </td>
                     <td className="py-2">
-                      <div className="flex flex-wrap gap-1.5">
+                      <div className="flex max-w-[200px] flex-wrap gap-1">
                         <button
                           type="button"
                           onClick={() => setBuyTarget(item)}
-                          className="rounded-md border border-sky-300 px-2.5 py-1.5 text-xs font-medium text-sky-700 transition-colors hover:bg-sky-50"
+                          className="rounded-md border border-sky-300 px-2 py-1 text-xs font-medium text-sky-700 transition-colors hover:bg-sky-50"
                         >
-                          登记买入
+                          买入
                         </button>
                         {holding ? (
                           <button
                             type="button"
                             onClick={() => setSellTarget(item)}
-                            className="rounded-md border border-amber-300 px-2.5 py-1.5 text-xs font-medium text-amber-800 transition-colors hover:bg-amber-50"
+                            className="rounded-md border border-amber-300 px-2 py-1 text-xs font-medium text-amber-800 transition-colors hover:bg-amber-50"
                           >
-                            登记减持
+                            减持
                           </button>
                         ) : null}
                         <button
                           type="button"
                           onClick={() => setLedgerTarget(item)}
-                          className="rounded-md border border-slate-300 px-2.5 py-1.5 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-100"
+                          className="rounded-md border border-slate-300 px-2 py-1 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-100"
                         >
                           流水
                         </button>
                         <button
                           type="button"
+                          onClick={() => onOpenStrategy?.(item)}
+                          className="rounded-md border border-violet-300 px-2 py-1 text-xs font-medium text-violet-700 transition-colors hover:bg-violet-50"
+                        >
+                          策略
+                        </button>
+                        <button
+                          type="button"
                           onClick={() => void onRemove(item)}
                           disabled={removingCode === item.stock_code}
-                          className="rounded-md border border-rose-300 px-2.5 py-1.5 text-xs font-medium text-rose-700 transition-colors hover:bg-rose-50 disabled:cursor-not-allowed disabled:bg-rose-50 disabled:text-rose-300"
+                          className="rounded-md border border-rose-300 px-2 py-1 text-xs font-medium text-rose-700 transition-colors hover:bg-rose-50 disabled:cursor-not-allowed disabled:bg-rose-50 disabled:text-rose-300"
                         >
                           {removingCode === item.stock_code ? "移除中..." : "移除"}
                         </button>

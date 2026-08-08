@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from app.db.connection import get_db
-from app.db.models import Position, PositionLedger, StrategyConfig, Watchlist
+from app.db.models import Position, PositionLedger, Watchlist
 from app.schemas.position import PositionTradeRequest
 from app.services.position_math import (
     initial_stop_price,
@@ -12,6 +12,7 @@ from app.services.position_math import (
     weighted_avg_cost,
 )
 from app.services.stock_search_service import normalize_stock_code
+from app.services.strategy_service import resolve_params
 
 
 class StockNotFoundError(ValueError):
@@ -49,11 +50,8 @@ def _get_or_create_position(session, stock_code: str) -> Position:
     return pos
 
 
-def _stop_loss_pct(session) -> float:
-    cfg = session.get(StrategyConfig, 1)
-    if cfg is None or cfg.stop_loss_pct is None:
-        return 0.08
-    return float(cfg.stop_loss_pct)
+def _stop_loss_pct(stock_code: str) -> float:
+    return float(resolve_params(stock_code)["stop_loss_pct"])
 
 
 def _position_dict(pos: Position) -> dict:
@@ -81,7 +79,7 @@ def preview_buy(stock_code: str, qty: int, price: float) -> dict:
         old_qty = pos.qty if pos else 0
         old_cost = pos.avg_cost if pos else None
         old_stop = pos.stop_price if pos else None
-        stop_pct = _stop_loss_pct(session)
+        stop_pct = _stop_loss_pct(normalized)
 
         new_avg = weighted_avg_cost(old_cost, old_qty, price, qty)
         new_stop0 = initial_stop_price(new_avg, stop_pct)
@@ -106,7 +104,7 @@ def register_buy(stock_code: str, payload: PositionTradeRequest) -> dict:
     with get_db() as session:
         _require_watchlist(session, normalized)
         pos = _get_or_create_position(session, normalized)
-        stop_pct = _stop_loss_pct(session)
+        stop_pct = _stop_loss_pct(normalized)
 
         old_qty = pos.qty
         old_cost = pos.avg_cost

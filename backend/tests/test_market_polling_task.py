@@ -141,6 +141,71 @@ def test_market_polling_skips_outside_session(tmp_path, monkeypatch) -> None:
     assert not called["hit"]
 
 
+def test_market_polling_holding_emits_stop_loss(tmp_path, monkeypatch) -> None:
+    from app.db.models import Position
+
+    sqlite_path = tmp_path / "amtsm.db"
+    monkeypatch.setattr(settings, "sqlite_path", str(sqlite_path))
+    monkeypatch.setattr(settings, "polling_batch_size", 50)
+    init_db()
+    runtime_state.reset_daily()
+    add_watchlist(WatchlistCreate(stock_code="600519", stock_name="贵州茅台"))
+
+    with get_db() as session:
+        session.add(
+            DailyBaseline(
+                stock_code="sh600519",
+                trade_date="2026-08-05",
+                low_min=100.0,
+                high_max=130.0,
+                actual_n=60,
+            )
+        )
+        session.add(
+            Position(
+                stock_code="sh600519",
+                qty=100,
+                avg_cost=100.0,
+                highest_since_hold=100.0,
+                stop_price=92.0,
+                position_status="HOLDING",
+            )
+        )
+        session.commit()
+
+    fake_now = datetime(2026, 8, 5, 10, 0, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+    monkeypatch.setattr("app.engine.tasks.datetime", _FrozenDateTime(fake_now))
+    monkeypatch.setattr("app.engine.tasks.process_buy_candidates", lambda candidates: [])
+    monkeypatch.setattr("app.engine.tasks.process_sell_candidates", lambda candidates: [])
+    captured: list[dict] = []
+
+    def _capture_risk(candidates):
+        captured.extend(candidates)
+        return []
+
+    monkeypatch.setattr("app.engine.tasks.process_risk_candidates", _capture_risk)
+    monkeypatch.setattr(
+        "app.engine.tasks.fetch_realtime_quotes_batch",
+        lambda *args, **kwargs: {
+            "sh600519": {
+                "stock_name": "贵州茅台",
+                "price": 91.0,
+                "open": 95.0,
+                "prev_close": 96.0,
+                "quote_date": "2026-08-05",
+                "quote_time": "10:00:00",
+                "is_halted": False,
+            }
+        },
+    )
+
+    market_polling_task()
+    assert runtime_state.signal_state["sh600519"] == "STOP_LOSS"
+    assert any(c.get("signal_type") == "STOP_LOSS" for c in captured)
+    # Holding should not emit BUY even though price is below buy threshold (100*1.1=110).
+    assert not any(c.get("signal_type") == "BUY" for c in captured)
+
+
 class _FrozenDateTime:
     def __init__(self, now: datetime) -> None:
         self._now = now

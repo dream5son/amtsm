@@ -46,6 +46,43 @@ class StrategyConfig(Base):
     global_sell_n: Mapped[int] = mapped_column(Integer, default=60)
     global_sell_y: Mapped[float] = mapped_column(Float, default=0.90)
     stop_loss_pct: Mapped[float] = mapped_column(Float, default=0.08)
+    break_even_trigger_pct: Mapped[float] = mapped_column(Float, default=0.10)
+    break_even_buffer_pct: Mapped[float] = mapped_column(Float, default=0.005)
+    trailing_ladder_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    enable_partial_take_profit: Mapped[int] = mapped_column(Integer, default=0)
+    enable_addon_alert: Mapped[int] = mapped_column(Integer, default=0)
+    enable_tech_sell_while_holding: Mapped[int] = mapped_column(Integer, default=0)
+    updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime, server_default=func.current_timestamp()
+    )
+
+
+class StockStrategyOverride(Base):
+    __tablename__ = "stock_strategy_overrides"
+
+    stock_code: Mapped[str] = mapped_column(
+        String(10), ForeignKey("watchlist.stock_code"), primary_key=True
+    )
+    custom_n: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)
+    custom_x: Mapped[float | None] = mapped_column(Float, nullable=True, default=None)
+    custom_y: Mapped[float | None] = mapped_column(Float, nullable=True, default=None)
+    stop_loss_pct: Mapped[float | None] = mapped_column(Float, nullable=True, default=None)
+    break_even_trigger_pct: Mapped[float | None] = mapped_column(
+        Float, nullable=True, default=None
+    )
+    break_even_buffer_pct: Mapped[float | None] = mapped_column(
+        Float, nullable=True, default=None
+    )
+    trailing_ladder_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    enable_partial_take_profit: Mapped[int | None] = mapped_column(
+        Integer, nullable=True, default=None
+    )
+    enable_addon_alert: Mapped[int | None] = mapped_column(
+        Integer, nullable=True, default=None
+    )
+    enable_tech_sell_while_holding: Mapped[int | None] = mapped_column(
+        Integer, nullable=True, default=None
+    )
     updated_at: Mapped[datetime | None] = mapped_column(
         DateTime, server_default=func.current_timestamp()
     )
@@ -129,7 +166,7 @@ class AlertLog(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     stock_code: Mapped[str] = mapped_column(String(10), nullable=False)
     trade_date: Mapped[str] = mapped_column(String(10), nullable=False)
-    signal_type: Mapped[str] = mapped_column(String(5), nullable=False)
+    signal_type: Mapped[str] = mapped_column(String(16), nullable=False)
     trigger_price: Mapped[float] = mapped_column(Float, nullable=False)
     baseline_price: Mapped[float] = mapped_column(Float, nullable=False)
     used_coeff: Mapped[float] = mapped_column(Float, nullable=False)
