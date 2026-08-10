@@ -42,5 +42,11 @@ class Settings(BaseSettings):
     alert_send_max_retries: int = 3
     alert_send_retry_backoff_seconds: float = 0.5
 
+    # Backtest worker (V2 user stories 08-10)
+    backtest_worker_interval_seconds: int = 3
+    backtest_min_trade_count: int = 5
+    backtest_snapshot_fetch_retries: int = 2
+    backtest_snapshot_fetch_retry_backoff_seconds: float = 0.5
+
 
 settings = Settings()

@@ -65,7 +65,7 @@ def test_fetch_trade_day_bar_returns_matching_day() -> None:
         numeric_code="600519",
         start_date="20260805",
         end_date="20260805",
-        adjust="",
+        adjust="qfq",
     )
 
 

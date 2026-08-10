@@ -3,6 +3,7 @@ import logging
 from apscheduler.schedulers.background import BackgroundScheduler
 
 from app.config import settings
+from app.engine.backtest_tasks import backtest_worker_task
 from app.engine.tasks import (
     baseline_precompute_task,
     bootstrap_watchlist_snapshot,
@@ -49,6 +50,15 @@ def create_scheduler() -> BackgroundScheduler:
         trigger="interval",
         seconds=settings.intraday_snapshot_interval_seconds,
         id="intraday_snapshot",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+    )
+    scheduler.add_job(
+        backtest_worker_task,
+        trigger="interval",
+        seconds=settings.backtest_worker_interval_seconds,
+        id="backtest_worker",
         replace_existing=True,
         max_instances=1,
         coalesce=True,

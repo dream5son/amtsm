@@ -7,8 +7,19 @@ from app.db.connection import get_db
 from app.db.models import Position, PositionLedger, Watchlist
 from app.engine.state import runtime_state
 from app.schemas.watchlist import WatchlistCreate
+from app.services.backtest_service import get_watchlist_backtest_summary
 from app.services.position_math import stop_distance_pct, unrealized_pnl
 from app.services.stock_search_service import normalize_stock_code
+
+_EMPTY_BACKTEST_SUMMARY = {
+    "backtest_status": "NONE",
+    "backtest_job_id": None,
+    "backtest_win_rate": None,
+    "backtest_trade_count": None,
+    "backtest_sample_insufficient": False,
+    "backtest_stale": False,
+    "backtest_error_message": None,
+}
 
 
 def list_watchlist(limit: int = 50, offset: int = 0) -> list[dict]:
@@ -96,8 +107,13 @@ def list_watchlist(limit: int = 50, offset: int = 0) -> list[dict]:
             {"limit": limit, "offset": offset},
         ).mappings().all()
     data = [dict(row) for row in rows]
+    backtest_summaries = get_watchlist_backtest_summary([item["stock_code"] for item in data])
     for item in data:
-        item["signal_type"] = runtime_state.signal_state.get(item["stock_code"])
+        code = item["stock_code"]
+        item["signal_type"] = runtime_state.signal_state.get(code)
+        meta = runtime_state.signal_meta.get(code) or {}
+        item["signal_t1_note"] = bool(meta.get("t1_note"))
+        item["signal_limit_board"] = bool(meta.get("is_limit_up"))
         qty = int(item.get("position_qty") or 0)
         if qty <= 0 or item.get("position_status") == "EMPTY":
             item["position_status"] = "EMPTY"
@@ -116,6 +132,7 @@ def list_watchlist(limit: int = 50, offset: int = 0) -> list[dict]:
             item["stop_distance_pct"] = stop_distance_pct(
                 item.get("latest_price"), item.get("stop_price")
             )
+        item.update(backtest_summaries.get(item["stock_code"], _EMPTY_BACKTEST_SUMMARY))
     return data
 
 def add_watchlist(payload: WatchlistCreate) -> None:

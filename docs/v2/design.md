@@ -2,7 +2,7 @@
 
 本文档基于 `docs/prd-v2.md` 与 `docs/v2/` 用户故事全集，在 V1.0 设计（`docs/v1/design.md`）之上给出 **V2.0 整体技术方案**。目标是把系统从「选股/择时监控」升级为「全生命周期持仓风控 + 参数决策支持」，设计视角按 **领域与横切能力** 组织，不以单个用户故事为章节主轴。
 
-**技术栈沿用 V1.0**：Python 3 + FastAPI + APScheduler + SQLite3（WAL）+ Next.js。
+**技术栈沿用 V1.0**：Python 3 + FastAPI + APScheduler + SQLite3（WAL）+ Next.js。V2.0 前端新增一项图表依赖：**`klinecharts`（KLineChart）** 用于回测详情 K 线图，选型分析见第 4 节「关键点 7」。
 
 ---
 
@@ -83,7 +83,7 @@ V1 的「前端 + FastAPI + Data Engine + SQLite」结构保持不变。V2 在�
 | FastAPI | 持仓登记/流水、风控参数 CRUD、回测任务创建与查询、列表聚合字段 |
 | Data Engine（盘中） | 按持仓状态路由空仓/持仓逻辑；维护内存中的 `StopPrice` / `HighestSinceHold`；扩展信号类型与频控 |
 | Backtest Worker | 异步跑历史回放；读写 `daily_market_snapshots`（前复权日线缓存）与回测结果表 |
-| Shared Domain | `signal_rules`（买点）+ `risk_rules`（三级止损）纯计算库 |
+| Shared Domain | 纯计算包 `backend/app/market_signal/`：`baseline`（N 日高低）+ `entry`（买点/技术卖点）+ `risk`（三级止损）+ `replay`（日线持仓日 OHLC 适配）；盘中引擎与回测共用，禁止两套公式漂移 |
 
 ---
 
@@ -183,6 +183,29 @@ DailyMarketSnapshot（复用 V1 表，升级为多年前复权日线缓存，服
 
 * **挑战**：实时价已是「今日基准」，若成本/最高价未按同一前复权因子调整，棘轮与触发会整体错位。
 * **决策**：盘前任务在拉最新前复权日线时，检测复权因子变化（或对比昨收复权价跳变），对 `avg_cost`、`highest_since_hold`、`stop_price` **乘同一调整系数**；流水表保留原始成交价不改写（复盘展示历史成交），快照与风控字段必须对齐当日价格基准。
+
+### 关键点 7：回测详情 K 线图表技术选型（`react-native-chart-kit` vs `KLineChart`）
+
+* **挑战**：故事 10（回测详情）需要用 **K 线（蜡烛图）** 呈现回测区间行情，并在图上叠加**买点/卖点标记**与**卖点盈亏数据**（悬停/点击展示该笔交易的盈亏金额与比例）。需选定一个开源图表方案，要求：原生支持蜡烛图、可在指定 K 线点位叠加自定义标记与文案、面向 **Web（DOM/Canvas）** 渲染而非移动端专属、开源免费可商用、维护活跃、TypeScript 友好，且能以 React 组件形式嵌入现有 Next.js 前端。
+* **方案 A：`react-native-chart-kit`**
+  * 本质是 **React Native** 图表库，底层依赖 `react-native-svg`，设计目标是 RN 移动端 App，并非 Web DOM/Canvas 渲染。要在本项目（Next.js 15 + React 19 纯 Web 前端）中使用，需额外引入 `react-native-web` 之类的跨端桥接层——为了一个图表引入一整套渲染体系，复杂度与风险和收益严重不成比例。
+  * 更关键的是：其**开源（MIT）版本不含蜡烛图/K线图**，公开图表仅有 line / area / bar / pie / donut / progress / contribution-heatmap。蜡烛图（`CandlebarChart` / `CandlestickChart`）只存在于收费的 `@chart-kit/pro` 商业套件中，需购买商业许可证，且该 Pro 蜡烛图仍面向 RN（Skia/SVG）渲染，即便引入桥接层也不代表能在 Web Canvas 场景下正常渲染与交互。
+  * **结论：不适用**——技术栈方向不匹配（RN vs Web），且唯一需要的核心能力（蜡烛图）还需额外付费商业授权，与项目「前端沿用 Next.js」「回测仅作参考展示、非重投入」的定位不符。
+* **方案 B：`klinecharts`（KLineChart）**
+  * 专为 Web 打造的轻量级 K 线图库，基于 HTML5 Canvas 渲染，**零依赖**，gzip 压缩后约 40KB，**Apache-2.0** 协议开源免费可商用，v10.x 持续维护（最新版本发布于 2026-07），npm 周下载量 3.5 万+，提供完整 TypeScript 类型定义。
+  * 原生支持蜡烛图、成交量副图、常见技术指标（MA/BOLL/MACD/KDJ 等，本期不需要，但保留后续扩展空间）。
+  * 提供 `createOverlay` / `registerOverlay` 覆盖物机制，可在指定 K 线点位绘制自定义图形与文案（如买点三角标记、卖点标记 + 盈亏气泡），并支持点击/悬停回调（`onClick` / `onMouseEnter` 等），恰好满足「买卖点标记 + 卖点盈亏数据展示」的交互需求。
+  * 以普通 React 组件包裹即可集成（`useEffect` 中 `init` / `dispose` 图表实例，`useRef` 持有 DOM 容器），不依赖任何 RN/桥接层，与现有 Next.js 前端技术栈完全兼容。
+  * **结论：采用**。
+* **决策：方案 B（KLineChart）**。前端新增依赖 `klinecharts`；新增 `<BacktestKLineChart>` 组件，数据源为该回测任务区间的 `daily_market_snapshots`（前复权 OHLCV）+ `backtest_trades`（买卖点位与盈亏）：买点在对应交易日蜡烛上方标记，卖点在对应交易日蜡烛下方标记，点击/悬停卖点标记通过自定义 overlay 弹出该笔交易的盈亏金额与比例（`pnl_amount` / `pnl_pct`）及持仓天数（`hold_days`）。图表仅在详情弹层打开时初始化、关闭时 `dispose`，避免大量隐藏图表实例常驻内存。
+
+### 关键点 8：回测「区间结束仍持仓（未平仓）」如何计入统计
+
+* **挑战**：回测严格按交易日逐日回放，若最后一次模拟建仓在区间结束前始终未等到止损/止盈信号触发，这笔"半截"仓位该如何计入 `backtest_trades` 与汇总指标？
+* **方案 A**：不生成任何记录，直接丢弃这笔未完成仓位。缺点：K 线图上会出现"有买点、没有对应卖点"凭空消失的情况，用户容易误以为"这段时间系统没有交易机会"；同时也丢失了这段浮动仓位的信息，回测区间末段的资金曲线/最大回撤计算失真。
+* **方案 B**：生成一笔按最后交易日收盘价"记账式"平仓的交易，且直接计入 `win_rate`/`max_drawdown` 等统计。缺点：这笔"胜负"完全取决于回测截止日期是否恰好卡在浮盈/浮亏的那一刻，属于人为区间截断造成的统计噪音，会扭曲历史胜率的真实含义（同一参数换一个回测截止日，胜率可能明显跳动）。
+* **方案 C（采用）**：生成 `exit_reason=PERIOD_END` 的记账交易，用于 K 线图与流水表**展示**这笔未走完的持仓及浮动盈亏，但**排除**在 `win_rate`/`avg_win_loss_ratio`/`max_drawdown`/`trade_count` 等汇总统计指标之外。
+* **决策：方案 C**。详见 5.5 节 `exit_reason` 取值表与 7.3/7.4 节逐日回放、指标计算规则。
 
 ---
 
@@ -306,17 +329,25 @@ CREATE TABLE backtest_jobs (
     start_date DATE NOT NULL,
     end_date DATE NOT NULL,
     params_json TEXT NOT NULL,                  -- 完整参数快照
+    params_hash VARCHAR(64) NOT NULL,           -- params_json 的确定性哈希（如 sha256 hex），用于去重与索引，避免直接对长文本建索引
+    compare_group_id VARCHAR(36) NOT NULL,      -- 同一次提交生成的一组或多组参数任务共享同一个值（UUID），单组提交也会生成一个；用于「多参数对比」查询归属
     win_rate REAL,
     avg_win_loss_ratio REAL,
     max_drawdown REAL,
-    trade_count INTEGER,
+    trade_count INTEGER,                        -- 仅统计 exit_reason 为 STOP_LOSS / TAKE_PROFIT 的完整交易，不含 PERIOD_END 记账行（见下）
     total_return REAL,                          -- 加分项
     annual_return REAL,                         -- 加分项
-    sample_insufficient INTEGER DEFAULT 0,      -- 交易次数过少标记
+    sample_insufficient INTEGER DEFAULT 0,      -- 交易次数过少标记（基于上面的 trade_count 口径判断）
     error_message TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     finished_at DATETIME
 );
+CREATE INDEX idx_bt_jobs_stock_status ON backtest_jobs(stock_code, status, created_at DESC);
+CREATE INDEX idx_bt_jobs_compare_group ON backtest_jobs(compare_group_id);
+-- 去重：同一股票 + 同一参数 + 同一区间，若已有任务在 PENDING/RUNNING，禁止再建新任务（部分唯一索引，SQLite 原生支持）
+CREATE UNIQUE INDEX uq_bt_jobs_inflight
+    ON backtest_jobs(stock_code, params_hash, start_date, end_date)
+    WHERE status IN ('PENDING', 'RUNNING');
 
 CREATE TABLE backtest_trades (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -327,11 +358,27 @@ CREATE TABLE backtest_trades (
     exit_price REAL NOT NULL,
     hold_days INTEGER NOT NULL,
     pnl_pct REAL NOT NULL,
-    pnl_amount REAL,                            -- 按 1 手或单位仓位规范化
-    exit_reason VARCHAR(32)                     -- STOP_LOSS|TAKE_PROFIT|...
+    pnl_amount REAL,                            -- 按虚拟 1 手（100 股）折算：(exit_price - entry_price) * 100，非真实资金金额
+    exit_reason VARCHAR(32) NOT NULL             -- STOP_LOSS | TAKE_PROFIT | PERIOD_END（见下方说明，取值已完整枚举）
 );
 CREATE INDEX idx_bt_trades_job ON backtest_trades(job_id);
 ```
+
+**`exit_reason` 取值与统计口径（重要，直接影响 7.3/7.4 与 K 线图展示）**：
+
+| 取值 | 含义 | 是否计入 `win_rate`/`avg_win_loss_ratio`/`max_drawdown`/`trade_count` |
+| --- | --- | --- |
+| `STOP_LOSS` | 价格触及止损线且浮亏离场 | 计入 |
+| `TAKE_PROFIT` | 价格触及止损线但浮盈离场（含保本止损、阶梯移动止盈两种情形，回测阶段统一归为该类型，不做进一步细分） | 计入 |
+| `PERIOD_END` | 回测区间结束时仍处于模拟持仓中（未触发止损/止盈），按**最后一个交易日收盘价**生成一笔「记账式」平仓交易，用于 K 线图与流水表展示这笔未走完的持仓及其浮动盈亏 | **不计入**，仅供展示参考 |
+
+* 回测阶段**忽略** `EnablePartialTakeProfit`（分批止盈）与 `EnableAddonAlert`（持仓中加仓）两个开关，只跑最简化的三级止损体系满仓进出（与 PRD 3.7.7「不模拟仓位管理」非目标一致），因此 `exit_reason` 不会出现 `PARTIAL_TP` / `ADDON`。
+* `pnl_amount` 口径统一为「虚拟 1 手（100 股）」，前端展示时需明确标注为模拟金额，不代表真实收益；`PERIOD_END` 记录同样按该口径计算，用于展示但不参与汇总。
+
+**去重与多参数对比**：
+
+* 创建回测任务时，请求体可携带一组或多组 `params`；服务端为每组参数各建一个 job，同批提交共享同一个新生成的 `compare_group_id`（单组提交也生成一个，自身即为该分组唯一成员）；「多参数对比表」按 `compare_group_id` 查询即可获得应并排展示的全部结果，不再依赖 `stock_code` + 时间窗口的模糊猜测。
+* 建任务前先按 `stock_code + params_hash + start_date + end_date` 查询是否已有 PENDING/RUNNING 的同参数任务，若存在直接复用其 `id` 而不新建；`uq_bt_jobs_inflight` 部分唯一索引作为并发场景下的兜底约束。
 
 列表首列圆环默认取：**该股「参数快照与当前生效参数一致」的最近 SUCCESS 任务**；不一致则展示该结果并打「过期」标记。
 
@@ -360,7 +407,7 @@ resolve_params(stock_code) =
 
 每个评估周期：
 
-1. **更新最高价**：`highest = max(highest_since_hold or price, price)`（回测日线：用当日 `high` 更新最高，用 `close` 做触发判断——见 7.3）。
+1. **更新最高价**：`highest = max(highest_since_hold or price, price)`（回测日线：用当日 `high` 更新最高与止损棘轮，用当日 `low` 做触发判断——见 7.3）。
 2. **初始止损候选**：`stop0 = avg_cost * (1 - stop_loss_pct)`。
 3. **保本候选**：若 `pnl_pct = (price - avg_cost)/avg_cost >= break_even_trigger_pct`，则  
    `stop1 = avg_cost * (1 + break_even_buffer_pct)`。
@@ -437,8 +484,8 @@ else:
 
 `PENDING → RUNNING → SUCCESS|FAILED`
 
-- 创建：单股（主路径）；可扩展同请求多 `params_json` 生成多个 job 便于对比。
-- Worker：检查并增量补齐 `daily_market_snapshots` 目标区间 → 逐日模拟 → 写 `backtest_trades` + 汇总指标 → 更新 job。
+- 创建：单股（主路径）；同请求可携带多组 `params_json` 生成多个 job 便于对比，同批共享一个 `compare_group_id`（见 5.5）；创建前按 `stock_code + params_hash +区间` 去重，命中 PENDING/RUNNING 则复用已有 job。
+- Worker：检查并增量补齐 `daily_market_snapshots` 目标区间——**补齐范围必须是 `[start_date - N个交易日, end_date]`**（`N` 取该批次全部对比参数中的最大值），为区间第一天的买点判断提供足够的历史高低点基准，避免因窗口不足导致首笔买点漏判/误判 → 逐日模拟 → 写 `backtest_trades` + 汇总指标 → 更新 job。
 - 失败：写入 `error_message`，前端圆环失败占位，不覆盖旧 SUCCESS 展示（除非产品选择覆盖；**推荐保留上次成功结果并提示本次失败**）。
 
 ### 7.3 日线回放约定（与实盘对齐的近似）
@@ -448,23 +495,27 @@ else:
 | 模拟状态 | 动作 |
 | --- | --- |
 | 空仓 | 若 `close <= Low_min(D)*X`（Low_min 基于 D 之前 N 日）→ 以 `close` 模拟买入 |
-| 持仓 | 用当日 `high` 更新 `HighestSinceHold` 并重算 `StopPrice`；若 `low <= StopPrice` → 以 `min(open, StopPrice)` 或 `StopPrice` 作为卖出价（实现时选定一种并单测固定）；标记 exit_reason |
+| 持仓 | 用当日 `high` 更新 `HighestSinceHold` 并重算 `StopPrice`；若 `low <= StopPrice` → 以 `min(open, StopPrice)` 或 `StopPrice` 作为卖出价（实现时选定一种并单测固定）；`price < avg_cost` 记 `exit_reason=STOP_LOSS`，否则记 `exit_reason=TAKE_PROFIT` |
+| 回测区间结束（最后一个交易日回放完毕） | 若此时仍处于模拟持仓状态（未触发止损/止盈），以**最后一个交易日收盘价**生成一笔 `exit_reason=PERIOD_END` 的记账交易（entry 为本轮建仓信息，exit_date/exit_price 为区间末日/收盘价）；若为空仓状态则直接结束，不生成额外记录 |
 
-简化假设（PRD 非目标对齐）：满仓进出、无滑点、无涨跌停无法成交、不计手续费（保本缓冲仍按参数模拟）。
+简化假设（PRD 非目标对齐）：满仓进出、无滑点、无涨跌停无法成交、不计手续费（保本缓冲仍按参数模拟）；忽略 `EnablePartialTakeProfit`/`EnableAddonAlert` 开关，不模拟分批止盈与持仓中加仓。
 
-样本不足：`trade_count < 阈值`（建议默认 5，可配置）→ `sample_insufficient=1`，UI 强制提示。
+样本不足：`trade_count < 阈值`（建议默认 5，可配置；该 `trade_count` 口径与 7.4 节一致，不含 `PERIOD_END` 记录）→ `sample_insufficient=1`，UI 强制提示。
 
 ### 7.4 指标计算
 
-- 胜率 = 盈利笔数 / 总笔数  
-- 平均盈亏比 = 平均盈利幅度 / 平均亏损幅度（绝对值）  
-- 最大回撤 = 模拟净值曲线峰值到谷底最大跌幅（单位仓位累乘）  
+- **统计范围**：`win_rate`、`avg_win_loss_ratio`、`max_drawdown`、`trade_count`、`total_return`/`annual_return` 均只统计 `exit_reason` 为 `STOP_LOSS` 或 `TAKE_PROFIT` 的记录；`exit_reason=PERIOD_END` 的记账行**不参与**以上任何汇总指标计算，仅用于 K 线图与流水表展示「区间结束时仍持仓」的最后一笔浮动盈亏。
+- 胜率 = 盈利笔数 / 总笔数（按上述统计范围）
+- 平均盈亏比 = 平均盈利幅度 / 平均亏损幅度（绝对值）
+- 最大回撤 = 模拟净值曲线峰值到谷底最大跌幅（单位仓位累乘）
 - 累计/年化收益为加分项
+- `pnl_amount` 统一按虚拟 1 手（100 股）折算：`(exit_price - entry_price) * 100`，`PERIOD_END` 记录同样适用该公式，仅口径展示为「浮动盈亏」
 
 ### 7.5 与前端约定
 
 - 操作区「回测」→ 配置区间/参数 → 异步任务。
-- 第一列圆环 = `win_rate`；点击进详情（指标 + 流水 + 多 job 对比排序）。
+- 第一列圆环 = `win_rate`；点击进详情（指标 + K 线图 + 流水 + 多 job 对比排序）。
+- 详情弹层顶部为 **K 线图**（基于 KLineChart，见第 4 节关键点 7）：蜡烛图覆盖回测区间行情，买点/卖点叠加标记，点击/悬停卖点标记展示该笔交易盈亏金额与比例；K 线图下方为指标卡与逐笔流水表，两者引用同一份 `backtest_trades` 数据，避免口径不一致。
 - 「应用为单股策略」写 overrides，不改全局（除非显式勾选）；应用后圆环标记过期直至重跑。
 
 ---
@@ -481,7 +532,7 @@ else:
 | 行操作区 | 登记买入、登记减持、流水、回测、策略、移除（V1） |
 | 全局入口 | 策略参数（含止盈止损分区与开关） |
 
-弹层职责：买入/减持表单（含加仓预览）、流水抽屉、策略配置、回测配置与详情对比。回测相关弹层常驻免责声明。
+弹层职责：买入/减持表单（含加仓预览）、流水抽屉、策略配置、回测配置与详情对比。回测详情弹层新增 **K 线图区域**（KLineChart 蜡烛图 + 买卖点标记 + 卖点盈亏标注），置于指标卡与流水表之上。回测相关弹层常驻免责声明。
 
 ---
 
@@ -494,7 +545,7 @@ else:
 | Positions | `POST /positions/{code}/buys` `POST .../sells` `GET .../ledgers` `GET .../preview-buy` | 改仓与预览 |
 | Strategy | 扩展现有 strategy GET/PUT；overrides CRUD | 含风控字段 |
 | Watchlist | 列表 DTO 扩展 position + stop + backtest summary | 一次聚合 |
-| Backtest | `POST /backtests` `GET /backtests/{id}` `GET /backtests?stock=` `POST /backtests/{id}/apply` | 异步任务与应用参数 |
+| Backtest | `POST /backtests` `GET /backtests/{id}` `GET /backtests?stock=` `GET /backtests?compare_group=` `GET /backtests/{id}/kline` `POST /backtests/{id}/apply` | `POST` 支持单组或多组 `params`，返回各 job 及共享的 `compare_group_id`；命中去重时直接返回已存在的 PENDING/RUNNING job；`compare_group=` 用于「多参数对比表」按分组取齐全部结果；`kline` 一次性返回回测区间 OHLCV（来自 `daily_market_snapshots`）+ 该 job 的 `backtest_trades`（含 `PERIOD_END` 记账行），供前端渲染 K 线图叠加标记，避免拆成两次请求自行拼接对齐 |
 | Alerts | 沿用日志查询，扩展类型 | 可观测性 |
 
 列表接口应避免 N+1：服务端 join/批量查最新 job 摘要。
@@ -555,7 +606,7 @@ else:
 | 引擎 | 空仓/持仓路由、退出后当日停算、开关矩阵（分批/加仓/技术卖） |
 | 回测 | 同一 fixture 日线上，规则核与回测回放结果一致；样本不足标记 |
 | API | 减持校验、加仓预览、apply 只写单股、任务状态机 |
-| 前端 | 双模式列展示、圆环状态机、回测免责与过期角标 |
+| 前端 | 双模式列展示、圆环状态机、回测免责与过期角标；回测详情 K 线图买卖点标记与后端 `backtest_trades` 日期/价格一一对齐、卖点盈亏文案正确 |
 
 ---
 

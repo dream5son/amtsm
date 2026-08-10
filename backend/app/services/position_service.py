@@ -6,13 +6,12 @@ from app.db.connection import get_db
 from app.db.models import Position, PositionLedger, Watchlist
 from app.schemas.position import PositionTradeRequest
 from app.services.position_math import (
-    initial_stop_price,
-    ratchet_stop,
     realized_pnl,
     weighted_avg_cost,
 )
 from app.services.stock_search_service import normalize_stock_code
 from app.services.strategy_service import resolve_params
+from app.market_signal import evaluate, risk_params_from_resolved
 
 
 class StockNotFoundError(ValueError):
@@ -50,8 +49,23 @@ def _get_or_create_position(session, stock_code: str) -> Position:
     return pos
 
 
-def _stop_loss_pct(stock_code: str) -> float:
-    return float(resolve_params(stock_code)["stop_loss_pct"])
+def _initial_stop_from_evaluate(
+    *,
+    new_avg: float,
+    highest_since_hold: float | None,
+    prev_stop: float | None,
+    stock_code: str,
+) -> float:
+    """Compute stop via the shared three-tier evaluate (aligns with live/backtest)."""
+    risk = risk_params_from_resolved(resolve_params(stock_code))
+    result = evaluate(
+        avg_cost=new_avg,
+        highest_since_hold=highest_since_hold,
+        prev_stop=prev_stop,
+        price=new_avg,
+        params=risk,
+    )
+    return float(result.stop_price)
 
 
 def _position_dict(pos: Position) -> dict:
@@ -79,11 +93,21 @@ def preview_buy(stock_code: str, qty: int, price: float) -> dict:
         old_qty = pos.qty if pos else 0
         old_cost = pos.avg_cost if pos else None
         old_stop = pos.stop_price if pos else None
-        stop_pct = _stop_loss_pct(normalized)
+        old_highest = pos.highest_since_hold if pos else None
 
         new_avg = weighted_avg_cost(old_cost, old_qty, price, qty)
-        new_stop0 = initial_stop_price(new_avg, stop_pct)
-        new_stop = ratchet_stop(old_stop if old_qty > 0 else None, new_stop0)
+        if old_qty > 0:
+            highest = old_highest
+            prev_stop = old_stop
+        else:
+            highest = new_avg
+            prev_stop = None
+        new_stop = _initial_stop_from_evaluate(
+            new_avg=new_avg,
+            highest_since_hold=highest,
+            prev_stop=prev_stop,
+            stock_code=normalized,
+        )
 
         return {
             "stock_code": normalized,
@@ -104,7 +128,6 @@ def register_buy(stock_code: str, payload: PositionTradeRequest) -> dict:
     with get_db() as session:
         _require_watchlist(session, normalized)
         pos = _get_or_create_position(session, normalized)
-        stop_pct = _stop_loss_pct(normalized)
 
         old_qty = pos.qty
         old_cost = pos.avg_cost
@@ -112,15 +135,23 @@ def register_buy(stock_code: str, payload: PositionTradeRequest) -> dict:
         old_highest = pos.highest_since_hold
 
         new_avg = weighted_avg_cost(old_cost, old_qty, payload.price, payload.qty)
-        new_stop0 = initial_stop_price(new_avg, stop_pct)
-        new_stop = ratchet_stop(old_stop if old_qty > 0 else None, new_stop0)
-
         if old_qty == 0:
             pos.highest_since_hold = payload.price
             pos.opened_at = _utcnow()
+            highest_for_stop = float(payload.price)
+            prev_stop = None
         else:
             # Addon: do not reset highest_since_hold
             pos.highest_since_hold = old_highest
+            highest_for_stop = old_highest
+            prev_stop = old_stop
+
+        new_stop = _initial_stop_from_evaluate(
+            new_avg=new_avg,
+            highest_since_hold=highest_for_stop,
+            prev_stop=prev_stop,
+            stock_code=normalized,
+        )
 
         pos.qty = old_qty + payload.qty
         pos.avg_cost = new_avg

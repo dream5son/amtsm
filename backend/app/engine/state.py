@@ -4,6 +4,8 @@ class RuntimeState:
     def __init__(self) -> None:
         self.baseline_cache: dict[str, dict] = {}
         self.signal_state: dict[str, str] = {}
+        # Parallel to signal_state: UI hint flags (story 12 T+1 / limit board).
+        self.signal_meta: dict[str, dict] = {}
         self.signal_trade_date: str | None = None
         self.sent_signal_keys: set[tuple[str, str, str]] = set()
         self.job_status: str = "IDLE"  # IDLE | RUNNING | FAILED | SUCCESS
@@ -20,12 +22,27 @@ class RuntimeState:
     def reset_daily(self) -> None:
         self.baseline_cache.clear()
         self.signal_state.clear()
+        self.signal_meta.clear()
         self.signal_trade_date = None
         self.sent_signal_keys.clear()
         self.partial_tp_ladder_idx.clear()
         self.exit_fired_today.clear()
         # Quote-delay is a live system flag; keep across day reset unless cleared by success.
         # position_cache is reloaded from DB as needed; keep across day.
+
+    def set_signal(
+        self,
+        stock_code: str,
+        signal_type: str,
+        *,
+        t1_note: bool = False,
+        is_limit_up: bool = False,
+    ) -> None:
+        self.signal_state[stock_code] = signal_type
+        self.signal_meta[stock_code] = {
+            "t1_note": bool(t1_note),
+            "is_limit_up": bool(is_limit_up),
+        }
 
 
 runtime_state = RuntimeState()

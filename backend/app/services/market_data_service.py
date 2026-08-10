@@ -418,16 +418,86 @@ def fetch_daily_bars(stock_code: str, n: int, end_date: date | None = None) -> l
         raise StockDataFetchError(f"Failed to fetch data for {stock_code}: {error_msg}") from exc
 
 
+def fetch_qfq_bars_range(
+    stock_code: str,
+    start_date: date,
+    end_date: date,
+    *,
+    retries: int = 1,
+    retry_backoff_seconds: float = 0.5,
+) -> list[dict]:
+    """Fetch forward-adjusted (qfq) daily bars for an explicit ``[start_date, end_date]``.
+
+    Unlike :func:`fetch_daily_bars` (which derives its own lookback window from a
+    day-count ``n``), this fetches a caller-specified date range. Used by the
+    backtest worker to backfill gaps in ``daily_market_snapshots`` for the exact
+    window a backtest job needs.
+
+    Returns list of bar dicts (oldest-first) with keys: date, open, high, low,
+    close, volume, turnover_rate (optional). Dates outside the stock's listed
+    history are simply absent (no error).
+    """
+    numeric_code = _to_numeric_code(stock_code)
+    attempts = max(1, retries + 1)
+    last_exc: Exception | None = None
+
+    for attempt in range(attempts):
+        try:
+            return high_available_akshare(
+                numeric_code=numeric_code,
+                start_date=start_date.strftime("%Y%m%d"),
+                end_date=end_date.strftime("%Y%m%d"),
+                adjust="qfq",
+            )
+        except MarketDataUnavailableError as exc:
+            last_exc = exc
+            if attempt + 1 >= attempts:
+                raise
+            logger.warning(
+                "fetch_qfq_bars_range retry %d/%d for %s: %s",
+                attempt + 1,
+                attempts,
+                stock_code,
+                exc,
+            )
+            time.sleep(max(0.0, retry_backoff_seconds) * (attempt + 1))
+        except Exception as exc:
+            last_exc = exc
+            if attempt + 1 >= attempts:
+                raise StockDataFetchError(
+                    f"Failed to fetch qfq bars range for {stock_code}: {exc}"
+                ) from exc
+            logger.warning(
+                "fetch_qfq_bars_range retry %d/%d for %s: %s",
+                attempt + 1,
+                attempts,
+                stock_code,
+                exc,
+            )
+            time.sleep(max(0.0, retry_backoff_seconds) * (attempt + 1))
+
+    msg = str(last_exc) if last_exc else "unknown error"
+    raise StockDataFetchError(f"Failed to fetch qfq bars range for {stock_code}: {msg}") from last_exc
+
+
 def fetch_trade_day_bar(
     stock_code: str,
     trade_date: date,
     *,
     retries: int = 1,
     retry_backoff_seconds: float = 0.5,
+    adjust: str = "qfq",
 ) -> dict:
-    """Fetch unadjusted OHLCV (+ optional turnover) for a single trade date.
+    """Fetch OHLCV (+ optional turnover) for a single trade date.
 
     Includes ``trade_date`` itself. Used by the post-close daily snapshot job.
+
+    Defaults to forward-adjusted (``qfq``) prices so that ``daily_market_snapshots``
+    stays on the same price basis used by baseline/backtest reads (V2 design
+    "unify daily_market_snapshots as the single qfq cache"). For the most recent
+    trading day qfq and unadjusted prices are identical, so this default does not
+    change already-displayed "today" values; pass ``adjust=""`` to opt back into
+    unadjusted archival prices if ever needed.
 
     Returns:
         dict with keys: date, open, high, low, close, volume, turnover_rate.
@@ -445,12 +515,11 @@ def fetch_trade_day_bar(
 
     for attempt in range(attempts):
         try:
-            # Unadjusted prices reflect the actual session OHLCV for archival.
             bars = high_available_akshare(
                 numeric_code=numeric_code,
                 start_date=yyyymmdd,
                 end_date=yyyymmdd,
-                adjust="",
+                adjust=adjust,
             )
             for bar in bars:
                 if _bar_date_str(bar.get("date")) == day_str:
