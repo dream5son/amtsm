@@ -1,7 +1,10 @@
 "use client";
 
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 
+import BacktestConfigDialog from "@/components/backtest-config-dialog";
+import BacktestDetailDialog from "@/components/backtest-detail-dialog";
+import BacktestRing from "@/components/backtest-ring";
 import JobLogDialog from "@/components/job-log-dialog";
 import PositionLedgerDrawer from "@/components/position-ledger-drawer";
 import RegisterBuyDialog from "@/components/register-buy-dialog";
@@ -73,6 +76,9 @@ function renderSignal(
   return { dot: "⚪", label: "无信号", cls: "text-slate-500" };
 }
 
+const SIGNAL_T1_TIP = "当日买入部分暂受T+1限制，无法当日卖出";
+const SIGNAL_LIMIT_BOARD_TIP = "该股当前可能处于涨跌停状态，请注意流动性风险";
+
 type WatchlistPanelProps = {
   onOpenStrategy?: (item: WatchlistItem) => void;
 };
@@ -94,6 +100,8 @@ export default function WatchlistPanel({ onOpenStrategy }: WatchlistPanelProps) 
   const [buyTarget, setBuyTarget] = useState<WatchlistItem | null>(null);
   const [sellTarget, setSellTarget] = useState<WatchlistItem | null>(null);
   const [ledgerTarget, setLedgerTarget] = useState<WatchlistItem | null>(null);
+  const [backtestTarget, setBacktestTarget] = useState<WatchlistItem | null>(null);
+  const [detailTarget, setDetailTarget] = useState<WatchlistItem | null>(null);
 
   useEffect(() => {
     void loadWatchlist();
@@ -121,6 +129,41 @@ export default function WatchlistPanel({ onOpenStrategy }: WatchlistPanelProps) 
       window.clearInterval(timer);
     };
   }, []);
+
+  const hasInFlightBacktest = useMemo(
+    () =>
+      watchlist.some(
+        (item) => item.backtest_status === "PENDING" || item.backtest_status === "RUNNING",
+      ),
+    [watchlist],
+  );
+
+  useEffect(() => {
+    if (!hasInFlightBacktest) return;
+    let cancelled = false;
+
+    const timer = window.setInterval(() => {
+      void fetchWatchlist()
+        .then((data) => {
+          if (!cancelled) setWatchlist(data);
+        })
+        .catch(() => {
+          // Best-effort polling; keep last known state on failure.
+        });
+    }, 3000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [hasInFlightBacktest]);
+
+  const wasInFlightBacktestRef = useRef(false);
+  useEffect(() => {
+    if (wasInFlightBacktestRef.current && !hasInFlightBacktest) {
+      setMessage("回测已完成，可点击首列圆环或「详情」查看结果");
+    }
+    wasInFlightBacktestRef.current = hasInFlightBacktest;
+  }, [hasInFlightBacktest]);
 
   useEffect(() => {
     let cancelled = false;
@@ -329,9 +372,15 @@ export default function WatchlistPanel({ onOpenStrategy }: WatchlistPanelProps) 
 
       <div className="min-w-0 overflow-x-auto">
         {watchlist.length > 0 ? (
-          <table className="w-full min-w-[1180px] border-collapse text-sm">
+          <table className="w-full min-w-[1280px] border-collapse text-sm">
             <thead>
               <tr className="border-b border-slate-200 text-slate-500">
+                <th
+                  className="whitespace-nowrap py-2 pr-2 text-left font-medium"
+                  title="回测历史胜率：盈利交易笔数 / 总交易笔数，点击圆环查看详情"
+                >
+                  胜率
+                </th>
                 <th className="whitespace-nowrap py-2 pr-2 text-left font-medium">代码</th>
                 <th className="whitespace-nowrap py-2 pr-2 text-left font-medium">名称</th>
                 <th className="whitespace-nowrap py-2 pr-2 text-left font-medium">最新价</th>
@@ -345,8 +394,7 @@ export default function WatchlistPanel({ onOpenStrategy }: WatchlistPanelProps) 
                 <th className="whitespace-nowrap py-2 pr-2 text-left font-medium">状态</th>
                 <th className="whitespace-nowrap py-2 pr-2 text-left font-medium">信号</th>
                 <th className="whitespace-nowrap py-2 pr-2 text-left font-medium">定时任务</th>
-                <th className="whitespace-nowrap py-2 pr-2 text-left font-medium">备注</th>
-                <th className="whitespace-nowrap py-2 text-left font-medium">操作</th>
+                <th className="w-[320px] min-w-[320px] whitespace-nowrap py-2 text-left font-medium">操作</th>
               </tr>
             </thead>
             <tbody>
@@ -356,6 +404,9 @@ export default function WatchlistPanel({ onOpenStrategy }: WatchlistPanelProps) 
                 const riskCls = holding ? "py-2 pr-2 font-semibold text-slate-900" : "py-2 pr-2 text-slate-500";
                 return (
                   <tr key={item.stock_code} className="border-b border-slate-100">
+                    <td className="py-2 pr-2">
+                      <BacktestRing item={item} onClick={setDetailTarget} />
+                    </td>
                     <td className="py-2 pr-2 text-slate-700">{item.stock_code}</td>
                     <td className="py-2 pr-2 text-slate-900">{item.stock_name}</td>
                     <td className="py-2 pr-2 text-slate-700">{formatPrice(item.latest_price)}</td>
@@ -403,6 +454,24 @@ export default function WatchlistPanel({ onOpenStrategy }: WatchlistPanelProps) 
                       <span className="inline-flex items-center gap-1">
                         <span>{signal.dot}</span>
                         <span className="text-xs">{signal.label}</span>
+                        {item.signal_t1_note ? (
+                          <span
+                            className="cursor-help text-[10px] font-semibold text-amber-700"
+                            title={SIGNAL_T1_TIP}
+                            aria-label={SIGNAL_T1_TIP}
+                          >
+                            T+1
+                          </span>
+                        ) : null}
+                        {item.signal_limit_board ? (
+                          <span
+                            className="cursor-help text-[10px] font-semibold text-rose-700"
+                            title={SIGNAL_LIMIT_BOARD_TIP}
+                            aria-label={SIGNAL_LIMIT_BOARD_TIP}
+                          >
+                            停
+                          </span>
+                        ) : null}
                       </span>
                     </td>
                     <td className="py-2 pr-2">
@@ -445,11 +514,8 @@ export default function WatchlistPanel({ onOpenStrategy }: WatchlistPanelProps) 
                         </svg>
                       </button>
                     </td>
-                    <td className="py-2 pr-2 text-slate-600">
-                      {item.insufficient_days && item.insufficient_days > 0 ? `数据不足 ${item.insufficient_days} 天` : "--"}
-                    </td>
-                    <td className="py-2">
-                      <div className="flex max-w-[200px] flex-wrap gap-1">
+                    <td className="w-[320px] min-w-[320px] py-2">
+                      <div className="flex flex-wrap gap-1">
                         <button
                           type="button"
                           onClick={() => setBuyTarget(item)}
@@ -479,6 +545,27 @@ export default function WatchlistPanel({ onOpenStrategy }: WatchlistPanelProps) 
                           className="rounded-md border border-violet-300 px-2 py-1 text-xs font-medium text-violet-700 transition-colors hover:bg-violet-50"
                         >
                           策略
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (
+                              item.backtest_status === "PENDING" ||
+                              item.backtest_status === "RUNNING"
+                            ) {
+                              setMessage(`${item.stock_name} 回测正在进行中，请稍候`);
+                              return;
+                            }
+                            setBacktestTarget(item);
+                          }}
+                          className="rounded-md border border-indigo-300 px-2 py-1 text-xs font-medium text-indigo-700 transition-colors hover:bg-indigo-50 disabled:cursor-not-allowed disabled:opacity-60"
+                          disabled={
+                            item.backtest_status === "PENDING" || item.backtest_status === "RUNNING"
+                          }
+                        >
+                          {item.backtest_status === "PENDING" || item.backtest_status === "RUNNING"
+                            ? "回测中..."
+                            : "回测"}
                         </button>
                         <button
                           type="button"
@@ -530,6 +617,28 @@ export default function WatchlistPanel({ onOpenStrategy }: WatchlistPanelProps) 
         open={ledgerTarget != null}
         item={ledgerTarget}
         onClose={() => setLedgerTarget(null)}
+      />
+      <BacktestConfigDialog
+        open={backtestTarget != null}
+        item={backtestTarget}
+        onClose={() => setBacktestTarget(null)}
+        onSubmitted={(jobCount) => {
+          setMessage(
+            backtestTarget
+              ? `已提交 ${backtestTarget.stock_name} 回测（${jobCount} 组参数），进行中...`
+              : "回测已提交",
+          );
+          void loadWatchlist();
+        }}
+      />
+      <BacktestDetailDialog
+        open={detailTarget != null}
+        item={detailTarget}
+        onClose={() => setDetailTarget(null)}
+        onApplied={() => {
+          setMessage("参数已更新，建议重新回测以刷新首列圆环");
+          void loadWatchlist();
+        }}
       />
     </section>
   );

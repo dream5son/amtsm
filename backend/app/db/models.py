@@ -13,6 +13,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -219,3 +220,64 @@ class BaselineJobLogItem(Base):
     processed_at: Mapped[datetime | None] = mapped_column(
         DateTime, server_default=func.current_timestamp()
     )
+
+
+class BacktestJob(Base):
+    __tablename__ = "backtest_jobs"
+    __table_args__ = (
+        Index(
+            "idx_bt_jobs_stock_status",
+            "stock_code",
+            "status",
+            "created_at",
+        ),
+        Index("idx_bt_jobs_compare_group", "compare_group_id"),
+        Index(
+            "uq_bt_jobs_inflight",
+            "stock_code",
+            "params_hash",
+            "start_date",
+            "end_date",
+            unique=True,
+            sqlite_where=text("status IN ('PENDING', 'RUNNING')"),
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    stock_code: Mapped[str] = mapped_column(String(10), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="PENDING")
+    start_date: Mapped[str] = mapped_column(String(10), nullable=False)
+    end_date: Mapped[str] = mapped_column(String(10), nullable=False)
+    params_json: Mapped[str] = mapped_column(Text, nullable=False)
+    params_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    compare_group_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    win_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
+    avg_win_loss_ratio: Mapped[float | None] = mapped_column(Float, nullable=True)
+    max_drawdown: Mapped[float | None] = mapped_column(Float, nullable=True)
+    trade_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    total_return: Mapped[float | None] = mapped_column(Float, nullable=True)
+    annual_return: Mapped[float | None] = mapped_column(Float, nullable=True)
+    sample_insufficient: Mapped[int] = mapped_column(Integer, default=0)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime | None] = mapped_column(
+        DateTime, server_default=func.current_timestamp()
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class BacktestTrade(Base):
+    __tablename__ = "backtest_trades"
+    __table_args__ = (Index("idx_bt_trades_job", "job_id"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    job_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("backtest_jobs.id"), nullable=False
+    )
+    entry_date: Mapped[str] = mapped_column(String(10), nullable=False)
+    entry_price: Mapped[float] = mapped_column(Float, nullable=False)
+    exit_date: Mapped[str] = mapped_column(String(10), nullable=False)
+    exit_price: Mapped[float] = mapped_column(Float, nullable=False)
+    hold_days: Mapped[int] = mapped_column(Integer, nullable=False)
+    pnl_pct: Mapped[float] = mapped_column(Float, nullable=False)
+    pnl_amount: Mapped[float | None] = mapped_column(Float, nullable=True)
+    exit_reason: Mapped[str] = mapped_column(String(32), nullable=False)

@@ -34,6 +34,8 @@ def test_add_watchlist_normalizes_code_and_rejects_duplicates(tmp_path, monkeypa
             "effective_n": 60,
             "insufficient_days": None,
             "signal_type": None,
+            "signal_t1_note": False,
+            "signal_limit_board": False,
             "position_status": "EMPTY",
             "position_qty": 0,
             "avg_cost": None,
@@ -41,6 +43,13 @@ def test_add_watchlist_normalizes_code_and_rejects_duplicates(tmp_path, monkeypa
             "unrealized_pnl": None,
             "unrealized_pnl_pct": None,
             "stop_distance_pct": None,
+            "backtest_status": "NONE",
+            "backtest_job_id": None,
+            "backtest_win_rate": None,
+            "backtest_trade_count": None,
+            "backtest_sample_insufficient": False,
+            "backtest_stale": False,
+            "backtest_error_message": None,
         }
     ]
 
@@ -164,8 +173,16 @@ def test_list_watchlist_includes_runtime_signal_type(tmp_path, monkeypatch) -> N
     init_db()
     runtime_state.reset_daily()
     add_watchlist(WatchlistCreate(stock_code="600519", stock_name="贵州茅台"))
-    runtime_state.signal_state["sh600519"] = "BUY"
+    runtime_state.set_signal("sh600519", "STOP_LOSS", t1_note=True)
     runtime_state.signal_trade_date = "2026-08-01"
 
     rows = list_watchlist()
-    assert rows[0]["signal_type"] == "BUY"
+    assert rows[0]["signal_type"] == "STOP_LOSS"
+    assert rows[0]["signal_t1_note"] is True
+    assert rows[0]["signal_limit_board"] is False
+
+    runtime_state.set_signal("sh600519", "SELL", is_limit_up=True)
+    rows = list_watchlist()
+    assert rows[0]["signal_type"] == "SELL"
+    assert rows[0]["signal_t1_note"] is False
+    assert rows[0]["signal_limit_board"] is True

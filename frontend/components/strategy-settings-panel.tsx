@@ -310,9 +310,6 @@ export default function StrategySettingsPanel({
             <p className="mb-2 inline-flex rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-xs font-medium text-slate-600">
               Trading Signal Workspace
             </p>
-            <h2 className="text-2xl font-semibold tracking-tight text-slate-900 md:text-3xl">
-              A股交易信号监控工作台
-            </h2>
             <p className="mt-2 text-sm text-slate-600 md:text-base">策略参数维护（含止盈止损）</p>
           </div>
 
@@ -447,8 +444,8 @@ export default function StrategySettingsPanel({
               </div>
 
               <p className="mb-0 mt-2 text-xs font-medium text-slate-500">止盈止损</p>
-              <div className="grid gap-3 sm:grid-cols-3">
-                <label className="grid gap-1 text-sm text-slate-700">
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                <label className="grid min-w-0 gap-1 text-sm text-slate-700">
                   初始止损（%）
                   <input
                     value={strategyForm.stop_loss_pct}
@@ -456,10 +453,10 @@ export default function StrategySettingsPanel({
                       setStrategyForm((prev) => ({ ...prev, stop_loss_pct: event.target.value }))
                     }
                     inputMode="decimal"
-                    className="rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none ring-sky-200 transition focus:ring"
+                    className="w-full min-w-0 rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none ring-sky-200 transition focus:ring"
                   />
                 </label>
-                <label className="grid gap-1 text-sm text-slate-700">
+                <label className="grid min-w-0 gap-1 text-sm text-slate-700">
                   保本触发（%）
                   <input
                     value={strategyForm.break_even_trigger_pct}
@@ -470,10 +467,10 @@ export default function StrategySettingsPanel({
                       }))
                     }
                     inputMode="decimal"
-                    className="rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none ring-sky-200 transition focus:ring"
+                    className="w-full min-w-0 rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none ring-sky-200 transition focus:ring"
                   />
                 </label>
-                <label className="grid gap-1 text-sm text-slate-700">
+                <label className="grid min-w-0 gap-1 text-sm text-slate-700">
                   保本缓冲（%）
                   <input
                     value={strategyForm.break_even_buffer_pct}
@@ -484,7 +481,7 @@ export default function StrategySettingsPanel({
                       }))
                     }
                     inputMode="decimal"
-                    className="rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none ring-sky-200 transition focus:ring"
+                    className="w-full min-w-0 rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none ring-sky-200 transition focus:ring"
                   />
                 </label>
               </div>

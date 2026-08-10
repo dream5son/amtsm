@@ -13,7 +13,7 @@ from app.schemas.strategy import (
     ladder_to_json,
     parse_trailing_ladder,
 )
-from app.services.risk_rules import evaluate, risk_params_from_resolved
+from app.market_signal import evaluate, risk_params_from_resolved
 from app.services.stock_search_service import normalize_stock_code
 
 

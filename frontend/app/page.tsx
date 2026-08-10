@@ -12,7 +12,7 @@ export default function HomePage() {
   const [watchlistKey, setWatchlistKey] = useState(0);
 
   return (
-    <main className="mx-auto w-full max-w-7xl px-4 py-8 md:px-6 md:py-10">
+    <main className="w-full px-4 py-8 md:px-6 md:py-10">
       <div className="grid min-w-0 gap-5">
         <WatchlistPanel
           key={watchlistKey}

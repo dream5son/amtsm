@@ -8,6 +8,8 @@ export type SignalType =
   | "PARTIAL_TP"
   | "ADDON";
 
+export type BacktestStatus = "NONE" | "PENDING" | "RUNNING" | "SUCCESS" | "FAILED";
+
 export type WatchlistItem = {
   stock_code: string;
   stock_name: string;
@@ -19,6 +21,8 @@ export type WatchlistItem = {
   effective_n: number;
   insufficient_days: number | null;
   signal_type: SignalType | null;
+  signal_t1_note: boolean;
+  signal_limit_board: boolean;
   position_status: "EMPTY" | "HOLDING" | "PARTIAL";
   position_qty: number;
   avg_cost: number | null;
@@ -26,6 +30,13 @@ export type WatchlistItem = {
   unrealized_pnl: number | null;
   unrealized_pnl_pct: number | null;
   stop_distance_pct: number | null;
+  backtest_status: BacktestStatus;
+  backtest_job_id: number | null;
+  backtest_win_rate: number | null;
+  backtest_trade_count: number | null;
+  backtest_sample_insufficient: boolean;
+  backtest_stale: boolean;
+  backtest_error_message: string | null;
 };
 
 export type BuyPreview = {
@@ -422,4 +433,162 @@ export async function fetchLedgers(stock_code: string): Promise<LedgerItem[]> {
     throw new Error("failed to fetch ledgers");
   }
   return (await res.json()) as LedgerItem[];
+}
+
+// ---------------------------------------------------------------------------
+// Backtest (user stories 08-10)
+// ---------------------------------------------------------------------------
+
+export type BacktestParamsOverride = {
+  n?: number;
+  x?: number;
+  y?: number;
+  stop_loss_pct?: number;
+  break_even_trigger_pct?: number;
+  break_even_buffer_pct?: number;
+  trailing_ladder?: TrailingLadderLevel[];
+};
+
+export type BacktestCreateRequest = {
+  stock_code: string;
+  start_date?: string;
+  end_date?: string;
+  params?: BacktestParamsOverride[];
+};
+
+export type BacktestJob = {
+  id: number;
+  stock_code: string;
+  status: "PENDING" | "RUNNING" | "SUCCESS" | "FAILED";
+  start_date: string;
+  end_date: string;
+  params_json: string;
+  params_hash: string;
+  compare_group_id: string;
+  win_rate: number | null;
+  avg_win_loss_ratio: number | null;
+  max_drawdown: number | null;
+  trade_count: number | null;
+  total_return: number | null;
+  annual_return: number | null;
+  sample_insufficient: boolean;
+  error_message: string | null;
+  created_at: string | null;
+  finished_at: string | null;
+};
+
+export type BacktestCreateResponse = {
+  compare_group_id: string;
+  jobs: BacktestJob[];
+};
+
+export type BacktestTrade = {
+  id: number;
+  entry_date: string;
+  entry_price: number;
+  exit_date: string;
+  exit_price: number;
+  hold_days: number;
+  pnl_pct: number;
+  pnl_amount: number | null;
+  exit_reason: "STOP_LOSS" | "TAKE_PROFIT" | "PERIOD_END";
+};
+
+export type BacktestKlineBar = {
+  trade_date: string;
+  open_price: number;
+  high_price: number;
+  low_price: number;
+  close_price: number;
+  volume: number;
+};
+
+export type BacktestKlineResponse = {
+  job: BacktestJob;
+  bars: BacktestKlineBar[];
+  trades: BacktestTrade[];
+};
+
+export async function createBacktest(
+  payload: BacktestCreateRequest,
+): Promise<BacktestCreateResponse> {
+  const res = await fetch(`${API_BASE}/api/backtests`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    let message = "发起回测失败";
+    try {
+      const body = (await res.json()) as { detail?: string };
+      if (body.detail) message = body.detail;
+    } catch {
+      // ignore
+    }
+    throw new Error(message);
+  }
+  return (await res.json()) as BacktestCreateResponse;
+}
+
+export async function fetchBacktest(jobId: number): Promise<BacktestJob> {
+  const res = await fetch(`${API_BASE}/api/backtests/${jobId}`, { cache: "no-store" });
+  if (!res.ok) {
+    throw new Error("failed to fetch backtest job");
+  }
+  return (await res.json()) as BacktestJob;
+}
+
+export async function fetchBacktestsByStock(stockCode: string): Promise<BacktestJob[]> {
+  const params = new URLSearchParams({ stock: stockCode });
+  const res = await fetch(`${API_BASE}/api/backtests?${params.toString()}`, { cache: "no-store" });
+  if (!res.ok) {
+    throw new Error("failed to fetch backtests");
+  }
+  return (await res.json()) as BacktestJob[];
+}
+
+export async function fetchBacktestsByCompareGroup(compareGroupId: string): Promise<BacktestJob[]> {
+  const params = new URLSearchParams({ compare_group: compareGroupId });
+  const res = await fetch(`${API_BASE}/api/backtests?${params.toString()}`, { cache: "no-store" });
+  if (!res.ok) {
+    throw new Error("failed to fetch backtests");
+  }
+  return (await res.json()) as BacktestJob[];
+}
+
+export async function fetchBacktestKline(jobId: number): Promise<BacktestKlineResponse> {
+  const res = await fetch(`${API_BASE}/api/backtests/${jobId}/kline`, { cache: "no-store" });
+  if (!res.ok) {
+    throw new Error("failed to fetch backtest kline");
+  }
+  return (await res.json()) as BacktestKlineResponse;
+}
+
+export type BacktestApplyResponse = {
+  stock_code: string;
+  override: StockStrategyOverride;
+  updated_global: boolean;
+  global_strategy: StrategyConfig | null;
+};
+
+export async function applyBacktest(
+  jobId: number,
+  options?: { update_global?: boolean },
+): Promise<BacktestApplyResponse> {
+  const res = await fetch(`${API_BASE}/api/backtests/${jobId}/apply`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ update_global: options?.update_global ?? false }),
+  });
+  if (!res.ok) {
+    let message = "应用回测参数失败";
+    try {
+      const body = (await res.json()) as { detail?: string };
+      if (body.detail) message = body.detail;
+    } catch {
+      // ignore
+    }
+    throw new Error(message);
+  }
+  return (await res.json()) as BacktestApplyResponse;
 }

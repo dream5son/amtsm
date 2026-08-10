@@ -13,13 +13,13 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       <body className="min-h-screen bg-slate-50 text-slate-900 antialiased">
         <div className="flex min-h-screen flex-col">
           <header className="sticky top-0 z-20 border-b border-slate-200/80 bg-white/95 backdrop-blur">
-            <div className="mx-auto flex w-full max-w-7xl items-center justify-between px-4 py-3 md:px-6">
+            <div className="flex w-full items-center justify-between px-4 py-3 md:px-6">
               <Link href="/" className="text-base font-semibold tracking-tight text-slate-900">
-                AMTSM
+                A股交易信号监控工作台
               </Link>
               <nav className="flex items-center gap-1 text-sm text-slate-600">
                 <Link href="/" className="rounded-md px-3 py-2 transition-colors hover:bg-slate-100 hover:text-slate-900">
-                  监控工作台
+                  Be water, My Friend
                 </Link>
               </nav>
             </div>

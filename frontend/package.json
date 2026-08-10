@@ -9,6 +9,7 @@
     "lint": "next lint"
   },
   "dependencies": {
+    "klinecharts": "^10.0.2",
     "next": "15.5.22",
     "pnpm": "^11.20.0",
     "react": "19.1.1",

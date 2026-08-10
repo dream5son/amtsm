@@ -16,7 +16,6 @@ from app.db.models import (
     PositionLedger,
     Watchlist,
 )
-from app.engine.baseline_calculator import InsufficientDataError, compute_baseline
 from app.engine.market_hours import (
     SH_TZ,
     is_in_trading_session,
@@ -28,20 +27,33 @@ from app.engine.resilience import (
 )
 from app.engine.state import runtime_state
 from app.services.alert_service import (
-    SIGNAL_ADDON,
-    SIGNAL_PARTIAL_TP,
     is_limit_up,
     process_buy_candidates,
     process_risk_candidates,
     process_sell_candidates,
 )
-from app.services.risk_rules import evaluate, risk_params_from_resolved
 from app.services.strategy_service import resolve_params
+from app.market_signal import (
+    SIGNAL_ADDON,
+    SIGNAL_BUY,
+    SIGNAL_PARTIAL_TP,
+    SIGNAL_SELL,
+    SIGNAL_STOP_LOSS,
+    SIGNAL_TAKE_PROFIT,
+    InsufficientDataError,
+    compute_baseline,
+    evaluate,
+    is_addon_signal,
+    is_buy_signal,
+    is_tech_sell_signal,
+    risk_params_from_resolved,
+)
 from app.services.market_data_service import (
     MarketDataUnavailableError,
     MissingTradeDayBarError,
     StockDataFetchError,
     fetch_daily_bars,
+    fetch_qfq_bars_range,
     fetch_realtime_quotes_batch,
     fetch_trade_day_bar,
 )
@@ -64,6 +76,7 @@ __all__ = [
     "is_trading_day",
     "market_polling_task",
     "upsert_snapshot",
+    "upsert_qfq_bars",
     "get_snapshot",
 ]
 
@@ -222,6 +235,39 @@ def upsert_snapshot(
         session.commit()
 
 
+def upsert_qfq_bars(stock_code: str, bars: list[dict]) -> int:
+    """Bulk-upsert forward-adjusted (qfq) daily bars into ``daily_market_snapshots``.
+
+    Thin batch wrapper around :func:`upsert_snapshot`; this is the single write
+    entrypoint the backtest worker uses to backfill missing history (design.md
+    "唯一写入口" contract). Returns the number of bars written.
+    """
+    written = 0
+    for bar in bars:
+        date_value = bar.get("date")
+        open_price = bar.get("open")
+        high_price = bar.get("high")
+        low_price = bar.get("low")
+        close_price = bar.get("close")
+        volume = bar.get("volume")
+        if None in (date_value, open_price, high_price, low_price, close_price, volume):
+            continue
+        upsert_snapshot(
+            stock_code=stock_code,
+            trade_date=str(date_value)[:10],
+            open_price=float(open_price),
+            high_price=float(high_price),
+            low_price=float(low_price),
+            close_price=float(close_price),
+            volume=float(volume),
+            turnover_rate=(
+                float(bar["turnover_rate"]) if bar.get("turnover_rate") is not None else None
+            ),
+        )
+        written += 1
+    return written
+
+
 def _upsert_snapshot_from_quote(stock_code: str, trade_date: str, quote: dict) -> bool:
     """Write/update a snapshot row from a Sina realtime quote. Returns True on success."""
     price = quote.get("price")
@@ -276,6 +322,7 @@ def _bootstrap_from_daily_bars(stock_code: str, *, lookback_days: int = 5) -> bo
                 candidate,
                 retries=settings.snapshot_fetch_retries,
                 retry_backoff_seconds=settings.snapshot_fetch_retry_backoff_seconds,
+                adjust="qfq",
             )
             upsert_snapshot(
                 stock_code=stock_code,
@@ -727,8 +774,10 @@ def market_polling_task() -> None:
             success_quotes += 1
 
             baseline = runtime_state.baseline_cache[code]
-            buy_threshold = float(baseline["low_min"]) * float(stock["effective_x"])
-            sell_threshold = float(baseline["high_max"]) * float(stock["effective_y"])
+            low_min = float(baseline["low_min"])
+            high_max = float(baseline["high_max"])
+            effective_x = float(stock["effective_x"])
+            effective_y = float(stock["effective_y"])
             prev_close = quote.get("prev_close")
             pos = runtime_state.position_cache.get(code) or {}
             qty = int(pos.get("qty") or 0)
@@ -776,7 +825,10 @@ def market_polling_task() -> None:
                         runtime_state.partial_tp_ladder_idx[code] = result.ladder_idx
 
                     if result.exit_signal:
-                        runtime_state.signal_state[code] = result.exit_signal
+                        t1_note = _has_same_day_buy(code, trade_date)
+                        runtime_state.set_signal(
+                            code, result.exit_signal, t1_note=t1_note
+                        )
                         runtime_state.exit_fired_today.add(code)
                         risk_candidates += 1
                         candidates.append(
@@ -794,11 +846,11 @@ def market_polling_task() -> None:
                                 "avg_cost": float(avg_cost),
                                 "highest_since_hold": result.highest_since_hold,
                                 "pnl_pct": result.pnl_pct,
-                                "t1_note": _has_same_day_buy(code, trade_date),
+                                "t1_note": t1_note,
                             }
                         )
                     elif result.partial_tp is not None:
-                        runtime_state.signal_state[code] = SIGNAL_PARTIAL_TP
+                        runtime_state.set_signal(code, SIGNAL_PARTIAL_TP)
                         risk_candidates += 1
                         candidates.append(
                             {
@@ -822,9 +874,11 @@ def market_polling_task() -> None:
                 # Holding: optional ADDON / tech SELL (never plain BUY).
                 # Do not overwrite an exit signal already set for the list/UI.
                 current_signal = runtime_state.signal_state.get(code)
-                if current_signal not in {"STOP_LOSS", "TAKE_PROFIT"}:
-                    if params["enable_addon_alert"] and float(price) <= buy_threshold:
-                        runtime_state.signal_state[code] = SIGNAL_ADDON
+                if current_signal not in {SIGNAL_STOP_LOSS, SIGNAL_TAKE_PROFIT}:
+                    if params["enable_addon_alert"] and is_addon_signal(
+                        float(price), low_min, effective_x
+                    ):
+                        runtime_state.set_signal(code, SIGNAL_ADDON)
                         risk_candidates += 1
                         candidates.append(
                             {
@@ -833,58 +887,71 @@ def market_polling_task() -> None:
                                 "signal_type": SIGNAL_ADDON,
                                 "price": float(price),
                                 "trade_date": trade_date,
-                                "baseline_price": float(baseline["low_min"]),
-                                "used_coeff": float(stock["effective_x"]),
+                                "baseline_price": low_min,
+                                "used_coeff": effective_x,
                                 "actual_n": int(baseline["actual_n"]),
                                 "prev_close": prev_close,
                             }
                         )
-                    elif (
-                        params["enable_tech_sell_while_holding"]
-                        and float(price) >= sell_threshold
-                    ):
-                        runtime_state.signal_state[code] = "SELL"
+                    elif params[
+                        "enable_tech_sell_while_holding"
+                    ] and is_tech_sell_signal(float(price), high_max, effective_y):
+                        limit_flag = is_limit_up(
+                            stock_code=code,
+                            price=float(price),
+                            prev_close=float(prev_close)
+                            if prev_close is not None
+                            else None,
+                            stock_name=str(stock["stock_name"] or ""),
+                        )
+                        runtime_state.set_signal(
+                            code, SIGNAL_SELL, is_limit_up=limit_flag
+                        )
                         sell_candidates += 1
                         candidates.append(
                             {
                                 "stock_code": code,
                                 "stock_name": stock["stock_name"],
-                                "signal_type": "SELL",
+                                "signal_type": SIGNAL_SELL,
                                 "price": float(price),
                                 "trade_date": trade_date,
-                                "baseline_price": float(baseline["high_max"]),
-                                "used_coeff": float(stock["effective_y"]),
+                                "baseline_price": high_max,
+                                "used_coeff": effective_y,
                                 "actual_n": int(baseline["actual_n"]),
                                 "prev_close": prev_close,
-                                "is_limit_up": is_limit_up(
-                                    stock_code=code,
-                                    price=float(price),
-                                    prev_close=float(prev_close)
-                                    if prev_close is not None
-                                    else None,
-                                    stock_name=str(stock["stock_name"] or ""),
-                                ),
+                                "is_limit_up": limit_flag,
                             }
                         )
                 continue
 
             # EMPTY mode — V1 BUY/SELL
             signal_type: str | None = None
-            if price <= buy_threshold:
-                signal_type = "BUY"
-            if price >= sell_threshold:
-                signal_type = "SELL"
+            if is_buy_signal(float(price), low_min, effective_x):
+                signal_type = SIGNAL_BUY
+            if is_tech_sell_signal(float(price), high_max, effective_y):
+                signal_type = SIGNAL_SELL
 
             if signal_type:
-                runtime_state.signal_state[code] = signal_type
-                if signal_type == "BUY":
-                    baseline_price = float(baseline["low_min"])
-                    used_coeff = float(stock["effective_x"])
+                if signal_type == SIGNAL_BUY:
+                    baseline_price = low_min
+                    used_coeff = effective_x
                     buy_candidates += 1
+                    runtime_state.set_signal(code, signal_type)
                 else:
-                    baseline_price = float(baseline["high_max"])
-                    used_coeff = float(stock["effective_y"])
+                    baseline_price = high_max
+                    used_coeff = effective_y
                     sell_candidates += 1
+                    limit_flag = is_limit_up(
+                        stock_code=code,
+                        price=float(price),
+                        prev_close=float(prev_close)
+                        if prev_close is not None
+                        else None,
+                        stock_name=str(stock["stock_name"] or ""),
+                    )
+                    runtime_state.set_signal(
+                        code, signal_type, is_limit_up=limit_flag
+                    )
                 candidate: dict = {
                     "stock_code": code,
                     "stock_name": stock["stock_name"],
@@ -896,15 +963,10 @@ def market_polling_task() -> None:
                     "actual_n": int(baseline["actual_n"]),
                     "prev_close": prev_close,
                 }
-                if signal_type == "SELL":
-                    candidate["is_limit_up"] = is_limit_up(
-                        stock_code=code,
-                        price=float(price),
-                        prev_close=float(prev_close)
-                        if prev_close is not None
-                        else None,
-                        stock_name=str(stock["stock_name"] or ""),
-                    )
+                if signal_type == SIGNAL_SELL:
+                    candidate["is_limit_up"] = runtime_state.signal_meta.get(
+                        code, {}
+                    ).get("is_limit_up", False)
                 candidates.append(candidate)
 
     if batches_attempted > 0 and batch_errors == batches_attempted:
@@ -943,6 +1005,7 @@ def _sync_signal_trade_date(trade_date: str) -> None:
     if runtime_state.signal_trade_date != trade_date:
         runtime_state.signal_trade_date = trade_date
         runtime_state.signal_state.clear()
+        runtime_state.signal_meta.clear()
         # Keys include trade_date; clear to keep the O(1) set bounded across days.
         runtime_state.sent_signal_keys.clear()
         runtime_state.partial_tp_ladder_idx.clear()
@@ -1067,6 +1130,7 @@ def daily_snapshot_task() -> None:
                 today,
                 retries=settings.snapshot_fetch_retries,
                 retry_backoff_seconds=settings.snapshot_fetch_retry_backoff_seconds,
+                adjust="qfq",
             )
             upsert_snapshot(
                 stock_code=code,
