@@ -30,6 +30,9 @@ class Settings(BaseSettings):
     # Consecutive failed poll rounds before marking quote delay.
     polling_consecutive_failure_threshold: int = 5
 
+    # Text notification channels (wechat, email; comma-separated)
+    notify_channels: str = "wechat"
+
     # WeChat enterprise notifier (user story 07)
     wechat_corp_id: str = ""
     wechat_agent_id: str = ""
@@ -37,6 +40,21 @@ class Settings(BaseSettings):
     wechat_to_user: str = ""
     wechat_request_timeout_seconds: float = 10.0
     wechat_self_check_on_startup: bool = True
+
+    # SMTP email notifier
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_username: str = ""
+    # Alias accepted from .env ``SMTP_USER`` (common mailbox naming).
+    smtp_user: str = ""
+    smtp_password: str = ""
+    smtp_from: str = ""
+    smtp_to: str = ""
+    smtp_use_tls: bool = True
+    smtp_use_ssl: bool = False
+    smtp_timeout_seconds: float = 10.0
+    smtp_subject: str = "AMTSM 通知"
+    smtp_self_check_on_startup: bool = True
 
     # Buy/sell alert delivery (user story 08+)
     alert_send_max_retries: int = 3

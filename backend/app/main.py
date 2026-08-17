@@ -16,24 +16,36 @@ from app.api.watchlist import router as watchlist_router
 from app.config import settings
 from app.db.init_db import init_db
 from app.engine.scheduler import create_scheduler, get_scheduler
-from app.services.wechat_notifier import wechat_notifier
+from app.services.notifier.registry import (
+    get_enabled_notifiers,
+    get_unknown_channel_ids,
+)
 
 logger = logging.getLogger(__name__)
 scheduler = create_scheduler()
 
 
+def _run_startup_self_checks() -> None:
+    """Self-check enabled notify channels; never crash process startup."""
+    for channel_id in get_unknown_channel_ids():
+        logger.error("Unknown notify channel in NOTIFY_CHANNELS: %s", channel_id)
+
+    for notifier in get_enabled_notifiers():
+        if not notifier.self_check_on_startup:
+            continue
+        try:
+            notifier.self_check()
+        except Exception:
+            logger.exception(
+                "%s channel self-check raised unexpectedly; continuing startup",
+                notifier.channel_id,
+            )
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     init_db()
-    # WeChat self-check must never crash process startup (user story 07 NFR).
-    if settings.wechat_self_check_on_startup:
-        try:
-            wechat_notifier.self_check()
-        except Exception:
-            # Defensive: notifier already catches send failures; keep startup alive.
-            logger.exception(
-                "WeChat channel self-check raised unexpectedly; continuing startup"
-            )
+    _run_startup_self_checks()
     # Prefer module singleton (same instance as create_scheduler return).
     active = get_scheduler() or scheduler
     active.start()

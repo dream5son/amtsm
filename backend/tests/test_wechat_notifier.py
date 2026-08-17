@@ -53,7 +53,7 @@ def test_self_check_success_marks_available() -> None:
     notifier._client = mock_client
 
     with patch(
-        "app.services.wechat_notifier.WeChatClient",
+        "app.services.notifier.wechat.WeChatClient",
         return_value=mock_client,
     ):
         result = notifier.self_check()
@@ -76,7 +76,7 @@ def test_self_check_auth_error_marks_failed() -> None:
     notifier._client = mock_client
 
     with patch(
-        "app.services.wechat_notifier.WeChatClient",
+        "app.services.notifier.wechat.WeChatClient",
         return_value=mock_client,
     ):
         result = notifier.self_check()

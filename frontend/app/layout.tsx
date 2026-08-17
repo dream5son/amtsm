@@ -24,6 +24,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
                 <Link href="/admin/wechat" className="rounded-md px-3 py-2 transition-colors hover:bg-slate-100 hover:text-slate-900">
                   微信测试
                 </Link>
+                <Link href="/admin/email" className="rounded-md px-3 py-2 transition-colors hover:bg-slate-100 hover:text-slate-900">
+                  邮件测试
+                </Link>
               </nav>
             </div>
           </header>

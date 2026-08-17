@@ -653,3 +653,61 @@ export async function sendWeChatTest(to_user: string, content: string): Promise<
   }
   return (await res.json()) as WeChatSendResult;
 }
+
+// ---------------------------------------------------------------------------
+// Email notify (admin test page)
+// ---------------------------------------------------------------------------
+
+export type EmailChannelStatus = {
+  status: WeChatChannelStatusValue;
+  configured: boolean;
+  missing_fields: string[];
+  last_error: string | null;
+  last_error_category: string | null;
+  last_errcode: number | null;
+  smtp_host: string;
+  smtp_port: number;
+  from_masked: string;
+  to_masked: string;
+  use_tls: boolean;
+  use_ssl: boolean;
+  available: boolean;
+};
+
+export type EmailSendResult = {
+  ok: boolean;
+  status: WeChatChannelStatusValue;
+  message: string;
+  errcode: number | null;
+  errmsg: string | null;
+  invalid_user: string | null;
+  category: string | null;
+  channel: EmailChannelStatus;
+};
+
+export async function fetchEmailStatus(): Promise<EmailChannelStatus> {
+  const res = await fetch(`${API_BASE}/api/notify/email/status`, { cache: "no-store" });
+  if (!res.ok) {
+    throw new Error("failed to fetch email status");
+  }
+  return (await res.json()) as EmailChannelStatus;
+}
+
+export async function sendEmailTest(to_user: string, content: string): Promise<EmailSendResult> {
+  const res = await fetch(`${API_BASE}/api/notify/email/send`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ to_user, content }),
+  });
+  if (!res.ok) {
+    let message = "发送失败";
+    try {
+      const body = (await res.json()) as { detail?: string };
+      if (body.detail) message = body.detail;
+    } catch {
+      // ignore
+    }
+    throw new Error(message);
+  }
+  return (await res.json()) as EmailSendResult;
+}

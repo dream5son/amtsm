@@ -3,12 +3,9 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 from app.main import app
-from app.services.wechat_notifier import (
-    ChannelSnapshot,
-    ChannelStatus,
-    ErrorCategory,
-    SendResult,
-)
+from app.services.notifier.base import ChannelStatus, ErrorCategory, SendResult
+from app.services.notifier.email_notifier import EmailChannelSnapshot
+from app.services.wechat_notifier import ChannelSnapshot
 
 client = TestClient(app)
 
@@ -136,3 +133,79 @@ def test_wechat_send_endpoint_failure_returns_ok_false() -> None:
     assert data["status"] == "failed"
     assert data["category"] == "auth"
     assert data["errcode"] == 40001
+
+
+def _email_available_snap() -> EmailChannelSnapshot:
+    return EmailChannelSnapshot(
+        status=ChannelStatus.AVAILABLE,
+        configured=True,
+        smtp_host="smtp.example.com",
+        smtp_port=587,
+        from_masked="al***",
+        to_masked="ow***",
+        use_tls=True,
+        use_ssl=False,
+    )
+
+
+def test_email_status_endpoint_default_not_ready() -> None:
+    snap = EmailChannelSnapshot(
+        status=ChannelStatus.NOT_READY,
+        missing_fields=["SMTP_HOST", "SMTP_FROM"],
+        last_error="缺少必填配置: SMTP_HOST, SMTP_FROM",
+        last_error_category=ErrorCategory.MISSING_CONFIG,
+        configured=False,
+    )
+    with patch("app.api.notify.email_notifier") as mock_notifier:
+        mock_notifier.snapshot.return_value = snap
+        mock_notifier.is_available = False
+        response = client.get("/api/notify/email/status")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "not_ready"
+    assert data["available"] is False
+    assert "SMTP_HOST" in data["missing_fields"]
+
+
+def test_email_self_check_endpoint() -> None:
+    fake = SendResult(ok=True, errcode=0, errmsg="ok", message="发送成功")
+    snap = _email_available_snap()
+    with patch("app.api.notify.email_notifier") as mock_notifier:
+        mock_notifier.self_check.return_value = fake
+        mock_notifier.status = ChannelStatus.AVAILABLE
+        mock_notifier.is_available = True
+        mock_notifier.snapshot.return_value = snap
+        response = client.post("/api/notify/email/self-check")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["ok"] is True
+    assert data["status"] == "available"
+    assert data["channel"]["smtp_host"] == "smtp.example.com"
+
+
+def test_email_send_endpoint_success() -> None:
+    fake = SendResult(ok=True, errcode=0, errmsg="ok", message="发送成功")
+    snap = _email_available_snap()
+    with patch("app.api.notify.email_notifier") as mock_notifier:
+        mock_notifier.send_text.return_value = fake
+        mock_notifier.status = ChannelStatus.AVAILABLE
+        mock_notifier.is_available = True
+        mock_notifier.snapshot.return_value = snap
+        response = client.post(
+            "/api/notify/email/send",
+            json={"to_user": "user@example.com", "content": "hello"},
+        )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["ok"] is True
+    assert data["message"] == "发送成功"
+    mock_notifier.send_text.assert_called_once_with("hello", to_user="user@example.com")
+
+
+def test_email_send_endpoint_empty_to_user_returns_400() -> None:
+    response = client.post(
+        "/api/notify/email/send",
+        json={"to_user": "   ", "content": "hello"},
+    )
+    assert response.status_code == 400
+    assert response.json()["detail"] == "to_user and content must not be empty"

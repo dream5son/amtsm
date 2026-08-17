@@ -2,7 +2,7 @@
 
 Consumes candidates from the intraday polling task, enforces
 trading-hours DND + once-per-day frequency control (memory Set + unique
-index claim), sends WeChat text via ``WeChatNotifier``, and persists
+index claim), sends text via enabled ``TextNotifier`` channels, and persists
 results to ``alert_logs``.
 """
 
@@ -23,7 +23,11 @@ from app.db.connection import get_db
 from app.db.models import AlertLog
 from app.engine.market_hours import is_alert_window_open
 from app.engine.state import runtime_state
-from app.services.wechat_notifier import SendResult, wechat_notifier
+from app.services.notifier.base import ErrorCategory, SendResult, TextNotifier
+from app.services.notifier.registry import resolve_alert_channels
+from app.services.wechat_notifier import (
+    wechat_notifier,  # noqa: F401 — tests patch this singleton
+)
 
 logger = logging.getLogger(__name__)
 
@@ -331,33 +335,35 @@ def _error_fields(result: SendResult) -> tuple[str | None, str | None]:
     return code, message
 
 
-def _send_with_retry(content: str, *, log_prefix: str) -> tuple[SendResult, float]:
-    """Send WeChat text with exponential backoff; returns (result, total_latency_ms)."""
+def _send_one_with_retry(
+    notifier: TextNotifier, content: str, *, log_prefix: str
+) -> SendResult:
+    """Send on one channel with exponential backoff."""
     max_retries = max(0, int(settings.alert_send_max_retries))
     backoff = max(0.0, float(settings.alert_send_retry_backoff_seconds))
     attempts = max_retries + 1
-    started = time.perf_counter()
     last: SendResult | None = None
+    channel = getattr(notifier, "channel_id", notifier.__class__.__name__)
 
     for attempt in range(attempts):
         attempt_started = time.perf_counter()
-        last = wechat_notifier.send_text(content)
+        last = notifier.send_text(content)
         attempt_ms = (time.perf_counter() - attempt_started) * 1000
         if last.ok:
-            total_ms = (time.perf_counter() - started) * 1000
             logger.info(
-                "%s WeChat send ok attempt=%d/%d latency_ms=%.1f total_ms=%.1f",
+                "%s %s send ok attempt=%d/%d latency_ms=%.1f",
                 log_prefix,
+                channel,
                 attempt + 1,
                 attempts,
                 attempt_ms,
-                total_ms,
             )
-            return last, total_ms
+            return last
 
         logger.warning(
-            "%s WeChat send failed attempt=%d/%d latency_ms=%.1f category=%s errcode=%s",
+            "%s %s send failed attempt=%d/%d latency_ms=%.1f category=%s errcode=%s",
             log_prefix,
+            channel,
             attempt + 1,
             attempts,
             attempt_ms,
@@ -367,9 +373,67 @@ def _send_with_retry(content: str, *, log_prefix: str) -> tuple[SendResult, floa
         if attempt < attempts - 1 and backoff > 0:
             time.sleep(backoff * (2**attempt))
 
-    total_ms = (time.perf_counter() - started) * 1000
     assert last is not None
-    return last, total_ms
+    return last
+
+
+def _combine_channel_results(results: list[SendResult]) -> SendResult:
+    """SUCCESS if at least one channel delivered; otherwise the last failure."""
+    if not results:
+        return SendResult(
+            ok=False,
+            category=ErrorCategory.MISSING_CONFIG,
+            message="未配置任何通知通道 (NOTIFY_CHANNELS)",
+        )
+
+    successes = [item for item in results if item.ok]
+    failures = [item for item in results if not item.ok]
+    if successes and not failures:
+        return successes[-1]
+    if successes:
+        note = "; ".join(item.message or item.errmsg or "failed" for item in failures)
+        last_ok = successes[-1]
+        return SendResult(
+            ok=True,
+            errcode=last_ok.errcode,
+            errmsg=last_ok.errmsg,
+            category=ErrorCategory.PARTIAL,
+            message=f"部分通道发送成功；失败: {note}",
+            raw=last_ok.raw,
+        )
+    if len(failures) == 1:
+        return failures[0]
+    note = "; ".join(item.message or item.errmsg or "failed" for item in failures)
+    last_fail = failures[-1]
+    return SendResult(
+        ok=False,
+        errcode=last_fail.errcode,
+        errmsg=last_fail.errmsg,
+        category=last_fail.category,
+        message=note,
+    )
+
+
+def _send_with_retry(content: str, *, log_prefix: str) -> tuple[SendResult, float]:
+    """Send text on each NOTIFY_CHANNELS entry; returns (result, total_latency_ms)."""
+    started = time.perf_counter()
+    results: list[SendResult] = []
+
+    for channel_id, notifier in resolve_alert_channels():
+        if notifier is None:
+            logger.error("%s unknown notify channel: %s", log_prefix, channel_id)
+            results.append(
+                SendResult(
+                    ok=False,
+                    category=ErrorCategory.UNKNOWN,
+                    message=f"未知通知通道: {channel_id}",
+                )
+            )
+            continue
+        results.append(_send_one_with_retry(notifier, content, log_prefix=log_prefix))
+
+    total_ms = (time.perf_counter() - started) * 1000
+    return _combine_channel_results(results), total_ms
 
 
 def _claim_alert_slot(

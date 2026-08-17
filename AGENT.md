@@ -89,15 +89,18 @@ Copy `.env.example` to `.env` in both `backend/` and `frontend/` and fill in val
 
 - `SQLITE_PATH` — path to the SQLite database file (default: `data/amtsm.db`)
 - `API_HOST` / `API_PORT` — backend bind address (default: `0.0.0.0:8000`)
+- `NOTIFY_CHANNELS` — comma-separated text channels (`wechat`, `email`; default: `wechat`)
 - `WECHAT_CORP_ID` / `WECHAT_AGENT_ID` / `WECHAT_SECRET` / `WECHAT_TO_USER` — enterprise WeChat channel (see README)
-- `WECHAT_SELF_CHECK_ON_STARTUP` — run connectivity self-check on API boot (default: true)
+- `WECHAT_SELF_CHECK_ON_STARTUP` — run WeChat connectivity self-check on API boot (default: true)
+- `SMTP_HOST` / `SMTP_FROM` / `SMTP_TO` — SMTP email channel (see README)
+- `SMTP_SELF_CHECK_ON_STARTUP` — run email connectivity self-check on API boot (default: true)
 
 ## Architecture Notes
 
 - **Database**: SQLite with WAL mode, initialized automatically on API startup via `app.db.init_db`.
 - **Scheduler**: APScheduler starts within the FastAPI lifespan context; it drives intraday polling, daily baseline precompute, and snapshot jobs.
 - **Signal engine**: Located in `backend/app/engine/`; consumes market data from akshare and evaluates buy/sell strategy parameters stored per watchlist entry.
-- **Alerts**: WeChatpy is used for push notifications; throttling and DND windows are enforced by the alert service.
+- **Alerts**: Text notifications go through `TextNotifier` implementations (enterprise WeChat and/or SMTP email) selected by `NOTIFY_CHANNELS`; throttling and DND windows are enforced by the alert service.
 - **CORS**: Backend allows requests from `http://localhost:3000` only by default.
 
 ## Testing
