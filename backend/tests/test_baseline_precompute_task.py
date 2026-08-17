@@ -40,11 +40,13 @@ def test_baseline_precompute_task_success(mock_get_db, mock_fetch):
         patch("app.engine.tasks._finish_job_log") as mock_finish,
         patch("app.engine.tasks._insert_log_item"),
         patch("app.engine.tasks.upsert_baseline"),
+        patch("app.engine.tasks.upsert_qfq_bars") as mock_upsert_bars,
     ):
         baseline_precompute_task()
         mock_finish.assert_called_once()
         args = mock_finish.call_args[0]
         assert args[1] == "SUCCESS"
+        mock_upsert_bars.assert_called_once_with("600519", bars)
 
 
 @patch("app.engine.tasks.fetch_daily_bars")
@@ -98,9 +100,52 @@ def test_baseline_precompute_task_individual_failure(mock_get_db, mock_fetch):
         patch("app.engine.tasks._finish_job_log") as mock_finish,
         patch("app.engine.tasks._insert_log_item"),
         patch("app.engine.tasks.upsert_baseline"),
+        patch("app.engine.tasks.upsert_qfq_bars"),
     ):
         baseline_precompute_task()
         args = mock_finish.call_args[0]
         assert args[1] == "FAILED"
         assert args[3] == 1  # success_count
         assert args[4] == 1  # failed_count
+
+
+@patch("app.engine.tasks.fetch_daily_bars")
+@patch("app.engine.tasks.get_db")
+def test_baseline_precompute_keeps_success_when_snapshot_cache_fails(
+    mock_get_db, mock_fetch
+):
+    mock_session = MagicMock()
+    mock_session.__enter__ = MagicMock(return_value=mock_session)
+    mock_session.__exit__ = MagicMock(return_value=False)
+    mock_session.execute.return_value.mappings.return_value.all.return_value = [
+        {
+            "stock_code": "600519",
+            "stock_name": "贵州茅台",
+            "effective_n": 60,
+            "status": "NORMAL",
+        }
+    ]
+    mock_get_db.return_value = mock_session
+    mock_fetch.return_value = [
+        {
+            "date": "2024-01-01",
+            "open": 10.0,
+            "high": 11.0,
+            "low": 9.0,
+            "close": 10.0,
+            "volume": 1000,
+        }
+    ] * 60
+
+    with (
+        patch("app.engine.tasks._create_job_log", return_value=1),
+        patch("app.engine.tasks._finish_job_log") as mock_finish,
+        patch("app.engine.tasks._insert_log_item"),
+        patch("app.engine.tasks.upsert_baseline"),
+        patch("app.engine.tasks.upsert_qfq_bars", side_effect=RuntimeError("db locked")),
+    ):
+        baseline_precompute_task()
+        args = mock_finish.call_args[0]
+        assert args[1] == "SUCCESS"
+        assert args[3] == 1
+        assert args[4] == 0

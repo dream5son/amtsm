@@ -1,3 +1,6 @@
+from datetime import datetime
+
+
 class RuntimeState:
     """In-memory state holder for baseline cache and per-day alert frequency control."""
 
@@ -15,6 +18,8 @@ class RuntimeState:
         self.quote_delay_since: str | None = None
         self.last_internal_alert_key: str | None = None
         self.no_baseline_warned_date: str | None = None
+        # Throttle for folding intraday snapshot writes into market polling.
+        self.last_intraday_snapshot_at: datetime | None = None
         # V2 risk: position snapshot cache + partial-TP ladder progress
         self.position_cache: dict[str, dict] = {}
         self.partial_tp_ladder_idx: dict[str, int] = {}
@@ -29,6 +34,7 @@ class RuntimeState:
         self.partial_tp_ladder_idx.clear()
         self.exit_fired_today.clear()
         self.no_baseline_warned_date = None
+        self.last_intraday_snapshot_at = None
         # Quote-delay is a live system flag; keep across day reset unless cleared by success.
         # position_cache is reloaded from DB as needed; keep across day.
 

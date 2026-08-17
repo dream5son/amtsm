@@ -17,6 +17,40 @@ from app.services.backtest_service import run_job
 logger = logging.getLogger(__name__)
 
 
+def _log_job_finished(job_id: int) -> None:
+    with get_db() as session:
+        job = session.get(BacktestJob, job_id)
+    if job is None:
+        logger.info("backtest_worker finished job_id=%s status=missing", job_id)
+        return
+    if job.status == "SUCCESS":
+        logger.info(
+            "backtest_worker finished job_id=%s status=SUCCESS stock=%s "
+            "range=%s..%s win_rate=%s trade_count=%s",
+            job.id,
+            job.stock_code,
+            job.start_date,
+            job.end_date,
+            job.win_rate,
+            job.trade_count,
+        )
+        return
+    if job.status == "FAILED":
+        logger.error(
+            "backtest_worker finished job_id=%s status=FAILED stock=%s error=%s",
+            job.id,
+            job.stock_code,
+            job.error_message,
+        )
+        return
+    logger.info(
+        "backtest_worker finished job_id=%s status=%s stock=%s",
+        job.id,
+        job.status,
+        job.stock_code,
+    )
+
+
 def backtest_worker_task() -> None:
     with get_db() as session:
         job_id = session.execute(
@@ -27,9 +61,14 @@ def backtest_worker_task() -> None:
         ).scalar_one_or_none()
 
     if job_id is None:
+        logger.info("backtest_worker idle: no PENDING jobs")
         return
 
+    logger.info("backtest_worker started job_id=%s", job_id)
     try:
         run_job(job_id)
-    except Exception:  # noqa: BLE001 - run_job already isolates failures per job
+    except Exception:
         logger.exception("backtest_worker_task: unexpected error running job_id=%s", job_id)
+        return
+
+    _log_job_finished(job_id)

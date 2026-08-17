@@ -250,6 +250,91 @@ def test_market_polling_holding_emits_stop_loss(tmp_path, monkeypatch) -> None:
     assert not any(c.get("signal_type") == "BUY" for c in captured)
 
 
+def test_market_polling_writes_throttled_intraday_snapshot(tmp_path, monkeypatch) -> None:
+    from app.engine.tasks import get_snapshot
+
+    sqlite_path = tmp_path / "amtsm.db"
+    monkeypatch.setattr(settings, "sqlite_path", str(sqlite_path))
+    monkeypatch.setattr(settings, "polling_batch_size", 50)
+    monkeypatch.setattr(settings, "intraday_snapshot_interval_seconds", 60)
+    init_db()
+    runtime_state.reset_daily()
+    add_watchlist(WatchlistCreate(stock_code="600519", stock_name="贵州茅台"))
+
+    with get_db() as session:
+        session.add(
+            DailyBaseline(
+                stock_code="sh600519",
+                trade_date="2026-08-05",
+                low_min=100.0,
+                high_max=130.0,
+                actual_n=60,
+            )
+        )
+        _seed_volume_history(session, "sh600519", "2026-08-05")
+        session.commit()
+
+    fake_now = datetime(2026, 8, 5, 10, 0, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+    clock = _FrozenDateTime(fake_now)
+    monkeypatch.setattr("app.engine.tasks.datetime", clock)
+    monkeypatch.setattr("app.engine.tasks.process_buy_candidates", lambda candidates: [])
+    monkeypatch.setattr("app.engine.tasks.process_sell_candidates", lambda candidates: [])
+    monkeypatch.setattr("app.engine.tasks.process_risk_candidates", lambda candidates: [])
+    monkeypatch.setattr(
+        "app.engine.tasks.fetch_realtime_quotes_batch",
+        lambda *args, **kwargs: {
+            "sh600519": {
+                "stock_name": "贵州茅台",
+                "price": 108.0,
+                "open": 107.0,
+                "high": 109.0,
+                "low": 106.5,
+                "prev_close": 107.0,
+                "volume": 1500.0,
+                "quote_date": "2026-08-05",
+                "quote_time": "10:00:00",
+                "is_halted": False,
+            }
+        },
+    )
+
+    market_polling_task()
+    snap = get_snapshot("sh600519", "2026-08-05")
+    assert snap is not None
+    assert snap["close_price"] == 108.0
+    assert snap["open_price"] == 107.0
+    first_updated = snap["updated_at"]
+
+    monkeypatch.setattr(
+        "app.engine.tasks.fetch_realtime_quotes_batch",
+        lambda *args, **kwargs: {
+            "sh600519": {
+                "stock_name": "贵州茅台",
+                "price": 120.0,
+                "open": 107.0,
+                "high": 121.0,
+                "low": 106.5,
+                "prev_close": 107.0,
+                "volume": 1600.0,
+                "quote_date": "2026-08-05",
+                "quote_time": "10:00:30",
+                "is_halted": False,
+            }
+        },
+    )
+    clock._now = datetime(2026, 8, 5, 10, 0, 30, tzinfo=ZoneInfo("Asia/Shanghai"))
+    market_polling_task()
+    snap = get_snapshot("sh600519", "2026-08-05")
+    assert snap["close_price"] == 108.0
+    assert snap["updated_at"] == first_updated
+
+    clock._now = datetime(2026, 8, 5, 10, 1, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+    market_polling_task()
+    snap = get_snapshot("sh600519", "2026-08-05")
+    assert snap["close_price"] == 120.0
+    assert snap["volume"] == 1600.0
+
+
 class _FrozenDateTime:
     def __init__(self, now: datetime) -> None:
         self._now = now

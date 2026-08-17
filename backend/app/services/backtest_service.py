@@ -449,8 +449,20 @@ def _ensure_snapshot_range(stock_code: str, start: date, end: date) -> None:
     with get_db() as session:
         sufficient = _has_sufficient_snapshot_coverage(session, stock_code, start, end)
     if sufficient:
+        logger.info(
+            "backtest job cache hit stock=%s range=%s..%s",
+            stock_code,
+            start.isoformat(),
+            end.isoformat(),
+        )
         return
 
+    logger.info(
+        "backtest job fetching market data stock=%s range=%s..%s",
+        stock_code,
+        start.isoformat(),
+        end.isoformat(),
+    )
     bars = fetch_qfq_bars_range(
         stock_code,
         start,
@@ -467,6 +479,13 @@ def _ensure_snapshot_range(stock_code: str, start: date, end: date) -> None:
     from app.engine.tasks import upsert_qfq_bars
 
     upsert_qfq_bars(stock_code, bars)
+    logger.info(
+        "backtest job fetched %d bars stock=%s range=%s..%s",
+        len(bars),
+        stock_code,
+        start.isoformat(),
+        end.isoformat(),
+    )
 
 
 def _load_bars(stock_code: str, start: date, end: date) -> list[dict]:
@@ -555,6 +574,15 @@ def run_job(job_id: int) -> None:
         end_date_str = job.end_date
         params = json.loads(job.params_json)
 
+    logger.info(
+        "backtest job %s started stock=%s range=%s..%s n=%s x=%s",
+        job_id,
+        stock_code,
+        start_date_str,
+        end_date_str,
+        params.get("n"),
+        params.get("x"),
+    )
     try:
         n = int(params["n"])
         x = float(params["x"])
@@ -570,6 +598,14 @@ def run_job(job_id: int) -> None:
             raise BacktestDataError(
                 f"no cached market data for {stock_code} in [{warmup_start}, {end}]"
             )
+        logger.info(
+            "backtest job %s loaded %d bars stock=%s warmup=%s..%s",
+            job_id,
+            len(bars),
+            stock_code,
+            warmup_start.isoformat(),
+            end.isoformat(),
+        )
 
         result = run_backtest(
             bars,
@@ -580,10 +616,20 @@ def run_job(job_id: int) -> None:
             min_trade_count=settings.backtest_min_trade_count,
         )
         _persist_result(job_id, result)
+        logger.info(
+            "backtest job %s SUCCESS stock=%s win_rate=%s trade_count=%s "
+            "total_return=%s sample_insufficient=%s",
+            job_id,
+            stock_code,
+            result.summary.win_rate,
+            result.summary.trade_count,
+            result.summary.total_return,
+            result.summary.sample_insufficient,
+        )
     except (MarketDataUnavailableError, StockDataFetchError, BacktestDataError) as exc:
         logger.warning("backtest job %s failed: %s", job_id, exc)
         _mark_failed(job_id, str(exc))
-    except Exception as exc:  # noqa: BLE001 - persist any unexpected failure, never crash worker
+    except Exception as exc:
         logger.exception("backtest job %s failed unexpectedly", job_id)
         _mark_failed(job_id, str(exc))
 

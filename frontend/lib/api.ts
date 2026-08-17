@@ -358,6 +358,115 @@ export function getSystemStatusSSEUrl(): string {
   return `${API_BASE}/api/system/status/stream`;
 }
 
+export const SCHEDULER_JOBS = [
+  {
+    id: "market_polling",
+    label: "行情轮询",
+    kind: "interval",
+    group: "recurring",
+    intervalSeconds: 5,
+    note: "含盘中快照",
+  },
+  {
+    id: "baseline_precompute",
+    label: "基准预计算",
+    kind: "cron",
+    group: "recurring",
+    hour: 8,
+    minute: 30,
+  },
+  {
+    id: "daily_snapshot",
+    label: "收盘快照",
+    kind: "cron",
+    group: "recurring",
+    hour: 15,
+    minute: 30,
+  },
+  {
+    id: "backtest_worker",
+    label: "回测",
+    kind: "interval",
+    group: "recurring",
+    intervalSeconds: 3,
+  },
+  {
+    id: "startup_market_data_catchup",
+    label: "启动补数",
+    kind: "date",
+    group: "once",
+  },
+  {
+    id: "snapshot_bootstrap",
+    label: "自选补快照",
+    kind: "on_demand",
+    group: "once",
+  },
+] as const;
+
+export type SchedulerJobId = (typeof SCHEDULER_JOBS)[number]["id"];
+export type SchedulerJobKind = "interval" | "cron" | "date" | "on_demand";
+export type ActivityLevel = "info" | "error" | "notify";
+
+export type SchedulerJobView = {
+  id: SchedulerJobId;
+  kind: SchedulerJobKind;
+  interval_seconds?: number | null;
+  hour?: number | null;
+  minute?: number | null;
+  next_run_time?: string | null;
+  pending?: string[];
+  note?: string | null;
+};
+
+export type ActivityLogItem = {
+  id: number;
+  ts: string;
+  level: ActivityLevel;
+  job: SchedulerJobId;
+  message: string;
+};
+
+export type ActivitySnapshot = {
+  jobs: Partial<Record<SchedulerJobId, ActivityLogItem[]>>;
+  scheduler?: SchedulerJobView[];
+};
+
+export type ActivityJobResponse = {
+  job: SchedulerJobId;
+  items: ActivityLogItem[];
+};
+
+export function emptyActivityJobs(): Record<SchedulerJobId, ActivityLogItem[]> {
+  return {
+    market_polling: [],
+    baseline_precompute: [],
+    daily_snapshot: [],
+    backtest_worker: [],
+    startup_market_data_catchup: [],
+    snapshot_bootstrap: [],
+  };
+}
+
+export async function fetchSchedulerActivity(
+  job?: SchedulerJobId,
+  limit = 20,
+): Promise<ActivitySnapshot | ActivityJobResponse> {
+  const params = new URLSearchParams({ limit: String(limit) });
+  if (job) {
+    params.set("job", job);
+  }
+  const res = await fetch(`${API_BASE}/api/jobs/activity?${params}`, { cache: "no-store" });
+  if (!res.ok) {
+    throw new Error("failed to fetch scheduler activity");
+  }
+  return (await res.json()) as ActivitySnapshot | ActivityJobResponse;
+}
+
+export function getSchedulerActivitySSEUrl(): string {
+  return `${API_BASE}/api/jobs/activity/stream`;
+}
+
 export async function previewBuy(
   stock_code: string,
   qty: number,

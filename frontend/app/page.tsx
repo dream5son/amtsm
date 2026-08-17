@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 
+import SchedulerActivityPanel from "@/components/scheduler-activity-panel";
 import StrategySettingsPanel, {
   StrategyDialogTarget,
 } from "@/components/strategy-settings-panel";
@@ -20,6 +21,7 @@ export default function HomePage() {
             setStrategyTarget({ stock_code: item.stock_code, stock_name: item.stock_name })
           }
         />
+        <SchedulerActivityPanel />
         <StrategySettingsPanel
           stockTarget={strategyTarget}
           onStockTargetClose={() => setStrategyTarget(null)}

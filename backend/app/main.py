@@ -5,6 +5,7 @@ import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.api.activity import router as activity_router
 from app.api.backtests import router as backtests_router
 from app.api.health import router as health_router
 from app.api.jobs import router as jobs_router
@@ -65,6 +66,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.include_router(activity_router)
 app.include_router(backtests_router)
 app.include_router(health_router)
 app.include_router(jobs_router)

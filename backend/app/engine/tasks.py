@@ -274,10 +274,49 @@ def upsert_qfq_bars(stock_code: str, bars: list[dict]) -> int:
     return written
 
 
+def _intraday_snapshot_due(now: datetime) -> bool:
+    """True when polling should persist today's approximate OHLCV (throttled)."""
+    last = runtime_state.last_intraday_snapshot_at
+    if last is None:
+        return True
+    interval = max(1, int(settings.intraday_snapshot_interval_seconds))
+    return (now - last).total_seconds() >= interval
+
+
+def _upsert_intraday_snapshots_from_quotes(
+    trade_date: str, quotes: dict[str, dict], codes: list[str]
+) -> tuple[int, int]:
+    """UPSERT today's snapshot from already-fetched realtime quotes.
+
+    Returns (success_count, skipped_count).
+    """
+    success_count = 0
+    skipped_count = 0
+    for code in codes:
+        quote = quotes.get(code) or {}
+        try:
+            if _upsert_snapshot_from_quote(code, trade_date, quote):
+                success_count += 1
+            else:
+                skipped_count += 1
+        except Exception as exc:  # noqa: BLE001
+            skipped_count += 1
+            logger.warning(
+                "intraday_snapshot upsert failed for %s: %s",
+                code,
+                exc,
+            )
+    return success_count, skipped_count
+
+
 def _upsert_snapshot_from_quote(stock_code: str, trade_date: str, quote: dict) -> bool:
     """Write/update a snapshot row from a Sina realtime quote. Returns True on success."""
     price = quote.get("price")
-    if not quote.get("has_quote") or price is None or float(price) <= 0:
+    if "has_quote" in quote:
+        has_quote = bool(quote["has_quote"])
+    else:
+        has_quote = price is not None
+    if not has_quote or price is None or float(price) <= 0:
         return False
 
     close_price = float(price)
@@ -407,7 +446,11 @@ def bootstrap_watchlist_snapshot(stock_code: str) -> None:
 
 
 def intraday_snapshot_task() -> None:
-    """During trading sessions, refresh today's snapshots from realtime quotes (~1min)."""
+    """One-shot refresh of today's snapshots from realtime quotes.
+
+    Used by startup catch-up. Periodic writes are folded into ``market_polling_task``
+    and throttled by ``intraday_snapshot_interval_seconds``.
+    """
     now = datetime.now(SH_TZ)
     today = now.date()
     trade_date = today.isoformat()
@@ -450,21 +493,13 @@ def intraday_snapshot_task() -> None:
             skipped_count += len(batch)
             continue
 
-        for code in batch:
-            quote = quotes.get(code) or {}
-            try:
-                if _upsert_snapshot_from_quote(code, trade_date, quote):
-                    success_count += 1
-                else:
-                    skipped_count += 1
-            except Exception as exc:  # noqa: BLE001
-                skipped_count += 1
-                logger.warning(
-                    "intraday_snapshot_task upsert failed for %s: %s",
-                    code,
-                    exc,
-                )
+        written, skipped = _upsert_intraday_snapshots_from_quotes(
+            trade_date, quotes, batch
+        )
+        success_count += written
+        skipped_count += skipped
 
+    runtime_state.last_intraday_snapshot_at = now
     logger.info(
         "intraday_snapshot_task finished trade_date=%s total=%d success=%d skipped=%d",
         trade_date,
@@ -472,6 +507,7 @@ def intraday_snapshot_task() -> None:
         success_count,
         skipped_count,
     )
+
 
 def get_snapshot(stock_code: str, trade_date: str) -> dict | None:
     with get_db() as session:
@@ -542,6 +578,14 @@ def baseline_precompute_task() -> None:
             bars = fetch_daily_bars(code, n)
             low_min, high_max, actual_n = compute_baseline(bars, n)
             upsert_baseline(code, today, low_min, high_max, actual_n)
+            try:
+                upsert_qfq_bars(code, bars)
+            except Exception as cache_exc:  # noqa: BLE001
+                logger.warning(
+                    "baseline_precompute snapshot cache failed stock=%s error=%s",
+                    code,
+                    cache_exc,
+                )
             vol = compute_volume_window(bars, DEFAULT_VOLUME_LOOKBACK)
 
             # Update in-memory cache
@@ -728,6 +772,9 @@ def market_polling_task() -> None:
     sell_candidates = 0
     risk_candidates = 0
     candidates: list[dict] = []
+    write_snapshots = _intraday_snapshot_due(now)
+    snapshot_success = 0
+    snapshot_skipped = 0
 
     for i in range(0, len(valid_stocks), batch_size):
         batch = valid_stocks[i : i + batch_size]
@@ -747,7 +794,16 @@ def market_polling_task() -> None:
                 ",".join(codes),
                 exc,
             )
+            if write_snapshots:
+                snapshot_skipped += len(batch)
             continue
+
+        if write_snapshots:
+            written, skipped = _upsert_intraday_snapshots_from_quotes(
+                trade_date, quotes, codes
+            )
+            snapshot_success += written
+            snapshot_skipped += skipped
 
         for stock in batch:
             code = stock["stock_code"]
@@ -1010,6 +1066,15 @@ def market_polling_task() -> None:
         record_poll_round_success()
 
     _emit_signal_candidates(candidates)
+
+    if write_snapshots:
+        runtime_state.last_intraday_snapshot_at = now
+        logger.info(
+            "market_polling_task snapshot trade_date=%s success=%d skipped=%d",
+            trade_date,
+            snapshot_success,
+            snapshot_skipped,
+        )
 
     logger.info(
         "market_polling_task summary trade_date=%s batches=%d batch_errors=%d "
