@@ -17,10 +17,12 @@ from app.market_signal import (
     SIGNAL_PERIOD_END,
     SIGNAL_STOP_LOSS,
     SIGNAL_TAKE_PROFIT,
-    compute_baseline,
+    BarWindowFeed,
+    SignalRequest,
+    StrategyParams,
     evaluate,
     evaluate_bar_holding,
-    is_buy_signal,
+    get_market_signal_strategy,
 )
 
 logger = logging.getLogger(__name__)
@@ -218,7 +220,8 @@ def run_backtest(
             ``[start_date - >= n trading days, end_date]`` (the warm-up window
             must already be included so the first in-scope day has a full
             N-day low baseline). Each bar needs keys: date (ISO str), open,
-            high, low, close.
+            high, low, close, and volume (used by the default volume-gated
+            strategy; missing/non-positive volume blocks entries).
         start_date: first trade date (ISO) that is in-scope for entries/exits;
             bars strictly before it are warm-up only and never traded.
         n: rolling window size (trading days) for the buy baseline (low_min).
@@ -239,6 +242,9 @@ def run_backtest(
         raise ValueError("x must be positive")
 
     risk = replace(risk, enable_partial_take_profit=False)
+    strategy = get_market_signal_strategy(require_full_n=True)
+    params = StrategyParams(x=x)
+    feed_n = max(n, int(params.volume_lookback))
 
     # Drop non-positive / structurally impossible / extreme-range / close-gap
     # bars (see sanitize_bars_for_backtest) instead of letting a bogus low
@@ -335,22 +341,24 @@ def run_backtest(
             # partial window — a short window lets a single dirty low dominate.
             if idx < n:
                 continue
-            window = bars[idx - n : idx]
+            window = bars[max(0, idx - feed_n) : idx]
             # Baseline is only trustworthy when the N prior bars and today form
             # a continuous calendar sequence (no multi-month/year sanitize hole).
-            window_dates = [b["date"] for b in window] + [bar["date"]]
+            window_dates = [b["date"] for b in window[-n:]] + [bar["date"]]
             gap = _max_consecutive_gap_days(window_dates)
             if gap > _MAX_BAR_GAP_CALENDAR_DAYS:
                 continue
-            low_min, _high_max, actual_n = compute_baseline(window, n)
-            if is_buy_signal(
-                float(bar["close"]),
-                low_min,
-                x,
-                actual_n=actual_n,
-                n=n,
-                require_full_n=True,
-            ):
+            raw_volume = bar.get("volume")
+            volume = float(raw_volume) if raw_volume is not None else None
+            decision = strategy.evaluate(
+                SignalRequest(
+                    price=float(bar["close"]),
+                    volume=volume,
+                    feed=BarWindowFeed(window, requested_n=n),
+                    params=params,
+                )
+            )
+            if decision.buy:
                 qty = 1
                 avg_cost = float(bar["close"])
                 entry_date = bar["date"]

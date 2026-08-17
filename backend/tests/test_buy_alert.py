@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from unittest.mock import MagicMock
 from zoneinfo import ZoneInfo
 
@@ -11,7 +11,7 @@ import pytest
 from app.config import settings
 from app.db.connection import get_db
 from app.db.init_db import init_db
-from app.db.models import AlertLog, DailyBaseline, StrategyConfig
+from app.db.models import AlertLog, DailyBaseline, DailyMarketSnapshot, StrategyConfig
 from app.engine.state import runtime_state
 from app.engine.tasks import market_polling_task
 from app.schemas.watchlist import WatchlistCreate
@@ -48,6 +48,23 @@ def _candidate(**overrides) -> dict:
     }
     base.update(overrides)
     return base
+
+
+def _seed_volume_history(session, stock_code: str, before: str, *, n: int = 7, volume: float = 1000.0) -> None:
+    day = date.fromisoformat(before) - timedelta(days=1)
+    for _ in range(n):
+        session.add(
+            DailyMarketSnapshot(
+                stock_code=stock_code,
+                trade_date=day.isoformat(),
+                open_price=10.0,
+                high_price=10.0,
+                low_price=10.0,
+                close_price=10.0,
+                volume=volume,
+            )
+        )
+        day -= timedelta(days=1)
 
 
 def test_format_buy_message_contains_required_fields() -> None:
@@ -251,6 +268,7 @@ def test_market_polling_triggers_buy_alert(tmp_path, monkeypatch) -> None:
                 actual_n=60,
             )
         )
+        _seed_volume_history(session, "sh600519", "2026-08-05")
         session.commit()
 
     fake_now = datetime(2026, 8, 5, 10, 0, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
@@ -270,6 +288,7 @@ def test_market_polling_triggers_buy_alert(tmp_path, monkeypatch) -> None:
                 "price": 108.0,
                 "open": 110.0,
                 "prev_close": 111.0,
+                "volume": 1500.0,
                 "quote_date": "2026-08-05",
                 "quote_time": "10:00:00",
                 "is_halted": False,

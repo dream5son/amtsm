@@ -12,9 +12,9 @@ import RegisterSellDialog from "@/components/register-sell-dialog";
 import StatusBadge from "@/components/status-badge";
 import {
   createWatchlist,
-  fetchSystemStatus,
   fetchWatchlist,
   getJobStatusSSEUrl,
+  getSystemStatusSSEUrl,
   removeWatchlist,
   searchStocks,
   SignalType,
@@ -166,27 +166,17 @@ export default function WatchlistPanel({ onOpenStrategy }: WatchlistPanelProps) 
   }, [hasInFlightBacktest]);
 
   useEffect(() => {
-    let cancelled = false;
-
-    async function pollSystemStatus() {
+    const url = getSystemStatusSSEUrl();
+    const es = new EventSource(url);
+    es.onmessage = (event) => {
       try {
-        const status = await fetchSystemStatus();
-        if (!cancelled) {
-          setQuoteDelay(Boolean(status.quote_delay));
-        }
+        const status = JSON.parse(event.data) as { quote_delay?: boolean };
+        setQuoteDelay(Boolean(status.quote_delay));
       } catch {
-        // Keep last known flag; health endpoint is best-effort.
+        // Keep last known flag; status stream is best-effort.
       }
-    }
-
-    void pollSystemStatus();
-    const timer = window.setInterval(() => {
-      void pollSystemStatus();
-    }, 5000);
-    return () => {
-      cancelled = true;
-      window.clearInterval(timer);
     };
+    return () => es.close();
   }, []);
 
   // SSE subscription for job status

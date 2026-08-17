@@ -487,6 +487,7 @@ def _load_bars(stock_code: str, start: date, end: date) -> list[dict]:
             "high": row.high_price,
             "low": row.low_price,
             "close": row.close_price,
+            "volume": row.volume,
         }
         for row in rows
     ]

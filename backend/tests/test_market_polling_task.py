@@ -1,10 +1,10 @@
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 from app.config import settings
 from app.db.connection import get_db
 from app.db.init_db import init_db
-from app.db.models import DailyBaseline, StrategyConfig
+from app.db.models import DailyBaseline, DailyMarketSnapshot, StrategyConfig
 from app.engine.state import runtime_state
 from app.engine.tasks import (
     _ensure_baseline_cache_for_trade_date,
@@ -14,6 +14,23 @@ from app.engine.tasks import (
 )
 from app.schemas.watchlist import WatchlistCreate
 from app.services.watchlist_service import add_watchlist
+
+
+def _seed_volume_history(session, stock_code: str, before: str, *, n: int = 7, volume: float = 1000.0) -> None:
+    day = date.fromisoformat(before) - timedelta(days=1)
+    for _ in range(n):
+        session.add(
+            DailyMarketSnapshot(
+                stock_code=stock_code,
+                trade_date=day.isoformat(),
+                open_price=10.0,
+                high_price=10.0,
+                low_price=10.0,
+                close_price=10.0,
+                volume=volume,
+            )
+        )
+        day -= timedelta(days=1)
 
 
 def test_is_in_trading_session_boundary() -> None:
@@ -48,11 +65,14 @@ def test_restore_baseline_cache_from_db(tmp_path, monkeypatch) -> None:
                 actual_n=60,
             )
         )
+        _seed_volume_history(session, "sh600519", "2026-08-05")
         session.commit()
 
     restored = _ensure_baseline_cache_for_trade_date("2026-08-05")
     assert restored
     assert runtime_state.baseline_cache["sh600519"]["low_min"] == 100.0
+    assert runtime_state.baseline_cache["sh600519"]["avg_volume_7d"] == 1000.0
+    assert runtime_state.baseline_cache["sh600519"]["volume_lookback_n"] == 7
 
 
 def test_market_polling_generates_signal_and_keeps_previous_signal(tmp_path, monkeypatch) -> None:
@@ -79,6 +99,7 @@ def test_market_polling_generates_signal_and_keeps_previous_signal(tmp_path, mon
                 actual_n=60,
             )
         )
+        _seed_volume_history(session, "sh600519", "2026-08-05")
         session.commit()
 
     fake_now = datetime(2026, 8, 5, 10, 0, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
@@ -92,6 +113,7 @@ def test_market_polling_generates_signal_and_keeps_previous_signal(tmp_path, mon
                 "price": 108.0,
                 "open": 110.0,
                 "prev_close": 111.0,
+                "volume": 1500.0,
                 "quote_date": "2026-08-05",
                 "quote_time": "10:00:00",
                 "is_halted": False,
@@ -110,6 +132,7 @@ def test_market_polling_generates_signal_and_keeps_previous_signal(tmp_path, mon
                 "price": 115.0,
                 "open": 110.0,
                 "prev_close": 111.0,
+                "volume": 1500.0,
                 "quote_date": "2026-08-05",
                 "quote_time": "10:01:00",
                 "is_halted": False,
@@ -139,6 +162,27 @@ def test_market_polling_skips_outside_session(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr("app.engine.tasks.fetch_realtime_quotes_batch", _mark_called)
     market_polling_task()
     assert not called["hit"]
+
+
+def test_market_polling_no_baselines_warns_once(tmp_path, monkeypatch, caplog) -> None:
+    import logging
+
+    sqlite_path = tmp_path / "amtsm.db"
+    monkeypatch.setattr(settings, "sqlite_path", str(sqlite_path))
+    init_db()
+    runtime_state.reset_daily()
+    add_watchlist(WatchlistCreate(stock_code="600519", stock_name="贵州茅台"))
+
+    fake_now = datetime(2026, 8, 17, 10, 0, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+    monkeypatch.setattr("app.engine.tasks.datetime", _FrozenDateTime(fake_now))
+
+    caplog.set_level(logging.WARNING, logger="app.engine.tasks")
+    market_polling_task()
+    market_polling_task()
+
+    messages = [r.getMessage() for r in caplog.records if "no baselines" in r.getMessage()]
+    assert len(messages) == 1
+    assert "2026-08-17" in messages[0]
 
 
 def test_market_polling_holding_emits_stop_loss(tmp_path, monkeypatch) -> None:

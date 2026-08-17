@@ -354,6 +354,10 @@ export function getJobStatusSSEUrl(): string {
   return `${API_BASE}/api/jobs/daily-baseline/status/stream`;
 }
 
+export function getSystemStatusSSEUrl(): string {
+  return `${API_BASE}/api/system/status/stream`;
+}
+
 export async function previewBuy(
   stock_code: string,
   qty: number,

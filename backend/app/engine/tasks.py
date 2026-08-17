@@ -1,7 +1,7 @@
 import logging
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -40,12 +40,17 @@ from app.market_signal import (
     SIGNAL_SELL,
     SIGNAL_STOP_LOSS,
     SIGNAL_TAKE_PROFIT,
+    BaselineWindow,
+    DEFAULT_VOLUME_LOOKBACK,
     InsufficientDataError,
+    SignalRequest,
+    StaticBaselineFeed,
+    StrategyParams,
+    VolumeWindow,
     compute_baseline,
+    compute_volume_window,
     evaluate,
-    is_addon_signal,
-    is_buy_signal,
-    is_tech_sell_signal,
+    get_market_signal_strategy,
     risk_params_from_resolved,
 )
 from app.services.market_data_service import (
@@ -75,6 +80,7 @@ __all__ = [
     "is_in_trading_session",
     "is_trading_day",
     "market_polling_task",
+    "startup_market_data_catchup",
     "upsert_snapshot",
     "upsert_qfq_bars",
     "get_snapshot",
@@ -536,6 +542,7 @@ def baseline_precompute_task() -> None:
             bars = fetch_daily_bars(code, n)
             low_min, high_max, actual_n = compute_baseline(bars, n)
             upsert_baseline(code, today, low_min, high_max, actual_n)
+            vol = compute_volume_window(bars, DEFAULT_VOLUME_LOOKBACK)
 
             # Update in-memory cache
             runtime_state.baseline_cache[code] = {
@@ -543,6 +550,8 @@ def baseline_precompute_task() -> None:
                 "high_max": high_max,
                 "actual_n": actual_n,
                 "trade_date": today,
+                "avg_volume_7d": vol.avg_volume,
+                "volume_lookback_n": vol.actual_n,
             }
 
             if prior_status == "HALT":
@@ -661,7 +670,9 @@ def market_polling_task() -> None:
 
     _sync_signal_trade_date(trade_date)
     if not _ensure_baseline_cache_for_trade_date(trade_date):
-        logger.warning("market_polling_task skipped: no baselines for %s", trade_date)
+        if runtime_state.no_baseline_warned_date != trade_date:
+            logger.warning("market_polling_task skipped: no baselines for %s", trade_date)
+            runtime_state.no_baseline_warned_date = trade_date
         return
 
     _load_position_cache()
@@ -703,6 +714,7 @@ def market_polling_task() -> None:
         )
         return
 
+    strategy = get_market_signal_strategy()
     batch_size = max(1, min(50, settings.polling_batch_size))
     total_batches = (len(valid_stocks) + batch_size - 1) // batch_size
 
@@ -782,6 +794,29 @@ def market_polling_task() -> None:
             pos = runtime_state.position_cache.get(code) or {}
             qty = int(pos.get("qty") or 0)
             holding = qty > 0
+            quote_volume = quote.get("volume")
+            volume = float(quote_volume) if quote_volume is not None else None
+            avg_volume = float(baseline.get("avg_volume_7d") or 0.0)
+            volume_n = int(baseline.get("volume_lookback_n") or 0)
+            decision = strategy.evaluate(
+                SignalRequest(
+                    price=float(price),
+                    volume=volume,
+                    feed=StaticBaselineFeed(
+                        BaselineWindow(
+                            low_min=low_min,
+                            high_max=high_max,
+                            actual_n=int(baseline["actual_n"]),
+                        ),
+                        VolumeWindow(
+                            avg_volume=avg_volume,
+                            actual_n=volume_n,
+                            lookback=DEFAULT_VOLUME_LOOKBACK,
+                        ),
+                    ),
+                    params=StrategyParams(x=effective_x, y=effective_y),
+                )
+            )
 
             if holding:
                 avg_cost = pos.get("avg_cost")
@@ -875,9 +910,8 @@ def market_polling_task() -> None:
                 # Do not overwrite an exit signal already set for the list/UI.
                 current_signal = runtime_state.signal_state.get(code)
                 if current_signal not in {SIGNAL_STOP_LOSS, SIGNAL_TAKE_PROFIT}:
-                    if params["enable_addon_alert"] and is_addon_signal(
-                        float(price), low_min, effective_x
-                    ):
+                    if params["enable_addon_alert"] and decision.addon:
+                        addon_ref = decision.buy_reference
                         runtime_state.set_signal(code, SIGNAL_ADDON)
                         risk_candidates += 1
                         candidates.append(
@@ -887,15 +921,14 @@ def market_polling_task() -> None:
                                 "signal_type": SIGNAL_ADDON,
                                 "price": float(price),
                                 "trade_date": trade_date,
-                                "baseline_price": low_min,
-                                "used_coeff": effective_x,
+                                "baseline_price": addon_ref.baseline_price,
+                                "used_coeff": addon_ref.used_coeff,
                                 "actual_n": int(baseline["actual_n"]),
                                 "prev_close": prev_close,
                             }
                         )
-                    elif params[
-                        "enable_tech_sell_while_holding"
-                    ] and is_tech_sell_signal(float(price), high_max, effective_y):
+                    elif params["enable_tech_sell_while_holding"] and decision.sell:
+                        sell_ref = decision.sell_reference
                         limit_flag = is_limit_up(
                             stock_code=code,
                             price=float(price),
@@ -915,8 +948,8 @@ def market_polling_task() -> None:
                                 "signal_type": SIGNAL_SELL,
                                 "price": float(price),
                                 "trade_date": trade_date,
-                                "baseline_price": high_max,
-                                "used_coeff": effective_y,
+                                "baseline_price": sell_ref.baseline_price,
+                                "used_coeff": sell_ref.used_coeff,
                                 "actual_n": int(baseline["actual_n"]),
                                 "prev_close": prev_close,
                                 "is_limit_up": limit_flag,
@@ -926,20 +959,18 @@ def market_polling_task() -> None:
 
             # EMPTY mode — V1 BUY/SELL
             signal_type: str | None = None
-            if is_buy_signal(float(price), low_min, effective_x):
+            if decision.buy:
                 signal_type = SIGNAL_BUY
-            if is_tech_sell_signal(float(price), high_max, effective_y):
+            if decision.sell:
                 signal_type = SIGNAL_SELL
 
             if signal_type:
                 if signal_type == SIGNAL_BUY:
-                    baseline_price = low_min
-                    used_coeff = effective_x
+                    reference = decision.buy_reference
                     buy_candidates += 1
                     runtime_state.set_signal(code, signal_type)
                 else:
-                    baseline_price = high_max
-                    used_coeff = effective_y
+                    reference = decision.sell_reference
                     sell_candidates += 1
                     limit_flag = is_limit_up(
                         stock_code=code,
@@ -958,8 +989,8 @@ def market_polling_task() -> None:
                     "signal_type": signal_type,
                     "price": price,
                     "trade_date": trade_date,
-                    "baseline_price": baseline_price,
-                    "used_coeff": used_coeff,
+                    "baseline_price": reference.baseline_price,
+                    "used_coeff": reference.used_coeff,
                     "actual_n": int(baseline["actual_n"]),
                     "prev_close": prev_close,
                 }
@@ -1022,14 +1053,60 @@ def _ensure_baseline_cache_for_trade_date(trade_date: str) -> bool:
 
     runtime_state.baseline_cache.clear()
     baselines = get_baselines_by_date(trade_date)
+    codes = [row["stock_code"] for row in baselines]
+    avg_map = _avg_volumes_before(codes, trade_date)
     for row in baselines:
+        avg_volume, volume_n = avg_map.get(row["stock_code"], (0.0, 0))
         runtime_state.baseline_cache[row["stock_code"]] = {
             "low_min": row["low_min"],
             "high_max": row["high_max"],
             "actual_n": row["actual_n"],
             "trade_date": row["trade_date"],
+            "avg_volume_7d": avg_volume,
+            "volume_lookback_n": volume_n,
         }
     return bool(runtime_state.baseline_cache)
+
+
+def _avg_volumes_before(
+    stock_codes: list[str],
+    trade_date: str,
+    *,
+    lookback: int = DEFAULT_VOLUME_LOOKBACK,
+) -> dict[str, tuple[float, int]]:
+    """Mean volume of the last ``lookback`` snapshot days strictly before ``trade_date``."""
+    if not stock_codes or lookback <= 0:
+        return {}
+    with get_db() as session:
+        ranked = (
+            select(
+                DailyMarketSnapshot.stock_code,
+                DailyMarketSnapshot.volume,
+                func.row_number()
+                .over(
+                    partition_by=DailyMarketSnapshot.stock_code,
+                    order_by=DailyMarketSnapshot.trade_date.desc(),
+                )
+                .label("rn"),
+            )
+            .where(
+                DailyMarketSnapshot.stock_code.in_(stock_codes),
+                DailyMarketSnapshot.trade_date < trade_date,
+                DailyMarketSnapshot.volume > 0,
+            )
+            .subquery()
+        )
+        rows = session.execute(
+            select(ranked.c.stock_code, ranked.c.volume).where(ranked.c.rn <= lookback)
+        ).all()
+    grouped: dict[str, list[float]] = {}
+    for code, volume in rows:
+        grouped.setdefault(code, []).append(float(volume))
+    return {
+        code: (sum(vols) / len(vols), len(vols))
+        for code, vols in grouped.items()
+        if vols
+    }
 
 
 def _load_position_cache() -> None:
@@ -1193,3 +1270,78 @@ def daily_snapshot_task() -> None:
             success_count,
             skipped_count,
         )
+
+
+def _watchlist_missing_today_snapshots(trade_date: str) -> bool:
+    """True when any NORMAL watchlist stock lacks a snapshot for trade_date."""
+    with get_db() as session:
+        codes = list(
+            session.scalars(
+                select(Watchlist.stock_code).where(Watchlist.status == "NORMAL")
+            ).all()
+        )
+        if not codes:
+            return False
+        existing = set(
+            session.scalars(
+                select(DailyMarketSnapshot.stock_code).where(
+                    DailyMarketSnapshot.trade_date == trade_date,
+                    DailyMarketSnapshot.stock_code.in_(codes),
+                )
+            ).all()
+        )
+    return any(code not in existing for code in codes)
+
+
+def startup_market_data_catchup() -> None:
+    """One-shot catch-up for a missed 08:30 baseline and today's snapshots.
+
+    Scheduled immediately after process start so FastAPI lifespan is not blocked
+    by network I/O. No-ops when the corresponding data is already present.
+    """
+    now = datetime.now(SH_TZ)
+    today = now.date()
+    trade_date = today.isoformat()
+    current_time = now.time()
+
+    if not is_trading_day(today):
+        logger.info(
+            "startup_market_data_catchup skipped: not trading day (%s)", trade_date
+        )
+        return
+
+    baseline_cutoff = time(settings.baseline_hour, settings.baseline_minute)
+    if current_time >= baseline_cutoff:
+        if not get_baselines_by_date(trade_date):
+            logger.info(
+                "startup_market_data_catchup running missed baseline_precompute for %s",
+                trade_date,
+            )
+            baseline_precompute_task()
+        else:
+            logger.info(
+                "startup_market_data_catchup skip baseline: already present for %s",
+                trade_date,
+            )
+
+    if is_in_trading_session(current_time):
+        logger.info(
+            "startup_market_data_catchup running immediate intraday snapshot for %s",
+            trade_date,
+        )
+        intraday_snapshot_task()
+        return
+
+    snapshot_cutoff = time(settings.snapshot_hour, settings.snapshot_minute)
+    if current_time >= snapshot_cutoff:
+        if _watchlist_missing_today_snapshots(trade_date):
+            logger.info(
+                "startup_market_data_catchup running missed daily_snapshot for %s",
+                trade_date,
+            )
+            daily_snapshot_task()
+        else:
+            logger.info(
+                "startup_market_data_catchup skip daily snapshot: already present for %s",
+                trade_date,
+            )

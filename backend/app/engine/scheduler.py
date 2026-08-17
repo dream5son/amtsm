@@ -1,15 +1,18 @@
 import logging
+from datetime import datetime
 
 from apscheduler.schedulers.background import BackgroundScheduler
 
 from app.config import settings
 from app.engine.backtest_tasks import backtest_worker_task
+from app.engine.market_hours import SH_TZ
 from app.engine.tasks import (
     baseline_precompute_task,
     bootstrap_watchlist_snapshot,
     daily_snapshot_task,
     intraday_snapshot_task,
     market_polling_task,
+    startup_market_data_catchup,
 )
 
 logger = logging.getLogger(__name__)
@@ -19,6 +22,7 @@ _scheduler: BackgroundScheduler | None = None
 
 def create_scheduler() -> BackgroundScheduler:
     global _scheduler
+    now = datetime.now(SH_TZ)
     scheduler = BackgroundScheduler(timezone="Asia/Shanghai")
     scheduler.add_job(
         baseline_precompute_task,
@@ -44,6 +48,8 @@ def create_scheduler() -> BackgroundScheduler:
         replace_existing=True,
         max_instances=1,
         coalesce=True,
+        next_run_time=now,
+        misfire_grace_time=None,
     )
     scheduler.add_job(
         intraday_snapshot_task,
@@ -53,6 +59,8 @@ def create_scheduler() -> BackgroundScheduler:
         replace_existing=True,
         max_instances=1,
         coalesce=True,
+        next_run_time=now,
+        misfire_grace_time=None,
     )
     scheduler.add_job(
         backtest_worker_task,
@@ -62,6 +70,15 @@ def create_scheduler() -> BackgroundScheduler:
         replace_existing=True,
         max_instances=1,
         coalesce=True,
+    )
+    scheduler.add_job(
+        startup_market_data_catchup,
+        trigger="date",
+        run_date=now,
+        id="startup_market_data_catchup",
+        replace_existing=True,
+        max_instances=1,
+        misfire_grace_time=None,
     )
     _scheduler = scheduler
     return scheduler

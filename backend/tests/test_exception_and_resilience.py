@@ -365,3 +365,84 @@ def test_system_status_endpoint() -> None:
     assert body["consecutive_poll_failures"] == 5
     assert body["quote_delay_since"] == "2026-08-05T02:00:00+00:00"
     assert body["failure_threshold"] >= 1
+
+
+def test_system_status_stream_emits_initial_then_changes() -> None:
+    import asyncio
+    import json
+
+    from app.api.health import system_status_event_generator
+
+    _reset_runtime()
+    runtime_state.quote_delay = False
+
+    async def _run() -> None:
+        gen = system_status_event_generator(poll_seconds=0.01, heartbeat_seconds=10.0)
+        try:
+            first = await anext(gen)
+            assert first.startswith("data: ")
+            payload = json.loads(first[len("data: ") :].strip())
+            assert payload["quote_delay"] is False
+
+            runtime_state.quote_delay = True
+            second = await asyncio.wait_for(anext(gen), timeout=0.5)
+            assert second.startswith("data: ")
+            payload2 = json.loads(second[len("data: ") :].strip())
+            assert payload2["quote_delay"] is True
+        finally:
+            await gen.aclose()
+
+    asyncio.run(_run())
+
+
+def test_system_status_stream_does_not_repeat_unchanged() -> None:
+    import asyncio
+
+    from app.api.health import system_status_event_generator
+
+    _reset_runtime()
+    runtime_state.quote_delay = False
+
+    async def _run() -> None:
+        gen = system_status_event_generator(poll_seconds=0.01, heartbeat_seconds=10.0)
+        yielded: list[str] = []
+
+        async def consume() -> None:
+            async for chunk in gen:
+                yielded.append(chunk)
+
+        task = asyncio.create_task(consume())
+        try:
+            await asyncio.sleep(0.08)
+        finally:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            await gen.aclose()
+
+        assert len(yielded) == 1
+        assert yielded[0].startswith("data: ")
+
+    asyncio.run(_run())
+
+
+def test_system_status_stream_heartbeat_is_comment() -> None:
+    import asyncio
+
+    from app.api.health import system_status_event_generator
+
+    _reset_runtime()
+
+    async def _run() -> None:
+        gen = system_status_event_generator(poll_seconds=0.01, heartbeat_seconds=0.03)
+        try:
+            first = await anext(gen)
+            assert first.startswith("data: ")
+            ping = await asyncio.wait_for(anext(gen), timeout=0.5)
+            assert ping.startswith(": ping")
+        finally:
+            await gen.aclose()
+
+    asyncio.run(_run())

@@ -1,4 +1,5 @@
 import json
+from datetime import date
 
 from app.config import settings
 from app.db.connection import get_db
@@ -7,6 +8,7 @@ from app.db.models import BacktestJob, DailyMarketSnapshot, Watchlist
 from app.schemas.strategy import DEFAULT_TRAILING_LADDER
 from app.services.backtest_service import (
     BacktestApplyError,
+    _load_bars,
     apply_job_params,
     get_kline_data,
 )
@@ -126,6 +128,31 @@ def test_get_kline_data_drops_unsanitary_ohlc_bars(tmp_path, monkeypatch) -> Non
         "2000-01-11",
     ]
     assert all(bar["open_price"] > 0 for bar in result["bars"])
+
+
+def test_load_bars_includes_volume(tmp_path, monkeypatch) -> None:
+    sqlite_path = tmp_path / "amtsm.db"
+    monkeypatch.setattr(settings, "sqlite_path", str(sqlite_path))
+    init_db()
+
+    with get_db() as session:
+        session.add(
+            DailyMarketSnapshot(
+                stock_code="sh600036",
+                trade_date="2024-01-05",
+                open_price=10.0,
+                high_price=10.2,
+                low_price=9.9,
+                close_price=10.1,
+                volume=1_234_567.0,
+            )
+        )
+        session.commit()
+
+    bars = _load_bars("sh600036", date(2024, 1, 1), date(2024, 1, 31))
+    assert len(bars) == 1
+    assert bars[0]["date"] == "2024-01-05"
+    assert bars[0]["volume"] == 1_234_567.0
 
 
 def test_apply_job_params_writes_stock_override_only(tmp_path, monkeypatch) -> None:
