@@ -592,3 +592,60 @@ export async function applyBacktest(
   }
   return (await res.json()) as BacktestApplyResponse;
 }
+
+// ---------------------------------------------------------------------------
+// WeChat notify (admin test page)
+// ---------------------------------------------------------------------------
+
+export type WeChatChannelStatusValue = "not_ready" | "available" | "failed";
+
+export type WeChatChannelStatus = {
+  status: WeChatChannelStatusValue;
+  configured: boolean;
+  missing_fields: string[];
+  last_error: string | null;
+  last_error_category: string | null;
+  last_errcode: number | null;
+  corp_id_masked: string;
+  agent_id: string;
+  to_user_masked: string;
+  available: boolean;
+};
+
+export type WeChatSendResult = {
+  ok: boolean;
+  status: WeChatChannelStatusValue;
+  message: string;
+  errcode: number | null;
+  errmsg: string | null;
+  invalid_user: string | null;
+  category: string | null;
+  channel: WeChatChannelStatus;
+};
+
+export async function fetchWeChatStatus(): Promise<WeChatChannelStatus> {
+  const res = await fetch(`${API_BASE}/api/notify/wechat/status`, { cache: "no-store" });
+  if (!res.ok) {
+    throw new Error("failed to fetch wechat status");
+  }
+  return (await res.json()) as WeChatChannelStatus;
+}
+
+export async function sendWeChatTest(to_user: string, content: string): Promise<WeChatSendResult> {
+  const res = await fetch(`${API_BASE}/api/notify/wechat/send`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ to_user, content }),
+  });
+  if (!res.ok) {
+    let message = "发送失败";
+    try {
+      const body = (await res.json()) as { detail?: string };
+      if (body.detail) message = body.detail;
+    } catch {
+      // ignore
+    }
+    throw new Error(message);
+  }
+  return (await res.json()) as WeChatSendResult;
+}

@@ -128,6 +128,18 @@ def test_snapshot_masks_sensitive_fields() -> None:
     assert snap.agent_id == "1000002"
 
 
+def test_send_text_to_user_overrides_default_recipient() -> None:
+    notifier = WeChatNotifier(_full_settings())
+    mock_client = MagicMock()
+    mock_client.message.send_text.return_value = {"errcode": 0, "errmsg": "ok"}
+    notifier._client = mock_client
+
+    result = notifier.send_text("ping", to_user="wangwu")
+
+    assert result.ok is True
+    mock_client.message.send_text.assert_called_once_with(1000002, "wangwu", "ping")
+
+
 def test_reuses_client_across_sends() -> None:
     notifier = WeChatNotifier(_full_settings())
     mock_client = MagicMock()

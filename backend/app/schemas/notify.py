@@ -25,3 +25,19 @@ class WeChatSelfCheckResponse(BaseModel):
     invalid_user: str | None = None
     category: ErrorCategory | None = None
     channel: WeChatChannelStatusResponse
+
+
+class WeChatSendRequest(BaseModel):
+    to_user: str
+    content: str = "AMTSM 测试消息"
+
+
+class WeChatSendResponse(BaseModel):
+    ok: bool
+    status: ChannelStatus
+    message: str = ""
+    errcode: int | None = None
+    errmsg: str | None = None
+    invalid_user: str | None = None
+    category: ErrorCategory | None = None
+    channel: WeChatChannelStatusResponse
