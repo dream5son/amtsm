@@ -5,11 +5,24 @@ from typing import Any
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+DEFAULT_STOP_LOSS_PCT = 0.15
+DEFAULT_BREAK_EVEN_TRIGGER_PCT = 0.25
+DEFAULT_BREAK_EVEN_BUFFER_PCT = 0.005
 
-DEFAULT_TRAILING_LADDER: list[dict[str, float | None]] = [
+# Factory risk used before the growth-stock retune (8% stop / 10% break-even /
+# tight trailing). init_db upgrades an untouched factory row to the new set.
+LEGACY_STOP_LOSS_PCT = 0.08
+LEGACY_BREAK_EVEN_TRIGGER_PCT = 0.10
+LEGACY_TRAILING_LADDER: list[dict[str, float | None]] = [
     {"min_pnl": 0.10, "max_pnl": 0.20, "drawdown": 0.15},
     {"min_pnl": 0.20, "max_pnl": 0.50, "drawdown": 0.10},
     {"min_pnl": 0.50, "max_pnl": None, "drawdown": 0.06},
+]
+
+DEFAULT_TRAILING_LADDER: list[dict[str, float | None]] = [
+    {"min_pnl": 0.20, "max_pnl": 0.50, "drawdown": 0.20},
+    {"min_pnl": 0.50, "max_pnl": 0.80, "drawdown": 0.15},
+    {"min_pnl": 0.80, "max_pnl": None, "drawdown": 0.12},
 ]
 
 DEFAULT_TRAILING_LADDER_JSON = json.dumps(DEFAULT_TRAILING_LADDER, separators=(",", ":"))
@@ -80,9 +93,9 @@ class StrategyConfig(BaseModel):
     global_buy_x: float = Field(gt=0)
     global_sell_n: int = Field(gt=0)
     global_sell_y: float = Field(gt=0)
-    stop_loss_pct: float = Field(default=0.08, ge=0, lt=1)
-    break_even_trigger_pct: float = Field(default=0.10, ge=0, lt=1)
-    break_even_buffer_pct: float = Field(default=0.005, ge=0, lt=1)
+    stop_loss_pct: float = Field(default=DEFAULT_STOP_LOSS_PCT, ge=0, lt=1)
+    break_even_trigger_pct: float = Field(default=DEFAULT_BREAK_EVEN_TRIGGER_PCT, ge=0, lt=1)
+    break_even_buffer_pct: float = Field(default=DEFAULT_BREAK_EVEN_BUFFER_PCT, ge=0, lt=1)
     trailing_ladder: list[TrailingLadderLevel] = Field(
         default_factory=lambda: parse_trailing_ladder(DEFAULT_TRAILING_LADDER)
     )

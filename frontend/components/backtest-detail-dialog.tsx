@@ -7,6 +7,7 @@ import {
   applyBacktest,
   BacktestJob,
   BacktestKlineResponse,
+  BACKTEST_KLINE_PAGE_SIZE,
   fetchBacktest,
   fetchBacktestKline,
   fetchBacktestsByCompareGroup,
@@ -153,7 +154,7 @@ export default function BacktestDetailDialog({
     let cancelled = false;
     setLoadingKline(true);
     setKlineError("");
-    void fetchBacktestKline(selectedJob.id)
+    void fetchBacktestKline(selectedJob.id, { limit: BACKTEST_KLINE_PAGE_SIZE })
       .then((data) => {
         if (!cancelled) setKlineData(data);
       })
@@ -334,7 +335,10 @@ export default function BacktestDetailDialog({
                   <div className="flex h-[460px] items-center justify-center text-sm text-rose-600">{klineError}</div>
                 ) : klineData ? (
                   <BacktestKlineChart
+                    jobId={selectedJob.id}
                     bars={klineData.bars}
+                    hasMoreBefore={klineData.has_more_before}
+                    hasMoreAfter={klineData.has_more_after}
                     trades={klineData.trades}
                     selectedTradeId={selectedTradeId}
                     onSelectTrade={onSelectTrade}

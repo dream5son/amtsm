@@ -1,11 +1,27 @@
 from __future__ import annotations
 
+import logging
+
 from sqlalchemy import inspect, text
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from app.db.connection import enable_wal, get_db, get_engine
 from app.db.models import Base, StrategyConfig
-from app.schemas.strategy import DEFAULT_TRAILING_LADDER_JSON
+from app.schemas.strategy import (
+    DEFAULT_BREAK_EVEN_BUFFER_PCT,
+    DEFAULT_BREAK_EVEN_TRIGGER_PCT,
+    DEFAULT_STOP_LOSS_PCT,
+    DEFAULT_TRAILING_LADDER_JSON,
+    LEGACY_BREAK_EVEN_TRIGGER_PCT,
+    LEGACY_STOP_LOSS_PCT,
+    LEGACY_TRAILING_LADDER,
+    parse_trailing_ladder,
+)
+
+logger = logging.getLogger(__name__)
+
+_PRICE_ADJUST_META_KEY = "price_adjust"
+_PRICE_ADJUST_UNADJUSTED = "none"
 
 
 def _existing_columns(table_name: str) -> set[str]:
@@ -129,6 +145,99 @@ def _ensure_v2_risk_strategy_columns() -> None:
         )
 
 
+def _ladder_signature(raw: str | list | None) -> list[tuple[float, float | None, float]]:
+    levels = parse_trailing_ladder(raw)
+    return [
+        (
+            round(level.min_pnl, 6),
+            None if level.max_pnl is None else round(level.max_pnl, 6),
+            round(level.drawdown, 6),
+        )
+        for level in levels
+    ]
+
+
+def _ladder_is_legacy_or_empty(raw: str | None) -> bool:
+    if raw is None or not str(raw).strip():
+        return True
+    try:
+        return _ladder_signature(raw) == _ladder_signature(LEGACY_TRAILING_LADDER)
+    except (TypeError, ValueError):
+        return False
+
+
+def _migrate_factory_risk_defaults() -> None:
+    """Upgrade an untouched factory risk row to the growth-stock defaults.
+
+    Skips the row if the user already changed stop, break-even, or trailing.
+    """
+    if not _existing_columns("strategy_config"):
+        return
+    with get_db() as session:
+        row = session.get(StrategyConfig, 1)
+        if row is None:
+            return
+        stop = float(row.stop_loss_pct) if row.stop_loss_pct is not None else None
+        trigger = (
+            float(row.break_even_trigger_pct)
+            if row.break_even_trigger_pct is not None
+            else None
+        )
+        if stop is None or trigger is None:
+            return
+        if abs(stop - LEGACY_STOP_LOSS_PCT) > 1e-12:
+            return
+        if abs(trigger - LEGACY_BREAK_EVEN_TRIGGER_PCT) > 1e-12:
+            return
+        if not _ladder_is_legacy_or_empty(row.trailing_ladder_json):
+            return
+        row.stop_loss_pct = DEFAULT_STOP_LOSS_PCT
+        row.break_even_trigger_pct = DEFAULT_BREAK_EVEN_TRIGGER_PCT
+        row.trailing_ladder_json = DEFAULT_TRAILING_LADDER_JSON
+        session.commit()
+        logger.info(
+            "migrated factory risk defaults to stop=%.2f break-even=%.2f wide trailing",
+            DEFAULT_STOP_LOSS_PCT,
+            DEFAULT_BREAK_EVEN_TRIGGER_PCT,
+        )
+
+
+def _migrate_snapshots_off_qfq() -> None:
+    """Drop qfq-era OHLC cache once so the next job refetches unadjusted bars."""
+    with get_engine().begin() as conn:
+        conn.execute(
+            text(
+                "CREATE TABLE IF NOT EXISTS schema_meta ("
+                "key TEXT PRIMARY KEY NOT NULL, "
+                "value TEXT NOT NULL)"
+            )
+        )
+        current = conn.execute(
+            text("SELECT value FROM schema_meta WHERE key = :key"),
+            {"key": _PRICE_ADJUST_META_KEY},
+        ).scalar()
+        if current == _PRICE_ADJUST_UNADJUSTED:
+            return
+        tables = {
+            name
+            for (name,) in conn.execute(
+                text("SELECT name FROM sqlite_master WHERE type = 'table'")
+            )
+        }
+        if "daily_market_snapshots" in tables:
+            conn.execute(text("DELETE FROM daily_market_snapshots"))
+        if "daily_baselines" in tables:
+            conn.execute(text("DELETE FROM daily_baselines"))
+        conn.execute(
+            text(
+                "INSERT INTO schema_meta(key, value) VALUES (:key, :value) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value"
+            ),
+            {"key": _PRICE_ADJUST_META_KEY, "value": _PRICE_ADJUST_UNADJUSTED},
+        )
+        logger.info("cleared qfq snapshot/baseline cache; next fetch uses unadjusted bars")
+
+
 def init_db() -> None:
     enable_wal()
     Base.metadata.create_all(get_engine())
@@ -146,9 +255,9 @@ def init_db() -> None:
                 global_buy_x=1.10,
                 global_sell_n=60,
                 global_sell_y=0.90,
-                stop_loss_pct=0.08,
-                break_even_trigger_pct=0.10,
-                break_even_buffer_pct=0.005,
+                stop_loss_pct=DEFAULT_STOP_LOSS_PCT,
+                break_even_trigger_pct=DEFAULT_BREAK_EVEN_TRIGGER_PCT,
+                break_even_buffer_pct=DEFAULT_BREAK_EVEN_BUFFER_PCT,
                 trailing_ladder_json=DEFAULT_TRAILING_LADDER_JSON,
                 enable_partial_take_profit=0,
                 enable_addon_alert=0,
@@ -158,3 +267,6 @@ def init_db() -> None:
         )
         session.execute(stmt)
         session.commit()
+
+    _migrate_factory_risk_defaults()
+    _migrate_snapshots_off_qfq()

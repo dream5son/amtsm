@@ -242,7 +242,7 @@ def upsert_snapshot(
 
 
 def upsert_qfq_bars(stock_code: str, bars: list[dict]) -> int:
-    """Bulk-upsert forward-adjusted (qfq) daily bars into ``daily_market_snapshots``.
+    """Bulk-upsert daily bars into ``daily_market_snapshots``.
 
     Thin batch wrapper around :func:`upsert_snapshot`; this is the single write
     entrypoint the backtest worker uses to backfill missing history (design.md
@@ -367,7 +367,6 @@ def _bootstrap_from_daily_bars(stock_code: str, *, lookback_days: int = 5) -> bo
                 candidate,
                 retries=settings.snapshot_fetch_retries,
                 retry_backoff_seconds=settings.snapshot_fetch_retry_backoff_seconds,
-                adjust="qfq",
             )
             upsert_snapshot(
                 stock_code=stock_code,
@@ -528,7 +527,7 @@ def get_snapshot(stock_code: str, trade_date: str) -> dict | None:
 
 
 def baseline_precompute_task() -> None:
-    """Pre-market baseline job using forward-adjusted (qfq) daily bars.
+    """Pre-market baseline job using unadjusted daily bars.
 
     Also attempts to restore HALT stocks to NORMAL for the new session so
     monitoring can resume after prior halt markings (user story 12).
@@ -574,7 +573,6 @@ def baseline_precompute_task() -> None:
         prior_status = stock["status"]
 
         try:
-            # Always forward-adjusted so ex-dividend days stay aligned with realtime P.
             bars = fetch_daily_bars(code, n)
             low_min, high_max, actual_n = compute_baseline(bars, n)
             upsert_baseline(code, today, low_min, high_max, actual_n)
@@ -1272,7 +1270,6 @@ def daily_snapshot_task() -> None:
                 today,
                 retries=settings.snapshot_fetch_retries,
                 retry_backoff_seconds=settings.snapshot_fetch_retry_backoff_seconds,
-                adjust="qfq",
             )
             upsert_snapshot(
                 stock_code=code,

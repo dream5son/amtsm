@@ -1,4 +1,4 @@
-"""Market data service - fetches forward-adjusted daily bar data via akshare."""
+"""Market data service - fetches unadjusted daily bar data via akshare."""
 
 import logging
 import math
@@ -12,6 +12,13 @@ import httpx
 import pandas as pd
 
 logger = logging.getLogger(__name__)
+
+# akshare adjust="" is 不复权. Forward adjustment (qfq) rescales the whole
+# history to today's basis and, on high-dividend names (e.g. 福耀玻璃), can
+# push early OHLC through zero — the backtest then drops most of the sample.
+# Unadjusted bars stay on the traded price of each day; live quotes are also
+# unadjusted, so N-day windows (typically ~60 sessions) stay comparable.
+UNADJUSTED = ""
 
 # ---------------------------------------------------------------------------
 # High-availability akshare source rotation
@@ -180,7 +187,7 @@ def high_available_akshare(
     numeric_code: str,
     start_date: str,
     end_date: str,
-    adjust: str = "qfq",
+    adjust: str = UNADJUSTED,
 ) -> list[dict]:
     """Fetch daily bars using akshare with automatic source rotation.
 
@@ -193,8 +200,8 @@ def high_available_akshare(
         numeric_code: 6-digit stock code without exchange prefix, e.g. ``"600519"``.
         start_date:   Start date in ``YYYYMMDD`` format.
         end_date:     End date in ``YYYYMMDD`` format (inclusive).
-        adjust:       Adjustment type: ``"qfq"`` (forward), ``"hfq"`` (backward),
-                      or ``""`` (unadjusted).  Defaults to ``"qfq"``.
+        adjust:       Adjustment type: ``""`` (unadjusted, default), ``"qfq"``
+                      (forward), or ``"hfq"`` (backward).
 
     Returns:
         List of bar dicts with keys ``date``, ``open``, ``high``, ``low``,
@@ -388,7 +395,7 @@ def _to_float(value: str) -> float | None:
 
 
 def fetch_daily_bars(stock_code: str, n: int, end_date: date | None = None) -> list[dict]:
-    """Fetch forward-adjusted (qfq) daily bars for the given stock.
+    """Fetch unadjusted daily bars for the given stock.
 
     Uses :func:`high_available_akshare` to try multiple akshare data sources
     with automatic failover.
@@ -409,7 +416,7 @@ def fetch_daily_bars(stock_code: str, n: int, end_date: date | None = None) -> l
             numeric_code=numeric_code,
             start_date=start_date.strftime("%Y%m%d"),
             end_date=(end_date - timedelta(days=1)).strftime("%Y%m%d"),
-            adjust="qfq",
+            adjust=UNADJUSTED,
         )
     except MarketDataUnavailableError:
         raise
@@ -426,7 +433,7 @@ def fetch_qfq_bars_range(
     retries: int = 1,
     retry_backoff_seconds: float = 0.5,
 ) -> list[dict]:
-    """Fetch forward-adjusted (qfq) daily bars for an explicit ``[start_date, end_date]``.
+    """Fetch unadjusted daily bars for an explicit ``[start_date, end_date]``.
 
     Unlike :func:`fetch_daily_bars` (which derives its own lookback window from a
     day-count ``n``), this fetches a caller-specified date range. Used by the
@@ -447,7 +454,7 @@ def fetch_qfq_bars_range(
                 numeric_code=numeric_code,
                 start_date=start_date.strftime("%Y%m%d"),
                 end_date=end_date.strftime("%Y%m%d"),
-                adjust="qfq",
+                adjust=UNADJUSTED,
             )
         except MarketDataUnavailableError as exc:
             last_exc = exc
@@ -486,18 +493,15 @@ def fetch_trade_day_bar(
     *,
     retries: int = 1,
     retry_backoff_seconds: float = 0.5,
-    adjust: str = "qfq",
+    adjust: str = UNADJUSTED,
 ) -> dict:
     """Fetch OHLCV (+ optional turnover) for a single trade date.
 
     Includes ``trade_date`` itself. Used by the post-close daily snapshot job.
 
-    Defaults to forward-adjusted (``qfq``) prices so that ``daily_market_snapshots``
-    stays on the same price basis used by baseline/backtest reads (V2 design
-    "unify daily_market_snapshots as the single qfq cache"). For the most recent
-    trading day qfq and unadjusted prices are identical, so this default does not
-    change already-displayed "today" values; pass ``adjust=""`` to opt back into
-    unadjusted archival prices if ever needed.
+    Defaults to unadjusted prices so ``daily_market_snapshots`` stays on the
+    same traded-price basis as live quotes. Pass ``adjust="qfq"`` / ``"hfq"``
+    only if a caller explicitly needs an adjusted series.
 
     Returns:
         dict with keys: date, open, high, low, close, volume, turnover_rate.

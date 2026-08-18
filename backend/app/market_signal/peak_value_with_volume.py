@@ -19,9 +19,11 @@ class PeakValueWithVolumeStrategy(MarketSignalStrategy):
 
     Buy / addon only when current volume is at least
     ``avg_volume * (1 + buy_volume_increase_pct)`` versus the prior
-    ``volume_lookback`` days. Sell only when the absolute volume change
-    versus that average is at least ``sell_volume_change_pct``. Missing
-    current volume or an incomplete lookback window fails confirmation.
+    ``volume_lookback`` days — unless ``buy_volume_increase_pct <= 0``,
+    which disables the buy/addon volume gate (quiet pullbacks are allowed).
+    Sell only when the absolute volume change versus that average is at
+    least ``sell_volume_change_pct``. Missing current volume or an
+    incomplete lookback window fails confirmation when the gate is on.
     """
 
     def __init__(self, *, require_full_n: bool = False) -> None:
@@ -56,13 +58,19 @@ class PeakValueWithVolumeStrategy(MarketSignalStrategy):
         return float(current) / float(window.avg_volume) - 1.0
 
     def _volume_increased(self, req: SignalRequest) -> bool:
+        threshold = float(req.params.buy_volume_increase_pct)
+        if threshold <= 0:
+            return True
         change = self._volume_change(req)
         if change is None:
             return False
-        return change + _EPS >= float(req.params.buy_volume_increase_pct)
+        return change + _EPS >= threshold
 
     def _volume_changed(self, req: SignalRequest) -> bool:
+        threshold = float(req.params.sell_volume_change_pct)
+        if threshold <= 0:
+            return True
         change = self._volume_change(req)
         if change is None:
             return False
-        return abs(change) + _EPS >= float(req.params.sell_volume_change_pct)
+        return abs(change) + _EPS >= threshold

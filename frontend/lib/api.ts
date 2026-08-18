@@ -137,9 +137,9 @@ export type StockStrategyOverride = {
 };
 
 export const DEFAULT_TRAILING_LADDER: TrailingLadderLevel[] = [
-  { min_pnl: 0.1, max_pnl: 0.2, drawdown: 0.15 },
-  { min_pnl: 0.2, max_pnl: 0.5, drawdown: 0.1 },
-  { min_pnl: 0.5, max_pnl: null, drawdown: 0.06 },
+  { min_pnl: 0.2, max_pnl: 0.5, drawdown: 0.2 },
+  { min_pnl: 0.5, max_pnl: 0.8, drawdown: 0.15 },
+  { min_pnl: 0.8, max_pnl: null, drawdown: 0.12 },
 ];
 
 export const DEFAULT_STRATEGY: StrategyConfig = {
@@ -147,8 +147,8 @@ export const DEFAULT_STRATEGY: StrategyConfig = {
   global_buy_x: 1.1,
   global_sell_n: 60,
   global_sell_y: 0.9,
-  stop_loss_pct: 0.08,
-  break_even_trigger_pct: 0.1,
+  stop_loss_pct: 0.15,
+  break_even_trigger_pct: 0.25,
   break_even_buffer_pct: 0.005,
   trailing_ladder: DEFAULT_TRAILING_LADDER,
   enable_partial_take_profit: false,
@@ -620,6 +620,19 @@ export type BacktestKlineResponse = {
   job: BacktestJob;
   bars: BacktestKlineBar[];
   trades: BacktestTrade[];
+  has_more_before: boolean;
+  has_more_after: boolean;
+};
+
+export const BACKTEST_KLINE_PAGE_SIZE = 250;
+
+export type FetchBacktestKlineParams = {
+  start?: string;
+  end?: string;
+  before?: string;
+  after?: string;
+  limit?: number;
+  include_trades?: boolean;
 };
 
 export async function createBacktest(
@@ -669,8 +682,22 @@ export async function fetchBacktestsByCompareGroup(compareGroupId: string): Prom
   return (await res.json()) as BacktestJob[];
 }
 
-export async function fetchBacktestKline(jobId: number): Promise<BacktestKlineResponse> {
-  const res = await fetch(`${API_BASE}/api/backtests/${jobId}/kline`, { cache: "no-store" });
+export async function fetchBacktestKline(
+  jobId: number,
+  params?: FetchBacktestKlineParams,
+): Promise<BacktestKlineResponse> {
+  const search = new URLSearchParams();
+  if (params?.start) search.set("start", params.start);
+  if (params?.end) search.set("end", params.end);
+  if (params?.before) search.set("before", params.before);
+  if (params?.after) search.set("after", params.after);
+  if (params?.limit != null) search.set("limit", String(params.limit));
+  if (params?.include_trades === false) search.set("include_trades", "false");
+  const qs = search.toString();
+  const res = await fetch(
+    `${API_BASE}/api/backtests/${jobId}/kline${qs ? `?${qs}` : ""}`,
+    { cache: "no-store" },
+  );
   if (!res.ok) {
     throw new Error("failed to fetch backtest kline");
   }

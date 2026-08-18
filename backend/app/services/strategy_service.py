@@ -38,11 +38,11 @@ def _row_to_strategy_dict(row: StrategyConfig) -> dict:
         "global_buy_x": row.global_buy_x,
         "global_sell_n": row.global_sell_n,
         "global_sell_y": row.global_sell_y,
-        "stop_loss_pct": float(row.stop_loss_pct if row.stop_loss_pct is not None else 0.08),
+        "stop_loss_pct": float(row.stop_loss_pct if row.stop_loss_pct is not None else 0.15),
         "break_even_trigger_pct": float(
             row.break_even_trigger_pct
             if getattr(row, "break_even_trigger_pct", None) is not None
-            else 0.10
+            else 0.25
         ),
         "break_even_buffer_pct": float(
             row.break_even_buffer_pct
@@ -67,8 +67,8 @@ def _default_strategy_dict() -> dict:
         "global_buy_x": 1.1,
         "global_sell_n": 60,
         "global_sell_y": 0.9,
-        "stop_loss_pct": 0.08,
-        "break_even_trigger_pct": 0.10,
+        "stop_loss_pct": 0.15,
+        "break_even_trigger_pct": 0.25,
         "break_even_buffer_pct": 0.005,
         "trailing_ladder": [level.model_dump() for level in ladder],
         "enable_partial_take_profit": False,

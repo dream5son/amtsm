@@ -161,6 +161,28 @@ def _volume_request(
     )
 
 
+def test_volume_buy_gate_disabled_when_threshold_non_positive() -> None:
+    strategy = PeakValueWithVolumeStrategy()
+    quiet = _volume_request(
+        110.0,
+        volume=900.0,
+        low_min=100.0,
+        x=1.1,
+        buy_volume_increase_pct=0.0,
+    )
+    assert strategy.evaluate(quiet).buy
+    assert strategy.evaluate(quiet).addon
+
+    missing = _volume_request(
+        110.0,
+        volume=None,
+        low_min=100.0,
+        x=1.1,
+        buy_volume_increase_pct=0.0,
+    )
+    assert strategy.evaluate(missing).buy
+
+
 def test_volume_buy_requires_surge() -> None:
     strategy = PeakValueWithVolumeStrategy()
     # Price at buy threshold (100 * 1.1 = 110) but volume only +10%.

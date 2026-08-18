@@ -92,6 +92,8 @@ class BacktestKlineResponse(BaseModel):
     job: BacktestJobResponse
     bars: list[BacktestKlineBar]
     trades: list[BacktestTradeResponse]
+    has_more_before: bool = False
+    has_more_after: bool = False
 
 
 class WatchlistBacktestSummary(BaseModel):

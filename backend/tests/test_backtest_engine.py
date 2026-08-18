@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from app.schemas.strategy import parse_trailing_ladder
+from app.schemas.strategy import LEGACY_TRAILING_LADDER, parse_trailing_ladder
 from app.services.backtest_engine import (
     EXIT_PERIOD_END,
     EXIT_STOP_LOSS,
@@ -17,7 +17,7 @@ def _params(**overrides) -> RiskParams:
         stop_loss_pct=0.08,
         break_even_trigger_pct=0.10,
         break_even_buffer_pct=0.005,
-        trailing_ladder=parse_trailing_ladder(None),
+        trailing_ladder=parse_trailing_ladder(LEGACY_TRAILING_LADDER),
         enable_partial_take_profit=False,
     )
     base.update(overrides)
@@ -244,18 +244,11 @@ def test_sanitize_drops_dirty_low_keeps_large_but_valid_moves() -> None:
 
 def test_no_entry_until_full_n_day_window() -> None:
     """Partial windows must not trigger buys even if close looks cheap vs a short low_min."""
-    # Days 0..n-1 are skipped (idx < n). Volume lookback also needs 7 prior bars;
-    # prepend four quiet days so 01-05 is the first day that can confirm.
     bars = [
-        _bar("2023-12-26", 10.0, 10.2, 9.9, 10.0),
-        _bar("2023-12-27", 10.0, 10.2, 9.9, 10.0),
-        _bar("2023-12-28", 10.0, 10.2, 9.9, 10.0),
-        _bar("2023-12-29", 10.0, 10.2, 9.9, 10.0),
-        _bar("2024-01-02", 10.0, 10.2, 9.9, 10.0),
-        _bar("2024-01-03", 9.5, 9.6, 9.4, 9.5),  # would be "buy" on 1-day window
-        _bar("2024-01-04", 9.5, 9.6, 9.4, 9.5),
-        # idx=7: first full N window with 7-day volume; low_min=9.4, thr=10.34.
-        _bar("2024-01-05", 9.5, 9.6, 9.4, 9.5, _SURGE_VOL),
+        _bar("2024-01-02", 10.0, 10.2, 9.9, 10.0),  # idx=0 skipped
+        _bar("2024-01-03", 9.5, 9.6, 9.4, 9.5),  # idx=1 skipped; would buy on a 1-day window
+        _bar("2024-01-04", 9.5, 9.6, 9.4, 9.5),  # idx=2 skipped
+        _bar("2024-01-05", 9.5, 9.6, 9.4, 9.5),  # idx=3: first full n=3, low_min=9.4, thr=10.34
         _bar("2024-01-08", 9.5, 9.6, 9.4, 9.5),
     ]
     result = run_backtest(bars, start_date="2024-01-02", n=3, x=1.10, risk=_params())
@@ -306,20 +299,25 @@ def test_entry_price_is_close_not_threshold() -> None:
     assert trade.entry_price != threshold
 
 
-def test_no_entry_when_volume_does_not_surge() -> None:
+def test_quiet_volume_still_enters() -> None:
+    """Buy-volume gate is off by default so a quiet pullback can still enter."""
     bars = _WARMUP + [
-        _bar(_START_DATE, 10.0, 10.1, 9.9, 10.0),  # price would buy, volume quiet
+        _bar(_START_DATE, 10.0, 10.1, 9.9, 10.0),  # price buys, volume quiet
     ]
     result = run_backtest(bars, start_date=_START_DATE, n=3, x=1.10, risk=_params())
-    assert result.trades == []
+    assert len(result.trades) == 1
+    assert result.trades[0].entry_date == _START_DATE
+    assert result.trades[0].exit_reason == EXIT_PERIOD_END
 
 
-def test_no_entry_when_volume_key_missing() -> None:
-    """Price would buy, but bars without volume must fail volume confirmation."""
+def test_entry_when_volume_key_missing() -> None:
+    """With the buy-volume gate off, missing volume no longer blocks entry."""
     source = _WARMUP + [_bar(_START_DATE, 10.0, 10.1, 9.9, 10.0, _SURGE_VOL)]
     bars = [{k: v for k, v in bar.items() if k != "volume"} for bar in source]
     result = run_backtest(bars, start_date=_START_DATE, n=3, x=1.10, risk=_params())
-    assert result.trades == []
+    assert len(result.trades) == 1
+    assert result.trades[0].entry_date == _START_DATE
+    assert result.trades[0].exit_reason == EXIT_PERIOD_END
 
 
 def test_hold_across_large_calendar_gap_voids_without_exit_trade() -> None:

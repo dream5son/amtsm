@@ -1,4 +1,4 @@
-from app.schemas.strategy import TrailingLadderLevel, parse_trailing_ladder
+from app.schemas.strategy import LEGACY_TRAILING_LADDER, TrailingLadderLevel, parse_trailing_ladder
 from app.services.risk_rules import (
     SIGNAL_PARTIAL_TP,
     SIGNAL_STOP_LOSS,
@@ -14,7 +14,7 @@ def _default_params(**overrides) -> RiskParams:
         stop_loss_pct=0.08,
         break_even_trigger_pct=0.10,
         break_even_buffer_pct=0.005,
-        trailing_ladder=parse_trailing_ladder(None),
+        trailing_ladder=parse_trailing_ladder(LEGACY_TRAILING_LADDER),
         enable_partial_take_profit=False,
     )
     base.update(overrides)
@@ -153,11 +153,11 @@ def test_partial_tp_disabled() -> None:
 
 def test_match_ladder_boundaries() -> None:
     ladder = parse_trailing_ladder(None)
-    assert match_ladder_idx(0.09, ladder) is None
-    assert match_ladder_idx(0.10, ladder) == 0
-    assert match_ladder_idx(0.20, ladder) == 1
-    assert match_ladder_idx(0.50, ladder) == 2
+    assert match_ladder_idx(0.19, ladder) is None
+    assert match_ladder_idx(0.20, ladder) == 0
+    assert match_ladder_idx(0.50, ladder) == 1
     assert match_ladder_idx(0.80, ladder) == 2
+    assert match_ladder_idx(0.90, ladder) == 2
 
 
 def test_update_highest_then_trigger_same_cycle() -> None:

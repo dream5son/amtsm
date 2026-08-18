@@ -50,11 +50,11 @@ def _reset_runtime() -> None:
     runtime_state.job_status = "IDLE"
 
 
-def test_qfq_used_for_ex_dividend_alignment(monkeypatch) -> None:
-    """Ex-dividend safety: daily bars must request forward adjustment (qfq)."""
+def test_unadjusted_daily_bars_requested(monkeypatch) -> None:
+    """Daily bars request unadjusted prices so high-dividend history stays valid."""
     captured: dict = {}
 
-    def fake_ha(numeric_code, start_date, end_date, adjust="qfq"):
+    def fake_ha(numeric_code, start_date, end_date, adjust=""):
         captured["adjust"] = adjust
         captured["code"] = numeric_code
         return [
@@ -73,7 +73,7 @@ def test_qfq_used_for_ex_dividend_alignment(monkeypatch) -> None:
         fake_ha,
     )
     bars = fetch_daily_bars("sh600519", 60)
-    assert captured["adjust"] == "qfq"
+    assert captured["adjust"] == ""
     assert len(bars) == 1
     low_min, high_max, actual_n = compute_baseline(bars, 60)
     assert actual_n == 1

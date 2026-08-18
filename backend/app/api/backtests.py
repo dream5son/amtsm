@@ -1,3 +1,5 @@
+from datetime import date
+
 from fastapi import APIRouter, HTTPException, Query
 
 from app.schemas.backtest import (
@@ -64,11 +66,29 @@ def get_backtest(job_id: int) -> BacktestJobResponse:
 
 
 @router.get("/{job_id}/kline")
-def get_backtest_kline(job_id: int) -> BacktestKlineResponse:
+def get_backtest_kline(
+    job_id: int,
+    start: date | None = Query(default=None),
+    end: date | None = Query(default=None),
+    before: date | None = Query(default=None),
+    after: date | None = Query(default=None),
+    limit: int | None = Query(default=None, ge=1, le=1000),
+    include_trades: bool = Query(default=True),
+) -> BacktestKlineResponse:
     try:
-        return get_kline_data(job_id)
+        return get_kline_data(
+            job_id,
+            start=start,
+            end=end,
+            before=before,
+            after=after,
+            limit=limit,
+            include_trades=include_trades,
+        )
     except BacktestJobNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.post("/{job_id}/apply")

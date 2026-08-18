@@ -2,11 +2,21 @@
 
 from __future__ import annotations
 
+from sqlalchemy import text
+
 from app.config import settings
-from app.db.connection import get_db
-from app.db.init_db import init_db
-from app.db.models import Position, Watchlist
-from app.schemas.strategy import StockStrategyOverride, StrategyConfig, TrailingLadderLevel
+from app.db.connection import get_db, get_engine
+from app.db.init_db import _migrate_factory_risk_defaults, init_db
+from app.db.models import DailyMarketSnapshot, Position, Watchlist
+from app.db.models import StrategyConfig as StrategyConfigRow
+from app.schemas.strategy import (
+    LEGACY_TRAILING_LADDER,
+    StockStrategyOverride,
+    StrategyConfig,
+    TrailingLadderLevel,
+    ladder_to_json,
+    parse_trailing_ladder,
+)
 from app.services.strategy_service import (
     get_strategy,
     resolve_params,
@@ -23,10 +33,12 @@ def _setup(tmp_path, monkeypatch) -> None:
 def test_get_strategy_includes_risk_defaults(tmp_path, monkeypatch) -> None:
     _setup(tmp_path, monkeypatch)
     cfg = get_strategy()
-    assert cfg["stop_loss_pct"] == 0.08
-    assert cfg["break_even_trigger_pct"] == 0.10
+    assert cfg["stop_loss_pct"] == 0.15
+    assert cfg["break_even_trigger_pct"] == 0.25
     assert cfg["enable_partial_take_profit"] is False
     assert len(cfg["trailing_ladder"]) == 3
+    assert abs(cfg["trailing_ladder"][0]["min_pnl"] - 0.20) < 1e-9
+    assert abs(cfg["trailing_ladder"][0]["drawdown"] - 0.20) < 1e-9
 
 
 def test_update_strategy_recalcs_holding_stop(tmp_path, monkeypatch) -> None:
@@ -90,4 +102,64 @@ def test_stock_override_resolve_params(tmp_path, monkeypatch) -> None:
     assert resolved["enable_partial_take_profit"] is False
 
     global_resolved = resolve_params(None)
-    assert abs(global_resolved["stop_loss_pct"] - 0.08) < 1e-9
+    assert abs(global_resolved["stop_loss_pct"] - 0.15) < 1e-9
+
+
+def test_factory_risk_defaults_migrated_from_legacy(tmp_path, monkeypatch) -> None:
+    _setup(tmp_path, monkeypatch)
+    with get_db() as session:
+        row = session.get(StrategyConfigRow, 1)
+        assert row is not None
+        row.stop_loss_pct = 0.08
+        row.break_even_trigger_pct = 0.10
+        row.trailing_ladder_json = ladder_to_json(parse_trailing_ladder(LEGACY_TRAILING_LADDER))
+        session.commit()
+
+    _migrate_factory_risk_defaults()
+    cfg = get_strategy()
+    assert abs(cfg["stop_loss_pct"] - 0.15) < 1e-9
+    assert abs(cfg["break_even_trigger_pct"] - 0.25) < 1e-9
+    assert abs(cfg["trailing_ladder"][0]["drawdown"] - 0.20) < 1e-9
+
+
+def test_custom_risk_not_overwritten_by_factory_migration(tmp_path, monkeypatch) -> None:
+    _setup(tmp_path, monkeypatch)
+    with get_db() as session:
+        row = session.get(StrategyConfigRow, 1)
+        assert row is not None
+        row.stop_loss_pct = 0.05
+        row.break_even_trigger_pct = 0.10
+        session.commit()
+
+    _migrate_factory_risk_defaults()
+    cfg = get_strategy()
+    assert abs(cfg["stop_loss_pct"] - 0.05) < 1e-9
+
+
+def test_qfq_snapshot_cache_cleared_once(tmp_path, monkeypatch) -> None:
+    _setup(tmp_path, monkeypatch)
+    with get_db() as session:
+        session.add(
+            DailyMarketSnapshot(
+                stock_code="sh600660",
+                trade_date="2017-08-29",
+                open_price=12.0,
+                high_price=12.2,
+                low_price=11.8,
+                close_price=12.1,
+                volume=1000.0,
+            )
+        )
+        session.commit()
+
+    init_db()
+    with get_db() as session:
+        assert session.query(DailyMarketSnapshot).count() == 1
+
+    with get_engine().begin() as conn:
+        conn.execute(text("DELETE FROM schema_meta"))
+
+    init_db()
+    with get_db() as session:
+        assert session.query(DailyMarketSnapshot).count() == 0
+

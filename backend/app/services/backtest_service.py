@@ -1,7 +1,7 @@
 """Backtest job orchestration: create/dedup, run (worker), and query.
 
 Reuses the shared :mod:`app.market_signal` rule core via ``backtest_engine.run_backtest``
-and the same qfq daily-bar cache (``daily_market_snapshots``) the live engine
+and the same unadjusted daily-bar cache (``daily_market_snapshots``) the live engine
 writes to (design.md 关键点2/4).
 """
 
@@ -53,6 +53,9 @@ logger = logging.getLogger(__name__)
 _EARLIEST_START = date(2000, 1, 1)
 
 _INFLIGHT_STATUSES = ("PENDING", "RUNNING")
+
+# Extra rows fetched before sanitize so a few dirty OHLC bars don't shorten a page.
+_KLINE_LIMIT_OVERFETCH = 20
 
 _BACKTEST_PARAM_KEYS = (
     "n",
@@ -356,27 +359,150 @@ def list_jobs_by_compare_group(compare_group_id: str) -> list[dict]:
         return [_job_to_dict(row) for row in rows]
 
 
-def get_kline_data(job_id: int) -> dict:
+def _iso_date(value: date | str | None) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, date):
+        return value.isoformat()
+    return value
+
+
+def _calendar_buffer_start(end: date, bar_count: int) -> date:
+    """Calendar lookback covering roughly ``bar_count`` trading days."""
+    return end - timedelta(days=bar_count * 3 + 30)
+
+
+def _kline_fetch_window(
+    job_start: str,
+    job_end: str,
+    *,
+    start_iso: str | None,
+    end_iso: str | None,
+    before_iso: str | None,
+    after_iso: str | None,
+    limit: int | None,
+) -> tuple[date, date]:
+    """Date window to backfill before serving one kline page."""
+    job_s = date.fromisoformat(job_start)
+    job_e = date.fromisoformat(job_end)
+    if start_iso is not None or end_iso is not None:
+        win_s = date.fromisoformat(start_iso) if start_iso else job_s
+        win_e = date.fromisoformat(end_iso) if end_iso else job_e
+    elif before_iso is not None and limit is not None:
+        win_e = date.fromisoformat(before_iso) - timedelta(days=1)
+        win_s = _calendar_buffer_start(win_e, limit)
+    elif after_iso is not None and limit is not None:
+        win_s = date.fromisoformat(after_iso) + timedelta(days=1)
+        win_e = win_s + timedelta(days=limit * 3 + 30)
+    elif limit is not None:
+        win_e = job_e
+        win_s = _calendar_buffer_start(win_e, limit)
+    else:
+        win_s, win_e = job_s, job_e
+    return max(win_s, job_s), min(win_e, job_e)
+
+
+def _backfill_kline_window(stock_code: str, start: date, end: date, job_id: int) -> None:
+    if start > end:
+        return
+    try:
+        _ensure_snapshot_range(stock_code, start, end)
+    except (MarketDataUnavailableError, StockDataFetchError, BacktestDataError) as exc:
+        logger.warning(
+            "kline backfill failed job=%s stock=%s range=%s..%s: %s",
+            job_id,
+            stock_code,
+            start.isoformat(),
+            end.isoformat(),
+            exc,
+        )
+
+
+def get_kline_data(
+    job_id: int,
+    *,
+    start: date | str | None = None,
+    end: date | str | None = None,
+    before: date | str | None = None,
+    after: date | str | None = None,
+    limit: int | None = None,
+    include_trades: bool = True,
+) -> dict:
+    if before is not None and after is not None:
+        raise ValueError("provide either before or after, not both")
+    if limit is not None and limit < 1:
+        raise ValueError("limit must be >= 1")
+
+    start_iso = _iso_date(start)
+    end_iso = _iso_date(end)
+    before_iso = _iso_date(before)
+    after_iso = _iso_date(after)
+
     with get_db() as session:
         job = session.get(BacktestJob, job_id)
         if job is None:
             raise BacktestJobNotFoundError(f"backtest job not found: {job_id}")
+        stock_code = job.stock_code
+        job_start = job.start_date
+        job_end = job.end_date
+        job_payload = _job_to_dict(job)
 
-        bar_rows = session.execute(
-            select(DailyMarketSnapshot)
-            .where(
-                DailyMarketSnapshot.stock_code == job.stock_code,
-                DailyMarketSnapshot.trade_date >= job.start_date,
-                DailyMarketSnapshot.trade_date <= job.end_date,
+    fetch_start, fetch_end = _kline_fetch_window(
+        job_start,
+        job_end,
+        start_iso=start_iso,
+        end_iso=end_iso,
+        before_iso=before_iso,
+        after_iso=after_iso,
+        limit=limit,
+    )
+    _backfill_kline_window(stock_code, fetch_start, fetch_end, job_id)
+
+    with get_db() as session:
+        win_start = job_start
+        win_end = job_end
+        if start_iso is not None:
+            win_start = max(win_start, start_iso)
+        if end_iso is not None:
+            win_end = min(win_end, end_iso)
+
+        conds = [
+            DailyMarketSnapshot.stock_code == stock_code,
+            DailyMarketSnapshot.trade_date >= win_start,
+            DailyMarketSnapshot.trade_date <= win_end,
+        ]
+        if before_iso is not None:
+            conds.append(DailyMarketSnapshot.trade_date < before_iso)
+        if after_iso is not None:
+            conds.append(DailyMarketSnapshot.trade_date > after_iso)
+
+        # Tail pages (init / before / limit-only) take the newest N; after takes
+        # the oldest N so the chart can append newer bars on the right.
+        take_head = after_iso is not None
+        stmt = select(DailyMarketSnapshot).where(*conds)
+        if limit is not None:
+            fetch_n = limit + _KLINE_LIMIT_OVERFETCH
+            if take_head:
+                stmt = stmt.order_by(DailyMarketSnapshot.trade_date.asc()).limit(fetch_n)
+                bar_rows = list(session.execute(stmt).scalars().all())
+            else:
+                stmt = stmt.order_by(DailyMarketSnapshot.trade_date.desc()).limit(fetch_n)
+                bar_rows = list(reversed(session.execute(stmt).scalars().all()))
+        else:
+            stmt = stmt.order_by(DailyMarketSnapshot.trade_date.asc())
+            bar_rows = list(session.execute(stmt).scalars().all())
+
+        trade_rows = []
+        if include_trades:
+            trade_rows = (
+                session.execute(
+                    select(BacktestTrade)
+                    .where(BacktestTrade.job_id == job_id)
+                    .order_by(BacktestTrade.entry_date)
+                )
+                .scalars()
+                .all()
             )
-            .order_by(DailyMarketSnapshot.trade_date)
-        ).scalars().all()
-
-        trade_rows = session.execute(
-            select(BacktestTrade)
-            .where(BacktestTrade.job_id == job_id)
-            .order_by(BacktestTrade.entry_date)
-        ).scalars().all()
 
         # Mirror run_backtest's sanitize_bars_for_backtest so the chart never
         # shows a candle excluded from the simulation (negative qfq or
@@ -393,9 +519,30 @@ def get_kline_data(job_id: int) -> dict:
             for row in bar_rows
         ]
         cleaned = sanitize_bars_for_backtest(raw_bars)
+        if limit is not None:
+            cleaned = cleaned[:limit] if take_head else cleaned[-limit:]
+
+        is_full_dump = (
+            limit is None
+            and before_iso is None
+            and after_iso is None
+            and win_start == job_start
+            and win_end == job_end
+        )
+        if is_full_dump or not cleaned:
+            has_more_before = False
+            has_more_after = False
+        else:
+            has_more_before = cleaned[0]["date"] > job_start
+            has_more_after = cleaned[-1]["date"] < job_end
+            if limit is not None and len(cleaned) < limit:
+                if take_head:
+                    has_more_after = False
+                else:
+                    has_more_before = False
 
         return {
-            "job": _job_to_dict(job),
+            "job": job_payload,
             "bars": [
                 {
                     "trade_date": bar["date"],
@@ -403,7 +550,7 @@ def get_kline_data(job_id: int) -> dict:
                     "high_price": bar["high"],
                     "low_price": bar["low"],
                     "close_price": bar["close"],
-                    "volume": bar.get("volume"),
+                    "volume": bar.get("volume") if bar.get("volume") is not None else 0.0,
                 }
                 for bar in cleaned
             ],
@@ -421,6 +568,8 @@ def get_kline_data(job_id: int) -> dict:
                 }
                 for row in trade_rows
             ],
+            "has_more_before": has_more_before,
+            "has_more_after": has_more_after,
         }
 
 

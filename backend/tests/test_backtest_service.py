@@ -4,7 +4,7 @@ from datetime import date
 from app.config import settings
 from app.db.connection import get_db
 from app.db.init_db import init_db
-from app.db.models import BacktestJob, DailyMarketSnapshot, Watchlist
+from app.db.models import BacktestJob, BacktestTrade, DailyMarketSnapshot, Watchlist
 from app.schemas.strategy import DEFAULT_TRAILING_LADDER
 from app.services.backtest_service import (
     BacktestApplyError,
@@ -128,6 +128,205 @@ def test_get_kline_data_drops_unsanitary_ohlc_bars(tmp_path, monkeypatch) -> Non
         "2000-01-11",
     ]
     assert all(bar["open_price"] > 0 for bar in result["bars"])
+    assert result["has_more_before"] is False
+    assert result["has_more_after"] is False
+
+
+def _valid_snapshot(stock_code: str, trade_date: str, close: float = 10.0) -> DailyMarketSnapshot:
+    return DailyMarketSnapshot(
+        stock_code=stock_code,
+        trade_date=trade_date,
+        open_price=close,
+        high_price=close + 0.2,
+        low_price=close - 0.2,
+        close_price=close,
+        volume=100.0,
+    )
+
+
+def _seed_kline_window_job(session, *, stock_code: str = "sh600036") -> int:
+    dates = [f"2024-01-{day:02d}" for day in range(1, 11)]
+    job_id = _seed_job(
+        session,
+        stock_code=stock_code,
+        start_date="2024-01-01",
+        end_date="2024-01-10",
+    )
+    session.add_all([_valid_snapshot(stock_code, d) for d in dates])
+    session.add(
+        BacktestTrade(
+            job_id=job_id,
+            entry_date="2024-01-02",
+            entry_price=10.0,
+            exit_date="2024-01-05",
+            exit_price=11.0,
+            hold_days=3,
+            pnl_pct=0.1,
+            pnl_amount=100.0,
+            exit_reason="TAKE_PROFIT",
+        )
+    )
+    session.commit()
+    return job_id
+
+
+def test_get_kline_data_limit_returns_tail_page(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(settings, "sqlite_path", str(tmp_path / "amtsm.db"))
+    init_db()
+    with get_db() as session:
+        job_id = _seed_kline_window_job(session)
+
+    result = get_kline_data(job_id, limit=3)
+    assert [bar["trade_date"] for bar in result["bars"]] == [
+        "2024-01-08",
+        "2024-01-09",
+        "2024-01-10",
+    ]
+    assert result["has_more_before"] is True
+    assert result["has_more_after"] is False
+    assert len(result["trades"]) == 1
+
+
+def test_get_kline_data_before_and_after_pages_do_not_overlap(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(settings, "sqlite_path", str(tmp_path / "amtsm.db"))
+    init_db()
+    with get_db() as session:
+        job_id = _seed_kline_window_job(session)
+
+    older = get_kline_data(job_id, before="2024-01-08", limit=3)
+    newer = get_kline_data(job_id, after="2024-01-07", limit=3)
+    older_dates = [bar["trade_date"] for bar in older["bars"]]
+    newer_dates = [bar["trade_date"] for bar in newer["bars"]]
+    assert older_dates == ["2024-01-05", "2024-01-06", "2024-01-07"]
+    assert newer_dates == ["2024-01-08", "2024-01-09", "2024-01-10"]
+    assert set(older_dates).isdisjoint(newer_dates)
+    assert older["has_more_before"] is True
+    assert older["has_more_after"] is True
+    assert newer["has_more_before"] is True
+    assert newer["has_more_after"] is False
+
+
+def test_get_kline_data_clamps_start_end_to_job_range(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(settings, "sqlite_path", str(tmp_path / "amtsm.db"))
+    init_db()
+    with get_db() as session:
+        job_id = _seed_kline_window_job(session)
+
+    result = get_kline_data(
+        job_id,
+        start=date(2023, 12, 1),
+        end=date(2024, 12, 31),
+    )
+    dates = [bar["trade_date"] for bar in result["bars"]]
+    assert dates[0] == "2024-01-01"
+    assert dates[-1] == "2024-01-10"
+    assert result["has_more_before"] is False
+    assert result["has_more_after"] is False
+
+    inner = get_kline_data(job_id, start="2024-01-04", end="2024-01-06")
+    assert [bar["trade_date"] for bar in inner["bars"]] == [
+        "2024-01-04",
+        "2024-01-05",
+        "2024-01-06",
+    ]
+    assert inner["has_more_before"] is True
+    assert inner["has_more_after"] is True
+
+
+def test_get_kline_data_include_trades_false(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(settings, "sqlite_path", str(tmp_path / "amtsm.db"))
+    init_db()
+    with get_db() as session:
+        job_id = _seed_kline_window_job(session)
+
+    result = get_kline_data(job_id, limit=2, include_trades=False)
+    assert result["trades"] == []
+    assert [bar["trade_date"] for bar in result["bars"]] == ["2024-01-09", "2024-01-10"]
+
+
+def test_get_kline_data_backfills_empty_snapshot_cache(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(settings, "sqlite_path", str(tmp_path / "amtsm.db"))
+    init_db()
+    with get_db() as session:
+        job_id = _seed_job(
+            session,
+            stock_code="sh600900",
+            start_date="2000-01-01",
+            end_date="2024-01-10",
+        )
+        session.add(
+            BacktestTrade(
+                job_id=job_id,
+                entry_date="2024-01-02",
+                entry_price=10.0,
+                exit_date="2024-01-05",
+                exit_price=11.0,
+                hold_days=3,
+                pnl_pct=0.1,
+                pnl_amount=100.0,
+                exit_reason="TAKE_PROFIT",
+            )
+        )
+        session.commit()
+
+    def fake_ensure(stock_code: str, start: date, end: date) -> None:
+        with get_db() as session:
+            session.add_all(
+                [
+                    _valid_snapshot(stock_code, "2024-01-08"),
+                    _valid_snapshot(stock_code, "2024-01-09"),
+                    _valid_snapshot(stock_code, "2024-01-10"),
+                ]
+            )
+            session.commit()
+
+    monkeypatch.setattr(
+        "app.services.backtest_service._ensure_snapshot_range", fake_ensure
+    )
+    result = get_kline_data(job_id, limit=3)
+    assert [bar["trade_date"] for bar in result["bars"]] == [
+        "2024-01-08",
+        "2024-01-09",
+        "2024-01-10",
+    ]
+    assert len(result["trades"]) == 1
+    assert result["has_more_before"] is True
+    assert result["has_more_after"] is False
+
+
+def test_get_kline_data_has_more_before_without_older_cached_rows(tmp_path, monkeypatch) -> None:
+    """A full tail page that does not reach job.start_date can still page left,
+    even before older snapshots have been backfilled."""
+    monkeypatch.setattr(settings, "sqlite_path", str(tmp_path / "amtsm.db"))
+    init_db()
+    with get_db() as session:
+        job_id = _seed_job(
+            session,
+            stock_code="sh600900",
+            start_date="2000-01-01",
+            end_date="2024-01-10",
+        )
+        session.add_all(
+            [
+                _valid_snapshot("sh600900", "2024-01-08"),
+                _valid_snapshot("sh600900", "2024-01-09"),
+                _valid_snapshot("sh600900", "2024-01-10"),
+            ]
+        )
+        session.commit()
+
+    monkeypatch.setattr(
+        "app.services.backtest_service._ensure_snapshot_range",
+        lambda *args, **kwargs: None,
+    )
+    result = get_kline_data(job_id, limit=3)
+    assert [bar["trade_date"] for bar in result["bars"]] == [
+        "2024-01-08",
+        "2024-01-09",
+        "2024-01-10",
+    ]
+    assert result["has_more_before"] is True
+    assert result["has_more_after"] is False
 
 
 def test_load_bars_includes_volume(tmp_path, monkeypatch) -> None:

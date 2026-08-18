@@ -1,6 +1,6 @@
 """Unit tests for daily-bar holding replay adapter."""
 
-from app.schemas.strategy import parse_trailing_ladder
+from app.schemas.strategy import LEGACY_TRAILING_LADDER, parse_trailing_ladder
 from app.market_signal.replay import evaluate_bar_holding
 from app.market_signal.risk import RiskParams
 from app.market_signal.types import SIGNAL_STOP_LOSS, SIGNAL_TAKE_PROFIT
@@ -11,7 +11,7 @@ def _params(**overrides) -> RiskParams:
         stop_loss_pct=0.08,
         break_even_trigger_pct=0.10,
         break_even_buffer_pct=0.005,
-        trailing_ladder=parse_trailing_ladder(None),
+        trailing_ladder=parse_trailing_ladder(LEGACY_TRAILING_LADDER),
         enable_partial_take_profit=False,
     )
     base.update(overrides)

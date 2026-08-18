@@ -40,7 +40,7 @@ class StrategyParams:
     x: float = 1.0  # 买入系数：买入阈值 = N 日低点 * x（如 1.1 表示低点上浮 10%）
     y: float = 1.0  # 卖出系数：卖出阈值 = N 日高点 * y（如 0.9 表示高点下浮 10%）
     volume_lookback: int = 7  # 量能确认回看交易日数（不含当日）
-    buy_volume_increase_pct: float = 0.30  # 买入：当日量相对均量至少放量该比例
+    buy_volume_increase_pct: float = 0.0  # 买入放量门槛；<=0 表示不做量能确认
     sell_volume_change_pct: float = 0.30  # 卖出：当日量相对均量的绝对变化至少该比例
 
 
