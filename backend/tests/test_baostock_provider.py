@@ -140,6 +140,21 @@ def test_fetch_daily_ohlcv_skips_incomplete_rows() -> None:
     assert bars[0]["turnover_rate"] is None
 
 
+def test_fetch_daily_ohlcv_skips_invalid_ohlc_not_bad_turnover() -> None:
+    client = _FakeBaostock()
+    client.k_result = _daily_result(
+        rows=[
+            ["2024-01-02", "oops", "11.0", "9.5", "10.5", "1000", "1.0"],
+            ["2024-01-03", "10.0", "11.0", "9.5", "10.5", "1000", "oops-turn"],
+        ]
+    )
+    provider = BaostockMarketDataProvider(client=client)
+    bars = provider.fetch_daily_ohlcv("600519", date(2024, 1, 2), date(2024, 1, 3))
+    assert [bar["date"] for bar in bars] == ["2024-01-03"]
+    assert bars[0]["open"] == 10.0
+    assert bars[0]["turnover_rate"] is None
+
+
 def test_fetch_realtime_quotes_not_implemented() -> None:
     provider = BaostockMarketDataProvider(client=_FakeBaostock())
     with pytest.raises(NotImplementedError, match="realtime"):

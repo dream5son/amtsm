@@ -367,6 +367,26 @@ def test_parse_halted_quote_has_quote_flag() -> None:
     data = _parse_sina_realtime_quotes(raw, ["sh600000"])
     assert data["sh600000"]["has_quote"] is True
     assert data["sh600000"]["is_halted"] is True
+    assert data["sh600000"]["price"] == 0.0
+
+
+def test_parse_unparseable_price_is_not_halt() -> None:
+    """Conversion failure must not be treated as a halted quote (price is None)."""
+    raw = (
+        'var hq_str_sh600000="浦发银行,100.00,99.00,abc,102.00,98.00,0,0,100,1000,'
+        '0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2026-08-05,10:05:01,00";\n'
+    )
+    data = _parse_sina_realtime_quotes(raw, ["sh600000"])
+    assert data["sh600000"]["has_quote"] is True
+    assert data["sh600000"]["price"] is None
+    assert data["sh600000"]["is_halted"] is False
+    raw = (
+        'var hq_str_sh600000="浦发银行,0.00,10.00,0.00,0.00,0.00,0.00,0.00,0,0,'
+        '0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2026-08-05,10:05:01,00";\n'
+    )
+    data = _parse_sina_realtime_quotes(raw, ["sh600000"])
+    assert data["sh600000"]["has_quote"] is True
+    assert data["sh600000"]["is_halted"] is True
 
 
 def test_system_status_endpoint() -> None:

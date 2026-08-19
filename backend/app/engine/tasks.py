@@ -26,14 +26,8 @@ from app.engine.resilience import (
     record_poll_round_success,
 )
 from app.engine.state import runtime_state
-from app.services.alert_service import (
-    is_limit_up,
-    process_buy_candidates,
-    process_risk_candidates,
-    process_sell_candidates,
-)
-from app.services.strategy_service import resolve_params
 from app.market_signal import (
+    DEFAULT_VOLUME_LOOKBACK,
     SIGNAL_ADDON,
     SIGNAL_BUY,
     SIGNAL_PARTIAL_TP,
@@ -41,7 +35,6 @@ from app.market_signal import (
     SIGNAL_STOP_LOSS,
     SIGNAL_TAKE_PROFIT,
     BaselineWindow,
-    DEFAULT_VOLUME_LOOKBACK,
     InsufficientDataError,
     SignalRequest,
     StaticBaselineFeed,
@@ -53,6 +46,13 @@ from app.market_signal import (
     get_market_signal_strategy,
     risk_params_from_resolved,
 )
+from app.services.alert_service import (
+    is_limit_up,
+    process_buy_candidates,
+    process_risk_candidates,
+    process_sell_candidates,
+)
+from app.services.market_data.numbers import coerce_optional_float, parse_float
 from app.services.market_data_service import (
     MarketDataUnavailableError,
     MissingTradeDayBarError,
@@ -62,6 +62,7 @@ from app.services.market_data_service import (
     fetch_realtime_quotes_batch,
     fetch_trade_day_bar,
 )
+from app.services.strategy_service import resolve_params
 from app.services.watchlist_service import (
     restore_halted_to_normal,
     update_watchlist_status,
@@ -317,30 +318,25 @@ def _upsert_snapshot_from_quote(stock_code: str, trade_date: str, quote: dict) -
         has_quote = bool(quote["has_quote"])
     else:
         has_quote = price is not None
-    if not has_quote or price is None or float(price) <= 0:
+    try:
+        close_price = parse_float(price)
+    except (TypeError, ValueError):
+        return False
+    if not has_quote or close_price <= 0:
         return False
 
-    close_price = float(price)
-    open_raw = quote.get("open")
-    open_price = (
-        float(open_raw)
-        if open_raw is not None and float(open_raw) > 0
-        else close_price
-    )
-    high_raw = quote.get("high")
-    high_price = (
-        float(high_raw)
-        if high_raw is not None and float(high_raw) > 0
-        else max(open_price, close_price)
-    )
-    low_raw = quote.get("low")
-    low_price = (
-        float(low_raw)
-        if low_raw is not None and float(low_raw) > 0
-        else min(open_price, close_price)
-    )
-    volume_raw = quote.get("volume")
-    volume = float(volume_raw) if volume_raw is not None else 0.0
+    open_price = coerce_optional_float(quote.get("open"))
+    if open_price is None or open_price <= 0:
+        open_price = close_price
+    high_price = coerce_optional_float(quote.get("high"))
+    if high_price is None or high_price <= 0:
+        high_price = max(open_price, close_price)
+    low_price = coerce_optional_float(quote.get("low"))
+    if low_price is None or low_price <= 0:
+        low_price = min(open_price, close_price)
+    volume = coerce_optional_float(quote.get("volume"))
+    if volume is None:
+        volume = 0.0
 
     upsert_snapshot(
         stock_code=stock_code,

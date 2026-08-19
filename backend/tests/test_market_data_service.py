@@ -90,6 +90,35 @@ def _fetch(provider: AkshareMarketDataProvider, code: str = "600519"):
     return provider.fetch_daily_ohlcv(code, date(2024, 1, 1), date(2024, 1, 3))
 
 
+def test_normalize_em_skips_nan_ohlc_and_coerces_bad_turnover() -> None:
+    df = pd.DataFrame(
+        [
+            {
+                "日期": "2024-01-02",
+                "开盘": float("nan"),
+                "最高": 11.0,
+                "最低": 9.5,
+                "收盘": 10.5,
+                "成交量": 100000,
+                "换手率": 3.14,
+            },
+            {
+                "日期": "2024-01-03",
+                "开盘": 10.0,
+                "最高": 11.0,
+                "最低": 9.5,
+                "收盘": 10.5,
+                "成交量": 100000,
+                "换手率": "garbage",
+            },
+        ]
+    )
+    bars = _normalize_df_em(df)
+    assert [bar["date"] for bar in bars] == ["2024-01-03"]
+    assert bars[0]["close"] == 10.5
+    assert bars[0]["turnover_rate"] is None
+
+
 def test_akshare_provider_uses_first_source() -> None:
     mock_em = MagicMock(return_value=_make_em_df())
     provider = AkshareMarketDataProvider(
@@ -101,6 +130,34 @@ def test_akshare_provider_uses_first_source() -> None:
     assert bars[0]["close"] == 10.5
     assert bars[0]["turnover_rate"] == pytest.approx(3.14)
     mock_em.assert_called_once()
+
+
+def test_akshare_unusable_rows_fail_over_to_next_source() -> None:
+    nan_df = pd.DataFrame(
+        [
+            {
+                "日期": "2024-01-02",
+                "开盘": float("nan"),
+                "最高": float("nan"),
+                "最低": float("nan"),
+                "收盘": float("nan"),
+                "成交量": float("nan"),
+            }
+        ]
+    )
+    mock_em = MagicMock(return_value=nan_df)
+    mock_tx = MagicMock(return_value=_make_tx_df())
+    provider = AkshareMarketDataProvider(
+        sources=[
+            ("eastmoney", mock_em, _AKSHARE_SOURCES[0][2], _AKSHARE_SOURCES[0][3]),
+            ("tencent", mock_tx, _AKSHARE_SOURCES[1][2], _AKSHARE_SOURCES[1][3]),
+        ]
+    )
+    bars = _fetch(provider)
+    assert len(bars) == 1
+    assert bars[0]["close"] == 10.5
+    mock_tx.assert_called_once()
+    assert "eastmoney" in provider._source_failure_time
 
 
 def test_akshare_provider_falls_back_to_next_source() -> None:
