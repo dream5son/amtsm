@@ -3,6 +3,7 @@ from datetime import datetime
 from typing import Any
 
 from apscheduler.events import EVENT_JOB_ERROR, JobExecutionEvent
+from apscheduler.jobstores.base import JobLookupError
 from apscheduler.schedulers.background import BackgroundScheduler
 
 from app.config import settings
@@ -197,3 +198,17 @@ def enqueue_snapshot_bootstrap(stock_code: str) -> None:
         id=f"snapshot_bootstrap_{stock_code}",
         replace_existing=True,
     )
+
+
+def cancel_snapshot_bootstrap(stock_code: str) -> None:
+    """Drop a pending snapshot bootstrap job after a watchlist removal.
+
+    No-op when the scheduler is absent or the job is already gone.
+    """
+    scheduler = get_scheduler()
+    if scheduler is None:
+        return
+    try:
+        scheduler.remove_job(f"snapshot_bootstrap_{stock_code}")
+    except JobLookupError:
+        return

@@ -13,7 +13,7 @@ from app.engine.tasks import (
     market_polling_task,
 )
 from app.schemas.watchlist import WatchlistCreate
-from app.services.watchlist_service import add_watchlist
+from app.services.watchlist_service import add_watchlist, remove_watchlist
 
 
 def _seed_volume_history(session, stock_code: str, before: str, *, n: int = 7, volume: float = 1000.0) -> None:
@@ -333,6 +333,67 @@ def test_market_polling_writes_throttled_intraday_snapshot(tmp_path, monkeypatch
     snap = get_snapshot("sh600519", "2026-08-05")
     assert snap["close_price"] == 120.0
     assert snap["volume"] == 1600.0
+
+
+def test_market_polling_skips_removed_watchlist_stock(tmp_path, monkeypatch) -> None:
+    sqlite_path = tmp_path / "amtsm.db"
+    monkeypatch.setattr(settings, "sqlite_path", str(sqlite_path))
+    monkeypatch.setattr(settings, "polling_batch_size", 50)
+    monkeypatch.setattr(settings, "polling_request_retries", 0)
+
+    init_db()
+    runtime_state.reset_daily()
+    add_watchlist(WatchlistCreate(stock_code="600519", stock_name="贵州茅台"))
+    add_watchlist(WatchlistCreate(stock_code="000001", stock_name="平安银行"))
+
+    with get_db() as session:
+        for code in ("sh600519", "sz000001"):
+            session.add(
+                DailyBaseline(
+                    stock_code=code,
+                    trade_date="2026-08-05",
+                    low_min=100.0,
+                    high_max=130.0,
+                    actual_n=60,
+                )
+            )
+        session.commit()
+
+    fake_now = datetime(2026, 8, 5, 10, 0, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+    monkeypatch.setattr("app.engine.tasks.datetime", _FrozenDateTime(fake_now))
+
+    requested: list[list[str]] = []
+
+    def _capture_codes(codes, **kwargs):
+        requested.append(list(codes))
+        return {
+            code: {
+                "stock_name": code,
+                "price": 110.0,
+                "open": 109.0,
+                "prev_close": 108.0,
+                "high": 111.0,
+                "low": 108.0,
+                "volume": 1000.0,
+                "quote_date": "2026-08-05",
+                "quote_time": "10:00:00",
+                "is_halted": False,
+                "has_quote": True,
+            }
+            for code in codes
+        }
+
+    monkeypatch.setattr("app.engine.tasks.fetch_realtime_quotes_batch", _capture_codes)
+    monkeypatch.setattr("app.engine.tasks.process_buy_candidates", lambda candidates: [])
+    monkeypatch.setattr("app.engine.tasks.process_sell_candidates", lambda candidates: [])
+    monkeypatch.setattr("app.engine.tasks.process_risk_candidates", lambda candidates: [])
+
+    remove_watchlist("sh600519")
+    market_polling_task()
+
+    fetched = [code for batch in requested for code in batch]
+    assert "sh600519" not in fetched
+    assert "sz000001" in fetched
 
 
 class _FrozenDateTime:

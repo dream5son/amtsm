@@ -70,6 +70,7 @@ def test_first_buy_same_day_allowed(tmp_path, monkeypatch) -> None:
     sqlite_path = tmp_path / "amtsm.db"
     monkeypatch.setattr(settings, "sqlite_path", str(sqlite_path))
     monkeypatch.setattr(settings, "alert_send_max_retries", 0)
+    monkeypatch.setattr(settings, "notify_channels", "wechat")
     monkeypatch.setattr(
         "app.services.alert_service.is_alert_window_open",
         lambda **_kwargs: True,
@@ -91,6 +92,7 @@ def test_second_buy_same_day_blocked(tmp_path, monkeypatch) -> None:
     sqlite_path = tmp_path / "amtsm.db"
     monkeypatch.setattr(settings, "sqlite_path", str(sqlite_path))
     monkeypatch.setattr(settings, "alert_send_max_retries", 0)
+    monkeypatch.setattr(settings, "notify_channels", "wechat")
     monkeypatch.setattr(
         "app.services.alert_service.is_alert_window_open",
         lambda **_kwargs: True,
@@ -117,6 +119,7 @@ def test_second_buy_blocked_via_db_after_memory_clear(tmp_path, monkeypatch) -> 
     sqlite_path = tmp_path / "amtsm.db"
     monkeypatch.setattr(settings, "sqlite_path", str(sqlite_path))
     monkeypatch.setattr(settings, "alert_send_max_retries", 0)
+    monkeypatch.setattr(settings, "notify_channels", "wechat")
     monkeypatch.setattr(
         "app.services.alert_service.is_alert_window_open",
         lambda **_kwargs: True,
@@ -165,6 +168,7 @@ def test_unique_constraint_race_only_one_sends(tmp_path, monkeypatch, caplog) ->
     sqlite_path = tmp_path / "amtsm.db"
     monkeypatch.setattr(settings, "sqlite_path", str(sqlite_path))
     monkeypatch.setattr(settings, "alert_send_max_retries", 0)
+    monkeypatch.setattr(settings, "notify_channels", "wechat")
     monkeypatch.setattr(
         "app.services.alert_service.is_alert_window_open",
         lambda **_kwargs: True,
@@ -218,6 +222,7 @@ def test_buy_and_sell_independent_freq_keys(tmp_path, monkeypatch) -> None:
     sqlite_path = tmp_path / "amtsm.db"
     monkeypatch.setattr(settings, "sqlite_path", str(sqlite_path))
     monkeypatch.setattr(settings, "alert_send_max_retries", 0)
+    monkeypatch.setattr(settings, "notify_channels", "wechat")
     monkeypatch.setattr(
         "app.services.alert_service.is_alert_window_open",
         lambda **_kwargs: True,
@@ -242,3 +247,121 @@ def test_buy_and_sell_independent_freq_keys(tmp_path, monkeypatch) -> None:
     assert mock_send.call_count == 2
     assert ("sh600519", "2026-08-05", "BUY") in runtime_state.sent_signal_keys
     assert ("sh600519", "2026-08-05", "SELL") in runtime_state.sent_signal_keys
+
+
+def _patch_alert_window(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "notify_channels", "wechat")
+    monkeypatch.setattr(
+        "app.services.alert_service.is_alert_window_open",
+        lambda **_kwargs: True,
+    )
+
+
+def test_daily_cap_blocks_second_signal_same_stock(
+    tmp_path, monkeypatch, caplog
+) -> None:
+    """Given max=1 and BUY already sent, when SELL fires, Then skip send and log."""
+    sqlite_path = tmp_path / "amtsm.db"
+    monkeypatch.setattr(settings, "sqlite_path", str(sqlite_path))
+    monkeypatch.setattr(settings, "alert_send_max_retries", 0)
+    monkeypatch.setattr(settings, "alert_max_per_stock_per_day", 1)
+    _patch_alert_window(monkeypatch)
+    init_db()
+    runtime_state.reset_daily()
+
+    mock_send = MagicMock(return_value=_ok_send())
+    monkeypatch.setattr(alert_service.wechat_notifier, "send_text", mock_send)
+
+    buy = process_buy_alert(_candidate())
+    assert buy.outcome == AlertOutcome.SENT
+    assert mock_send.call_count == 1
+
+    caplog.set_level(logging.INFO, logger="app.services.alert_service")
+    sell = process_sell_alert(
+        _candidate(
+            signal_type="SELL",
+            price=117.0,
+            baseline_price=130.0,
+            used_coeff=0.90,
+        )
+    )
+    assert sell.outcome == AlertOutcome.SKIPPED_DAILY_CAP
+    assert mock_send.call_count == 1
+    assert ("sh600519", "2026-08-05") in runtime_state.daily_cap_reached
+    assert any(
+        "daily cap reached" in rec.message
+        and "stock=sh600519" in rec.message
+        and "date=2026-08-05" in rec.message
+        and "count=1" in rec.message
+        and "max=1" in rec.message
+        for rec in caplog.records
+    )
+
+    with get_db() as session:
+        count = session.query(AlertLog).count()
+        row = session.query(AlertLog).one()
+    assert count == 1
+    assert row.signal_type == "BUY"
+
+    caplog.clear()
+    sell_again = process_sell_alert(
+        _candidate(
+            signal_type="SELL",
+            price=117.0,
+            baseline_price=130.0,
+            used_coeff=0.90,
+        )
+    )
+    assert sell_again.outcome == AlertOutcome.SKIPPED_DAILY_CAP
+    assert mock_send.call_count == 1
+    assert not any("daily cap reached" in rec.message for rec in caplog.records)
+
+
+def test_daily_cap_is_per_stock(tmp_path, monkeypatch) -> None:
+    """Given max=1, when two stocks each fire BUY, Then both may send."""
+    sqlite_path = tmp_path / "amtsm.db"
+    monkeypatch.setattr(settings, "sqlite_path", str(sqlite_path))
+    monkeypatch.setattr(settings, "alert_send_max_retries", 0)
+    monkeypatch.setattr(settings, "alert_max_per_stock_per_day", 1)
+    _patch_alert_window(monkeypatch)
+    init_db()
+    runtime_state.reset_daily()
+
+    mock_send = MagicMock(return_value=_ok_send())
+    monkeypatch.setattr(alert_service.wechat_notifier, "send_text", mock_send)
+
+    first = process_buy_alert(_candidate())
+    second = process_buy_alert(
+        _candidate(stock_code="sz000001", stock_name="平安银行")
+    )
+    assert first.outcome == AlertOutcome.SENT
+    assert second.outcome == AlertOutcome.SENT
+    assert mock_send.call_count == 2
+
+
+def test_daily_cap_zero_is_unlimited(tmp_path, monkeypatch) -> None:
+    """Given max=0, when BUY then SELL fire, Then both send."""
+    sqlite_path = tmp_path / "amtsm.db"
+    monkeypatch.setattr(settings, "sqlite_path", str(sqlite_path))
+    monkeypatch.setattr(settings, "alert_send_max_retries", 0)
+    monkeypatch.setattr(settings, "alert_max_per_stock_per_day", 0)
+    _patch_alert_window(monkeypatch)
+    init_db()
+    runtime_state.reset_daily()
+
+    mock_send = MagicMock(return_value=_ok_send())
+    monkeypatch.setattr(alert_service.wechat_notifier, "send_text", mock_send)
+
+    buy = process_buy_alert(_candidate())
+    sell = process_sell_alert(
+        _candidate(
+            signal_type="SELL",
+            price=117.0,
+            baseline_price=130.0,
+            used_coeff=0.90,
+        )
+    )
+    assert buy.outcome == AlertOutcome.SENT
+    assert sell.outcome == AlertOutcome.SENT
+    assert mock_send.call_count == 2
+    assert not runtime_state.daily_cap_reached

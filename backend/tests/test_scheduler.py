@@ -2,7 +2,12 @@ from apscheduler.events import EVENT_JOB_ERROR
 from apscheduler.triggers.date import DateTrigger
 
 from app.config import settings
-from app.engine.scheduler import _on_job_error, create_scheduler, list_activity_jobs
+from app.engine.scheduler import (
+    _on_job_error,
+    cancel_snapshot_bootstrap,
+    create_scheduler,
+    list_activity_jobs,
+)
 
 
 def test_scheduler_contains_market_polling_job() -> None:
@@ -76,3 +81,23 @@ def test_list_activity_jobs_includes_pending_bootstrap() -> None:
     )
     views = {item["id"]: item for item in list_activity_jobs()}
     assert views["snapshot_bootstrap"]["pending"] == ["sh600519"]
+
+
+def test_cancel_snapshot_bootstrap_removes_pending_job() -> None:
+    scheduler = create_scheduler()
+    scheduler.add_job(
+        lambda: None,
+        id="snapshot_bootstrap_sh600519",
+        replace_existing=True,
+    )
+    cancel_snapshot_bootstrap("sh600519")
+    views = {item["id"]: item for item in list_activity_jobs()}
+    assert views["snapshot_bootstrap"]["pending"] == []
+    assert scheduler.get_job("snapshot_bootstrap_sh600519") is None
+
+
+def test_cancel_snapshot_bootstrap_missing_job_is_noop() -> None:
+    create_scheduler()
+    cancel_snapshot_bootstrap("sh600519")
+    views = {item["id"]: item for item in list_activity_jobs()}
+    assert views["snapshot_bootstrap"]["pending"] == []

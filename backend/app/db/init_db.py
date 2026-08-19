@@ -21,7 +21,7 @@ from app.schemas.strategy import (
 logger = logging.getLogger(__name__)
 
 _PRICE_ADJUST_META_KEY = "price_adjust"
-_PRICE_ADJUST_UNADJUSTED = "none"
+_PRICE_ADJUST_QFQ = "qfq"
 
 
 def _existing_columns(table_name: str) -> set[str]:
@@ -202,8 +202,8 @@ def _migrate_factory_risk_defaults() -> None:
         )
 
 
-def _migrate_snapshots_off_qfq() -> None:
-    """Drop qfq-era OHLC cache once so the next job refetches unadjusted bars."""
+def _migrate_snapshots_to_qfq() -> None:
+    """Drop non-qfq OHLC cache once so the next job refetches forward-adjusted bars."""
     with get_engine().begin() as conn:
         conn.execute(
             text(
@@ -216,7 +216,7 @@ def _migrate_snapshots_off_qfq() -> None:
             text("SELECT value FROM schema_meta WHERE key = :key"),
             {"key": _PRICE_ADJUST_META_KEY},
         ).scalar()
-        if current == _PRICE_ADJUST_UNADJUSTED:
+        if current == _PRICE_ADJUST_QFQ:
             return
         tables = {
             name
@@ -233,9 +233,12 @@ def _migrate_snapshots_off_qfq() -> None:
                 "INSERT INTO schema_meta(key, value) VALUES (:key, :value) "
                 "ON CONFLICT(key) DO UPDATE SET value = excluded.value"
             ),
-            {"key": _PRICE_ADJUST_META_KEY, "value": _PRICE_ADJUST_UNADJUSTED},
+            {"key": _PRICE_ADJUST_META_KEY, "value": _PRICE_ADJUST_QFQ},
         )
-        logger.info("cleared qfq snapshot/baseline cache; next fetch uses unadjusted bars")
+        logger.info(
+            "cleared %s snapshot/baseline cache; next fetch uses qfq bars",
+            current or "missing",
+        )
 
 
 def init_db() -> None:
@@ -269,4 +272,4 @@ def init_db() -> None:
         session.commit()
 
     _migrate_factory_risk_defaults()
-    _migrate_snapshots_off_qfq()
+    _migrate_snapshots_to_qfq()

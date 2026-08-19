@@ -163,3 +163,36 @@ def test_qfq_snapshot_cache_cleared_once(tmp_path, monkeypatch) -> None:
     with get_db() as session:
         assert session.query(DailyMarketSnapshot).count() == 0
 
+
+def test_unadjusted_cache_migrates_back_to_qfq(tmp_path, monkeypatch) -> None:
+    _setup(tmp_path, monkeypatch)
+    with get_db() as session:
+        session.add(
+            DailyMarketSnapshot(
+                stock_code="sh600900",
+                trade_date="2010-07-20",
+                open_price=8.11,
+                high_price=8.14,
+                low_price=8.02,
+                close_price=8.13,
+                volume=1000.0,
+            )
+        )
+        session.commit()
+    with get_engine().begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO schema_meta(key, value) VALUES ('price_adjust', 'none') "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value"
+            )
+        )
+
+    init_db()
+    with get_db() as session:
+        assert session.query(DailyMarketSnapshot).count() == 0
+    with get_engine().begin() as conn:
+        value = conn.execute(
+            text("SELECT value FROM schema_meta WHERE key = 'price_adjust'")
+        ).scalar()
+    assert value == "qfq"
+

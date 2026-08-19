@@ -14,7 +14,6 @@ from app.services.backtest_service import (
 )
 from app.services.strategy_service import get_override, get_strategy
 
-
 _SAMPLE_PARAMS = {
     "n": 30,
     "x": 1.05,
@@ -352,6 +351,90 @@ def test_load_bars_includes_volume(tmp_path, monkeypatch) -> None:
     assert len(bars) == 1
     assert bars[0]["date"] == "2024-01-05"
     assert bars[0]["volume"] == 1_234_567.0
+
+
+def test_coverage_holes_detects_interior_year_gap() -> None:
+    from app.services.backtest_service import _coverage_holes
+
+    holes = _coverage_holes(
+        ["2008-05-07", "2009-05-18"],
+        date(2008, 1, 1),
+        date(2009, 12, 31),
+    )
+    assert holes
+    interior = [h for h in holes if h[0] > date(2008, 1, 1) and h[1] < date(2009, 12, 31)]
+    assert interior
+    assert interior[0][0] == date(2008, 5, 8)
+    assert interior[0][1] == date(2009, 5, 17)
+
+
+def test_ensure_snapshot_range_refetches_interior_hole(tmp_path, monkeypatch) -> None:
+    from app.services.backtest_service import _ensure_snapshot_range
+
+    monkeypatch.setattr(settings, "sqlite_path", str(tmp_path / "amtsm.db"))
+    init_db()
+    with get_db() as session:
+        session.add(_valid_snapshot("sh600900", "2008-05-07"))
+        session.add(_valid_snapshot("sh600900", "2009-05-18"))
+        session.commit()
+
+    fetched: list[tuple[date, date]] = []
+
+    def fake_fetch(stock_code: str, start: date, end: date, **_kwargs):
+        fetched.append((start, end))
+        return [
+            {
+                "date": "2008-06-02",
+                "open": 10.0,
+                "high": 10.2,
+                "low": 9.9,
+                "close": 10.1,
+                "volume": 1000.0,
+            }
+        ]
+
+    monkeypatch.setattr("app.services.backtest_service.fetch_qfq_bars_range", fake_fetch)
+    monkeypatch.setattr(
+        "app.engine.tasks.upsert_qfq_bars",
+        lambda stock_code, bars: len(bars),
+    )
+    # Count is tiny vs 2008-2009, so full range is refetched.
+    _ensure_snapshot_range("sh600900", date(2008, 1, 1), date(2009, 12, 31))
+    assert fetched
+    assert fetched[0] == (date(2008, 1, 1), date(2009, 12, 31))
+
+
+def test_ensure_snapshot_range_fetches_only_holes_when_count_ok(tmp_path, monkeypatch) -> None:
+    from datetime import timedelta
+
+    from app.services.backtest_service import _ensure_snapshot_range
+
+    monkeypatch.setattr(settings, "sqlite_path", str(tmp_path / "amtsm.db"))
+    init_db()
+    start = date(2024, 1, 1)
+    end = date(2024, 6, 30)
+    # Dense daily rows except a 40-day interior hole.
+    cursor = start
+    rows = []
+    hole_start = date(2024, 3, 1)
+    hole_end = date(2024, 4, 10)
+    while cursor <= end:
+        if not (hole_start <= cursor <= hole_end):
+            rows.append(_valid_snapshot("sh600900", cursor.isoformat()))
+        cursor += timedelta(days=1)
+    with get_db() as session:
+        session.add_all(rows)
+        session.commit()
+
+    fetched: list[tuple[date, date]] = []
+
+    def fake_fetch(stock_code: str, start: date, end: date, **_kwargs):
+        fetched.append((start, end))
+        return []
+
+    monkeypatch.setattr("app.services.backtest_service.fetch_qfq_bars_range", fake_fetch)
+    _ensure_snapshot_range("sh600900", start, end)
+    assert fetched == [(hole_start, hole_end)]
 
 
 def test_apply_job_params_writes_stock_override_only(tmp_path, monkeypatch) -> None:

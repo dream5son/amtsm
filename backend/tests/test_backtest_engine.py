@@ -186,22 +186,17 @@ def test_enable_partial_take_profit_is_forced_off() -> None:
     assert result.trades[0].exit_reason == EXIT_TAKE_PROFIT
 
 
-def test_halted_day_with_zero_ohlc_is_dropped_not_traded() -> None:
-    """A data-source glitch reporting all-zero OHLC on a halted day must be
-    dropped like a missing bar, never fed into risk_rules.evaluate (which
-    would otherwise raise ValueError on avg_cost/price <= 0)."""
+def test_halted_day_with_zero_ohlc_voids_without_stop_loss() -> None:
+    """A non-positive OHLC day is incomparable: void the open position instead
+    of deleting the row (which would punch a hole) or recording STOP_LOSS."""
     bars = _WARMUP + [
-        _bar(_START_DATE, 10.0, 10.1, 9.9, 10.0, _SURGE_VOL),  # entry: close 10.0 <= 10.34
-        _bar("2024-01-07", 0.0, 0.0, 0.0, 0.0),  # bogus halted-day bar while holding
-        _bar("2024-01-08", 9.0, 10.1, 8.9, 8.95),  # gap-down through stop
+        _bar(_START_DATE, 10.0, 10.1, 9.9, 10.0, _SURGE_VOL),  # entry
+        _bar("2024-01-07", 0.0, 0.0, 0.0, 0.0),  # incomparable while holding
+        _bar("2024-01-08", 20.0, 20.5, 19.9, 20.2),  # far above buy threshold
     ]
     result = run_backtest(bars, start_date=_START_DATE, n=3, x=1.10, risk=_params())
-
-    assert len(result.trades) == 1
-    trade = result.trades[0]
-    assert trade.entry_date == _START_DATE
-    assert trade.entry_price == 10.0
-    assert trade.exit_reason == EXIT_STOP_LOSS
+    assert result.trades == []
+    assert result.summary.trade_count == 0
 
 
 def test_invalid_params_raise() -> None:
@@ -259,7 +254,7 @@ def test_no_entry_until_full_n_day_window() -> None:
 
 
 def test_dirty_low_does_not_poison_baseline_buy() -> None:
-    """A micro-low bar must be sanitized out so a later real dip can still buy."""
+    """A micro-low bar is incomparable so it must not enter the N-day window."""
     warmup = [
         _bar("2023-12-26", 10.0, 10.2, 9.9, 10.0),
         _bar("2023-12-27", 10.0, 10.2, 9.9, 10.0),
@@ -267,7 +262,7 @@ def test_dirty_low_does_not_poison_baseline_buy() -> None:
         _bar("2023-12-29", 10.0, 10.2, 9.9, 10.0),
         _bar("2024-01-02", 10.0, 10.2, 9.9, 10.0),
         _bar("2024-01-03", 10.1, 10.3, 10.0, 10.1),
-        _bar("2024-01-04", 0.5, 1.0, 0.02, 0.3),  # dirty — dropped
+        _bar("2024-01-04", 0.5, 1.0, 0.02, 0.3),  # dirty — masked, not deleted
         _bar("2024-01-05", 10.0, 10.2, 9.8, 10.0),  # reconnects; becomes warm-up
     ]
     # After sanitize: seven clean bars ending 10.0; start on 01-08 needs n=3
@@ -364,6 +359,59 @@ def test_continuous_hold_still_emits_stop_loss_across_short_holiday() -> None:
     assert trade.exit_date == "2024-01-25"
     assert trade.exit_reason == EXIT_STOP_LOSS
     assert abs(trade.exit_price - 9.0) < 1e-9
+
+
+def test_negative_qfq_prefix_does_not_shrink_series() -> None:
+    """Leading non-positive qfq bars stay in the list; replay starts later."""
+    prefix = [
+        _bar("2023-12-20", -1.0, -0.9, -1.1, -1.0),
+        _bar("2023-12-21", -0.8, -0.7, -0.9, -0.75),
+    ]
+    bars = prefix + _WARMUP + [
+        _bar(_START_DATE, 10.0, 10.1, 9.9, 10.0, _SURGE_VOL),
+    ]
+    result = run_backtest(bars, start_date=_START_DATE, n=3, x=1.10, risk=_params())
+    assert result.summary.qfq_prefix_skipped == 2
+    assert result.summary.effective_start_date == _START_DATE
+    assert len(result.trades) == 1
+    assert result.trades[0].entry_date == _START_DATE
+    assert result.trades[0].exit_reason == EXIT_PERIOD_END
+
+
+def test_mid_series_negative_qfq_voids_without_stop_loss() -> None:
+    bars = _WARMUP + [
+        _bar(_START_DATE, 10.0, 10.1, 9.9, 10.0, _SURGE_VOL),
+        _bar("2024-01-08", -14.71, -14.66, -14.71, -14.66),
+        _bar("2024-01-09", 20.0, 20.5, 19.9, 20.2),
+    ]
+    result = run_backtest(bars, start_date=_START_DATE, n=3, x=1.10, risk=_params())
+    assert result.trades == []
+    assert result.summary.trade_count == 0
+    assert result.summary.qfq_prefix_skipped == 0
+
+
+def test_unadjusted_bonus_share_gap_triggers_stop_loss() -> None:
+    """长江电力 2010-07-20 10转5: unadjusted open ≈ (prev - dividend) / 1.5."""
+    bars = _WARMUP + [
+        _bar(_START_DATE, 12.12, 12.3, 12.0, 12.12, _SURGE_VOL),
+        _bar("2024-01-08", 8.11, 8.14, 8.02, 8.13),
+    ]
+    result = run_backtest(bars, start_date=_START_DATE, n=3, x=2.0, risk=_params())
+    assert len(result.trades) == 1
+    assert result.trades[0].exit_reason == EXIT_STOP_LOSS
+    assert result.trades[0].pnl_pct < -0.15
+
+
+def test_qfq_ex_rights_day_does_not_false_stop() -> None:
+    """On a qfq series the same corporate action is a small continuous move."""
+    bars = _WARMUP + [
+        _bar(_START_DATE, 8.10, 8.20, 8.05, 8.12, _SURGE_VOL),
+        _bar("2024-01-08", 8.11, 8.18, 8.08, 8.15),
+    ]
+    result = run_backtest(bars, start_date=_START_DATE, n=3, x=1.10, risk=_params())
+    assert len(result.trades) == 1
+    assert result.trades[0].exit_reason == EXIT_PERIOD_END
+    assert result.trades[0].pnl_pct > 0
 
 
 def test_voided_gap_allows_fresh_buy_after_window_rebuilds() -> None:

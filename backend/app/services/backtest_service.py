@@ -1,8 +1,8 @@
 """Backtest job orchestration: create/dedup, run (worker), and query.
 
 Reuses the shared :mod:`app.market_signal` rule core via ``backtest_engine.run_backtest``
-and the same unadjusted daily-bar cache (``daily_market_snapshots``) the live engine
-writes to (design.md 关键点2/4).
+and the same forward-adjusted (qfq) daily-bar cache (``daily_market_snapshots``)
+the live engine writes to (design.md 关键点2/4).
 """
 
 from __future__ import annotations
@@ -13,13 +13,14 @@ import logging
 import uuid
 from datetime import date, datetime, timedelta
 
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
 from app.config import settings
 from app.db.connection import get_db
 from app.db.models import BacktestJob, BacktestTrade, DailyMarketSnapshot, Watchlist
 from app.engine.market_hours import SH_TZ
+from app.market_signal import RiskParams
 from app.schemas.strategy import (
     StockStrategyOverride as StockStrategyOverrideSchema,
     StrategyConfig as StrategyConfigSchema,
@@ -44,7 +45,6 @@ from app.services.strategy_service import (
     update_override,
     update_strategy,
 )
-from app.market_signal import RiskParams
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +56,10 @@ _INFLIGHT_STATUSES = ("PENDING", "RUNNING")
 
 # Extra rows fetched before sanitize so a few dirty OHLC bars don't shorten a page.
 _KLINE_LIMIT_OVERFETCH = 20
+
+# Same threshold as backtest_engine: holes longer than this are fetched again,
+# then treated as legitimate halts if still empty.
+_MAX_SNAPSHOT_GAP_CALENDAR_DAYS = 30
 
 _BACKTEST_PARAM_KEYS = (
     "n",
@@ -579,39 +583,58 @@ def _warmup_start(start: date, n: int) -> date:
     return start - timedelta(days=n * 3 + 30)
 
 
+def _snapshot_trade_dates(session, stock_code: str, start: date, end: date) -> list[str]:
+    return list(
+        session.execute(
+            select(DailyMarketSnapshot.trade_date).where(
+                DailyMarketSnapshot.stock_code == stock_code,
+                DailyMarketSnapshot.trade_date >= start.isoformat(),
+                DailyMarketSnapshot.trade_date <= end.isoformat(),
+            ).order_by(DailyMarketSnapshot.trade_date)
+        ).scalars().all()
+    )
+
+
+def _coverage_holes(
+    trade_dates: list[str],
+    start: date,
+    end: date,
+    *,
+    max_gap_days: int = _MAX_SNAPSHOT_GAP_CALENDAR_DAYS,
+) -> list[tuple[date, date]]:
+    """Inclusive calendar holes longer than ``max_gap_days`` inside ``[start, end]``."""
+    if start > end:
+        return []
+    if not trade_dates:
+        return [(start, end)]
+    dates = [date.fromisoformat(value) for value in trade_dates]
+    holes: list[tuple[date, date]] = []
+    if (dates[0] - start).days > max_gap_days:
+        holes.append((start, dates[0] - timedelta(days=1)))
+    for i in range(1, len(dates)):
+        prev, nxt = dates[i - 1], dates[i]
+        if (nxt - prev).days > max_gap_days:
+            hole_start = prev + timedelta(days=1)
+            hole_end = nxt - timedelta(days=1)
+            if hole_start <= hole_end:
+                holes.append((hole_start, hole_end))
+    if (end - dates[-1]).days > max_gap_days:
+        holes.append((dates[-1] + timedelta(days=1), end))
+    return holes
+
+
 def _has_sufficient_snapshot_coverage(session, stock_code: str, start: date, end: date) -> bool:
-    count = session.scalar(
-        select(func.count(DailyMarketSnapshot.trade_date)).where(
-            DailyMarketSnapshot.stock_code == stock_code,
-            DailyMarketSnapshot.trade_date >= start.isoformat(),
-            DailyMarketSnapshot.trade_date <= end.isoformat(),
-        )
-    )
+    trade_dates = _snapshot_trade_dates(session, stock_code, start, end)
     calendar_days = (end - start).days + 1
-    # ~5/7 of calendar days are trading days minus holidays; 0.5 is a
-    # conservative floor that tolerates holidays without over-fetching.
     expected_min = max(1, int(calendar_days * 0.5))
-    return (count or 0) >= expected_min
+    if len(trade_dates) < expected_min:
+        return False
+    return not _coverage_holes(trade_dates, start, end)
 
 
-def _ensure_snapshot_range(stock_code: str, start: date, end: date) -> None:
-    with get_db() as session:
-        sufficient = _has_sufficient_snapshot_coverage(session, stock_code, start, end)
-    if sufficient:
-        logger.info(
-            "backtest job cache hit stock=%s range=%s..%s",
-            stock_code,
-            start.isoformat(),
-            end.isoformat(),
-        )
-        return
-
-    logger.info(
-        "backtest job fetching market data stock=%s range=%s..%s",
-        stock_code,
-        start.isoformat(),
-        end.isoformat(),
-    )
+def _fetch_and_upsert_range(stock_code: str, start: date, end: date) -> int:
+    if start > end:
+        return 0
     bars = fetch_qfq_bars_range(
         stock_code,
         start,
@@ -620,21 +643,69 @@ def _ensure_snapshot_range(stock_code: str, start: date, end: date) -> None:
         retry_backoff_seconds=settings.backtest_snapshot_fetch_retry_backoff_seconds,
     )
     if not bars:
-        raise BacktestDataError(f"no market data available for {stock_code} in [{start}, {end}]")
-
-    # Lazy import: app.engine.tasks -> app.services.watchlist_service ->
-    # app.services.backtest_service would otherwise be a circular import at
-    # module load time (same pattern as watchlist_service's scheduler import).
+        return 0
     from app.engine.tasks import upsert_qfq_bars
 
-    upsert_qfq_bars(stock_code, bars)
+    written = upsert_qfq_bars(stock_code, bars)
     logger.info(
         "backtest job fetched %d bars stock=%s range=%s..%s",
-        len(bars),
+        written,
         stock_code,
         start.isoformat(),
         end.isoformat(),
     )
+    return written
+
+
+def _ensure_snapshot_range(stock_code: str, start: date, end: date) -> None:
+    with get_db() as session:
+        trade_dates = _snapshot_trade_dates(session, stock_code, start, end)
+        calendar_days = (end - start).days + 1
+        expected_min = max(1, int(calendar_days * 0.5))
+        count_ok = len(trade_dates) >= expected_min
+        holes = _coverage_holes(trade_dates, start, end)
+
+    if count_ok and not holes:
+        logger.info(
+            "backtest job cache hit stock=%s range=%s..%s",
+            stock_code,
+            start.isoformat(),
+            end.isoformat(),
+        )
+        return
+
+    fetch_ranges = [(start, end)] if not count_ok or not trade_dates else holes
+    logger.info(
+        "backtest job fetching market data stock=%s range=%s..%s windows=%s",
+        stock_code,
+        start.isoformat(),
+        end.isoformat(),
+        ",".join(f"{a.isoformat()}..{b.isoformat()}" for a, b in fetch_ranges),
+    )
+    written = 0
+    for window_start, window_end in fetch_ranges:
+        written += _fetch_and_upsert_range(stock_code, window_start, window_end)
+
+    with get_db() as session:
+        remaining = _snapshot_trade_dates(session, stock_code, start, end)
+    if not remaining:
+        raise BacktestDataError(
+            f"no market data available for {stock_code} in [{start}, {end}]"
+        )
+    leftover = _coverage_holes(remaining, start, end)
+    if leftover:
+        logger.info(
+            "backtest job treating %d remaining hole(s) as halt/listing gaps stock=%s",
+            len(leftover),
+            stock_code,
+        )
+    elif written == 0 and count_ok:
+        logger.info(
+            "backtest job cache hit after hole check stock=%s range=%s..%s",
+            stock_code,
+            start.isoformat(),
+            end.isoformat(),
+        )
 
 
 def _load_bars(stock_code: str, start: date, end: date) -> list[dict]:
@@ -767,13 +838,16 @@ def run_job(job_id: int) -> None:
         _persist_result(job_id, result)
         logger.info(
             "backtest job %s SUCCESS stock=%s win_rate=%s trade_count=%s "
-            "total_return=%s sample_insufficient=%s",
+            "total_return=%s sample_insufficient=%s effective_start=%s "
+            "qfq_prefix_skipped=%s",
             job_id,
             stock_code,
             result.summary.win_rate,
             result.summary.trade_count,
             result.summary.total_return,
             result.summary.sample_insufficient,
+            result.summary.effective_start_date,
+            result.summary.qfq_prefix_skipped,
         )
     except (MarketDataUnavailableError, StockDataFetchError, BacktestDataError) as exc:
         logger.warning("backtest job %s failed: %s", job_id, exc)

@@ -2,6 +2,17 @@
 
 A-share trading signal monitor and alert system.
 
+## Goals
+
+Help experienced A-share investors who cannot watch the market all day:
+
+- Monitor a personal watchlist and surface buy/sell opportunities from an N-day high/low range strategy.
+- Track registered positions and alert on stop-loss / take-profit so losses do not run and gains are not given back.
+- Backtest parameter sets against history (and, for core holdings, against buy-and-hold) so settings are evidence-based rather than guesswork.
+- Deliver alerts over WeChat and/or email; the user still trades by hand.
+
+This project does **not** place orders or sync broker positions.
+
 ## Stack
 - Backend: Python 3.12, FastAPI, APScheduler, SQLite
 - Frontend: Next.js, TypeScript, pnpm

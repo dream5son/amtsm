@@ -1,11 +1,12 @@
-"""Market data service - fetches unadjusted daily bar data via akshare."""
+"""Market data service - fetches forward-adjusted (qfq) daily bar data via akshare."""
 
 import logging
 import math
+import time
 from collections.abc import Callable
 from datetime import UTC, date, datetime, timedelta
+from threading import Lock
 from typing import Any
-import time
 
 import akshare as ak
 import httpx
@@ -13,12 +14,17 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
-# akshare adjust="" is 不复权. Forward adjustment (qfq) rescales the whole
-# history to today's basis and, on high-dividend names (e.g. 福耀玻璃), can
-# push early OHLC through zero — the backtest then drops most of the sample.
-# Unadjusted bars stay on the traded price of each day; live quotes are also
-# unadjusted, so N-day windows (typically ~60 sessions) stay comparable.
+# akshare adjust="qfq" is 前复权: historical prices are scaled to today's
+# share basis so bonus issues / dividends do not look like crashes. Live
+# quotes are unadjusted, but T-day qfq equals T-day traded price, so the
+# N-day high/low window stays comparable. Early qfq on high-dividend names
+# may go non-positive; the backtest masks those bars as incomparable
+# instead of switching the whole cache to unadjusted.
+QFQ = "qfq"
 UNADJUSTED = ""
+# Long history is requested in ~1-year slices so EastMoney/Tencent do not
+# silently truncate a 20-year window to the most recent ~1000 bars.
+_QFQ_RANGE_CHUNK_DAYS = 365
 
 # ---------------------------------------------------------------------------
 # High-availability akshare source rotation
@@ -30,6 +36,10 @@ _SOURCE_COOLDOWN_SECONDS = 300
 # Tracks per-source failure time (source_name -> datetime when it failed).
 # Reset to None when the source succeeds again.
 _source_failure_time: dict[str, datetime] = {}
+_source_lock = Lock()
+# stock_zh_a_daily constructs MiniRacer(); concurrent V8 isolate init can
+# SIGABRT the process. Serial use is safe.
+_sina_lock = Lock()
 
 
 def _code_em(numeric_code: str) -> str:
@@ -183,11 +193,33 @@ def _mark_source_ok(source_name: str) -> None:
         logger.info("akshare source '%s' recovered and marked available", source_name)
 
 
+def _call_akshare_source(
+    source_name: str,
+    fn: Callable[..., Any],
+    *,
+    symbol: str,
+    start_date: str,
+    end_date: str,
+    adjust: str,
+) -> Any:
+    """Invoke an akshare hist function, serialising Sina (MiniRacer) calls."""
+    kwargs = {
+        "symbol": symbol,
+        "start_date": start_date,
+        "end_date": end_date,
+        "adjust": adjust,
+    }
+    if source_name == "sina":
+        with _sina_lock:
+            return fn(**kwargs)
+    return fn(**kwargs)
+
+
 def high_available_akshare(
     numeric_code: str,
     start_date: str,
     end_date: str,
-    adjust: str = UNADJUSTED,
+    adjust: str = QFQ,
 ) -> list[dict]:
     """Fetch daily bars using akshare with automatic source rotation.
 
@@ -196,12 +228,15 @@ def high_available_akshare(
     seconds and the next source is tried immediately.  After the cooldown the
     source becomes eligible again.
 
+    Sina (``stock_zh_a_daily``) uses MiniRacer and is serialised via
+    ``_sina_lock`` so concurrent callers queue instead of overlapping.
+
     Args:
         numeric_code: 6-digit stock code without exchange prefix, e.g. ``"600519"``.
         start_date:   Start date in ``YYYYMMDD`` format.
         end_date:     End date in ``YYYYMMDD`` format (inclusive).
-        adjust:       Adjustment type: ``""`` (unadjusted, default), ``"qfq"``
-                      (forward), or ``"hfq"`` (backward).
+        adjust:       Adjustment type: ``"qfq"`` (forward, default), ``"hfq"``
+                      (backward), or ``""`` (unadjusted).
 
     Returns:
         List of bar dicts with keys ``date``, ``open``, ``high``, ``low``,
@@ -213,35 +248,49 @@ def high_available_akshare(
     last_exc: Exception | None = None
 
     for source_name, fn, code_fmt, normalise in _AKSHARE_SOURCES:
-        if not _is_source_available(source_name):
+        with _source_lock:
+            available = _is_source_available(source_name)
+        if not available:
             logger.debug("akshare source '%s' is in cooldown, skipping", source_name)
             continue
 
         symbol = code_fmt(numeric_code)
         try:
             logger.debug("fetching %s from akshare source '%s'", numeric_code, source_name)
-            df = fn(
+            df = _call_akshare_source(
+                source_name,
+                fn,
                 symbol=symbol,
                 start_date=start_date,
                 end_date=end_date,
                 adjust=adjust,
             )
             if df is None or df.empty:
-                raise StockDataFetchError(f"source '{source_name}' returned empty data for {numeric_code}")
+                raise StockDataFetchError(
+                    f"source '{source_name}' returned empty data for {numeric_code}"
+                )
 
             bars = normalise(df)
-            _mark_source_ok(source_name)
+            with _source_lock:
+                _mark_source_ok(source_name)
             logger.debug(
-                "akshare source '%s' returned %d bars for %s", source_name, len(bars), numeric_code
+                "akshare source '%s' returned %d bars for %s",
+                source_name,
+                len(bars),
+                numeric_code,
             )
             return bars
 
         except Exception as exc:
             error_msg = str(exc)
             logger.warning(
-                "akshare source '%s' failed for %s: %s", source_name, numeric_code, error_msg
+                "akshare source '%s' failed for %s: %s",
+                source_name,
+                numeric_code,
+                error_msg,
             )
-            _mark_source_failed(source_name)
+            with _source_lock:
+                _mark_source_failed(source_name)
             last_exc = exc
 
     msg = str(last_exc) if last_exc else "all sources in cooldown"
@@ -395,7 +444,7 @@ def _to_float(value: str) -> float | None:
 
 
 def fetch_daily_bars(stock_code: str, n: int, end_date: date | None = None) -> list[dict]:
-    """Fetch unadjusted daily bars for the given stock.
+    """Fetch forward-adjusted (qfq) daily bars for the given stock.
 
     Uses :func:`high_available_akshare` to try multiple akshare data sources
     with automatic failover.
@@ -416,7 +465,7 @@ def fetch_daily_bars(stock_code: str, n: int, end_date: date | None = None) -> l
             numeric_code=numeric_code,
             start_date=start_date.strftime("%Y%m%d"),
             end_date=(end_date - timedelta(days=1)).strftime("%Y%m%d"),
-            adjust=UNADJUSTED,
+            adjust=QFQ,
         )
     except MarketDataUnavailableError:
         raise
@@ -425,46 +474,66 @@ def fetch_daily_bars(stock_code: str, n: int, end_date: date | None = None) -> l
         raise StockDataFetchError(f"Failed to fetch data for {stock_code}: {error_msg}") from exc
 
 
-def fetch_qfq_bars_range(
-    stock_code: str,
-    start_date: date,
-    end_date: date,
+def _iter_date_chunks(
+    start: date,
+    end: date,
+    chunk_days: int = _QFQ_RANGE_CHUNK_DAYS,
+) -> list[tuple[date, date]]:
+    """Split ``[start, end]`` into inclusive chunks of at most ``chunk_days``."""
+    if start > end:
+        return []
+    chunks: list[tuple[date, date]] = []
+    cursor = start
+    step = timedelta(days=max(1, chunk_days))
+    while cursor <= end:
+        chunk_end = min(cursor + step - timedelta(days=1), end)
+        chunks.append((cursor, chunk_end))
+        cursor = chunk_end + timedelta(days=1)
+    return chunks
+
+
+def _merge_bars_by_date(chunks: list[list[dict]]) -> list[dict]:
+    """Oldest-first union of bar lists; later chunks win on duplicate dates."""
+    by_date: dict[str, dict] = {}
+    for bars in chunks:
+        for bar in bars:
+            key = _bar_date_str(bar.get("date"))
+            if key:
+                by_date[key] = bar
+    return [by_date[key] for key in sorted(by_date)]
+
+
+def _fetch_qfq_chunk(
+    numeric_code: str,
+    start: date,
+    end: date,
     *,
-    retries: int = 1,
-    retry_backoff_seconds: float = 0.5,
+    retries: int,
+    retry_backoff_seconds: float,
+    stock_code: str,
 ) -> list[dict]:
-    """Fetch unadjusted daily bars for an explicit ``[start_date, end_date]``.
-
-    Unlike :func:`fetch_daily_bars` (which derives its own lookback window from a
-    day-count ``n``), this fetches a caller-specified date range. Used by the
-    backtest worker to backfill gaps in ``daily_market_snapshots`` for the exact
-    window a backtest job needs.
-
-    Returns list of bar dicts (oldest-first) with keys: date, open, high, low,
-    close, volume, turnover_rate (optional). Dates outside the stock's listed
-    history are simply absent (no error).
-    """
-    numeric_code = _to_numeric_code(stock_code)
+    """Fetch one date chunk with the same retry policy as the old full-range call."""
     attempts = max(1, retries + 1)
     last_exc: Exception | None = None
-
     for attempt in range(attempts):
         try:
             return high_available_akshare(
                 numeric_code=numeric_code,
-                start_date=start_date.strftime("%Y%m%d"),
-                end_date=end_date.strftime("%Y%m%d"),
-                adjust=UNADJUSTED,
+                start_date=start.strftime("%Y%m%d"),
+                end_date=end.strftime("%Y%m%d"),
+                adjust=QFQ,
             )
         except MarketDataUnavailableError as exc:
             last_exc = exc
             if attempt + 1 >= attempts:
                 raise
             logger.warning(
-                "fetch_qfq_bars_range retry %d/%d for %s: %s",
+                "fetch_qfq_bars_range retry %d/%d for %s %s..%s: %s",
                 attempt + 1,
                 attempts,
                 stock_code,
+                start.isoformat(),
+                end.isoformat(),
                 exc,
             )
             time.sleep(max(0.0, retry_backoff_seconds) * (attempt + 1))
@@ -475,16 +544,56 @@ def fetch_qfq_bars_range(
                     f"Failed to fetch qfq bars range for {stock_code}: {exc}"
                 ) from exc
             logger.warning(
-                "fetch_qfq_bars_range retry %d/%d for %s: %s",
+                "fetch_qfq_bars_range retry %d/%d for %s %s..%s: %s",
                 attempt + 1,
                 attempts,
                 stock_code,
+                start.isoformat(),
+                end.isoformat(),
                 exc,
             )
             time.sleep(max(0.0, retry_backoff_seconds) * (attempt + 1))
-
     msg = str(last_exc) if last_exc else "unknown error"
     raise StockDataFetchError(f"Failed to fetch qfq bars range for {stock_code}: {msg}") from last_exc
+
+
+def fetch_qfq_bars_range(
+    stock_code: str,
+    start_date: date,
+    end_date: date,
+    *,
+    retries: int = 1,
+    retry_backoff_seconds: float = 0.5,
+) -> list[dict]:
+    """Fetch forward-adjusted (qfq) daily bars for an explicit ``[start_date, end_date]``.
+
+    Unlike :func:`fetch_daily_bars` (which derives its own lookback window from a
+    day-count ``n``), this fetches a caller-specified date range. Used by the
+    backtest worker to backfill gaps in ``daily_market_snapshots`` for the exact
+    window a backtest job needs.
+
+    Long ranges are requested in ~1-year chunks and merged oldest-first so a
+    single-call API cap cannot silently drop the early history.
+
+    Returns list of bar dicts (oldest-first) with keys: date, open, high, low,
+    close, volume, turnover_rate (optional). Dates outside the stock's listed
+    history are simply absent (no error).
+    """
+    if start_date > end_date:
+        return []
+    numeric_code = _to_numeric_code(stock_code)
+    chunk_bars: list[list[dict]] = []
+    for chunk_start, chunk_end in _iter_date_chunks(start_date, end_date):
+        bars = _fetch_qfq_chunk(
+            numeric_code,
+            chunk_start,
+            chunk_end,
+            retries=retries,
+            retry_backoff_seconds=retry_backoff_seconds,
+            stock_code=stock_code,
+        )
+        chunk_bars.append(bars)
+    return _merge_bars_by_date(chunk_bars)
 
 
 def fetch_trade_day_bar(
@@ -493,15 +602,16 @@ def fetch_trade_day_bar(
     *,
     retries: int = 1,
     retry_backoff_seconds: float = 0.5,
-    adjust: str = UNADJUSTED,
+    adjust: str = QFQ,
 ) -> dict:
     """Fetch OHLCV (+ optional turnover) for a single trade date.
 
     Includes ``trade_date`` itself. Used by the post-close daily snapshot job.
 
-    Defaults to unadjusted prices so ``daily_market_snapshots`` stays on the
-    same traded-price basis as live quotes. Pass ``adjust="qfq"`` / ``"hfq"``
-    only if a caller explicitly needs an adjusted series.
+    Defaults to forward-adjusted (``qfq``) prices so ``daily_market_snapshots``
+    stays on the same basis used by baseline/backtest reads. For the most
+    recent trading day qfq and unadjusted prices are identical. Pass
+    ``adjust=""`` / ``"hfq"`` only if a caller explicitly needs another series.
 
     Returns:
         dict with keys: date, open, high, low, close, volume, turnover_rate.

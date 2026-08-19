@@ -355,7 +355,7 @@ def _upsert_snapshot_from_quote(stock_code: str, trade_date: str, quote: dict) -
 
 
 def _bootstrap_from_daily_bars(stock_code: str, *, lookback_days: int = 5) -> bool:
-    """Fallback: find the nearest available unadjusted daily bar and upsert it."""
+    """Fallback: find the nearest available qfq daily bar and upsert it."""
     today = datetime.now(SH_TZ).date()
     for offset in range(lookback_days):
         candidate: date = today - timedelta(days=offset)
@@ -527,7 +527,7 @@ def get_snapshot(stock_code: str, trade_date: str) -> dict | None:
 
 
 def baseline_precompute_task() -> None:
-    """Pre-market baseline job using unadjusted daily bars.
+    """Pre-market baseline job using forward-adjusted (qfq) daily bars.
 
     Also attempts to restore HALT stocks to NORMAL for the new session so
     monitoring can resume after prior halt markings (user story 12).
@@ -1102,6 +1102,7 @@ def _sync_signal_trade_date(trade_date: str) -> None:
         runtime_state.signal_meta.clear()
         # Keys include trade_date; clear to keep the O(1) set bounded across days.
         runtime_state.sent_signal_keys.clear()
+        runtime_state.daily_cap_reached.clear()
         runtime_state.partial_tp_ladder_idx.clear()
         runtime_state.exit_fired_today.clear()
 

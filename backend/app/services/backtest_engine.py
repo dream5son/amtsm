@@ -58,6 +58,11 @@ def _max_consecutive_gap_days(dates: list[str]) -> int:
     )
 
 
+def is_comparable_bar(bar: dict) -> bool:
+    """True when OHLC is usable as a traded price on today's qfq basis."""
+    return has_valid_ohlc(bar["open"], bar["high"], bar["low"], bar["close"])
+
+
 def has_valid_ohlc(open_price: float, high_price: float, low_price: float, close_price: float) -> bool:
     """True when a bar looks like a tradable daily candle.
 
@@ -67,8 +72,8 @@ def has_valid_ohlc(open_price: float, high_price: float, low_price: float, close
     - extreme intraday range that is almost always a forward-adjustment
       artifact rather than a real session (poisons N-day low_min)
 
-    Shared by backtest replay and the kline display so the chart never shows
-    a candle the simulation did not consume.
+    Shared by backtest replay (as an incomparable mask, not a delete) and the
+    kline display so the chart never shows a candle the simulation would skip.
     """
     if not (open_price > 0 and high_price > 0 and low_price > 0 and close_price > 0):
         return False
@@ -82,12 +87,16 @@ def has_valid_ohlc(open_price: float, high_price: float, low_price: float, close
 
 
 def sanitize_bars_for_backtest(bars: list[dict]) -> list[dict]:
-    """Drop bars that fail :func:`has_valid_ohlc`, preserving oldest-first order.
+    """Drop incomparable bars for kline display, preserving oldest-first order.
 
-    Only per-bar checks are applied. A sequential close-gap filter was tried
-    and rejected: dropping a dirty bar while keeping the previous close as the
-    gap reference causes a cascade that wipes most of a long qfq history
-    (e.g. 福耀玻璃 6522 → 69 bars), falsely triggering sample_insufficient.
+    The replay engine must NOT use this as a delete filter: removing rows
+    creates calendar holes that void positions. Chart rendering still omits
+    candles the simulation would refuse to trade.
+
+    A sequential close-gap filter was tried and rejected: dropping a dirty
+    bar while keeping the previous close as the gap reference causes a
+    cascade that wipes most of a long qfq history (e.g. 福耀玻璃 6522 → 69
+    bars), falsely triggering sample_insufficient.
     """
     return [
         bar
@@ -117,6 +126,8 @@ class BacktestSummary:
     total_return: float | None
     annual_return: float | None
     sample_insufficient: bool
+    effective_start_date: str | None = None
+    qfq_prefix_skipped: int = 0
 
 
 @dataclass(frozen=True)
@@ -147,7 +158,13 @@ def _make_trade(
     )
 
 
-def _summarize(trades: list[BacktestTradeResult], min_trade_count: int) -> BacktestSummary:
+def _summarize(
+    trades: list[BacktestTradeResult],
+    min_trade_count: int,
+    *,
+    effective_start_date: str | None = None,
+    qfq_prefix_skipped: int = 0,
+) -> BacktestSummary:
     """Aggregate metrics over STOP_LOSS/TAKE_PROFIT trades only (design.md 7.4).
 
     ``PERIOD_END`` records are display-only and excluded from every metric here.
@@ -165,6 +182,8 @@ def _summarize(trades: list[BacktestTradeResult], min_trade_count: int) -> Backt
             total_return=None,
             annual_return=None,
             sample_insufficient=sample_insufficient,
+            effective_start_date=effective_start_date,
+            qfq_prefix_skipped=qfq_prefix_skipped,
         )
 
     wins = [t for t in counted if t.pnl_pct > 0]
@@ -201,6 +220,8 @@ def _summarize(trades: list[BacktestTradeResult], min_trade_count: int) -> Backt
         total_return=total_return,
         annual_return=annual_return,
         sample_insufficient=sample_insufficient,
+        effective_start_date=effective_start_date,
+        qfq_prefix_skipped=qfq_prefix_skipped,
     )
 
 
@@ -246,17 +267,26 @@ def run_backtest(
     params = StrategyParams(x=x)
     feed_n = max(n, int(params.volume_lookback))
 
-    # Drop non-positive / structurally impossible / extreme-range / close-gap
-    # bars (see sanitize_bars_for_backtest) instead of letting a bogus low
-    # poison low_min or a bogus close feed avg_cost=0 into risk_rules.evaluate.
-    cleaned = sanitize_bars_for_backtest(bars)
-    if len(cleaned) != len(bars):
+    # Keep every row. Non-positive / extreme-range qfq is incomparable — skip
+    # trading that day (and void an open position) instead of deleting the bar
+    # and punching a calendar hole that cascades into sample_insufficient.
+    comparable = [is_comparable_bar(bar) for bar in bars]
+    incomparable_count = sum(0 if ok else 1 for ok in comparable)
+    if incomparable_count:
         logger.warning(
-            "run_backtest: dropped %d bar(s) during OHLC sanitize out of %d",
-            len(bars) - len(cleaned),
+            "run_backtest: masking %d incomparable bar(s) out of %d (kept in series)",
+            incomparable_count,
             len(bars),
         )
-    bars = cleaned
+
+    first_comparable_idx = next((i for i, ok in enumerate(comparable) if ok), None)
+    prefix_skipped = first_comparable_idx if first_comparable_idx is not None else len(bars)
+    first_comparable_date = (
+        bars[first_comparable_idx]["date"] if first_comparable_idx is not None else None
+    )
+    effective_start = start_date
+    if first_comparable_date is not None and first_comparable_date > start_date:
+        effective_start = first_comparable_date
 
     trades: list[BacktestTradeResult] = []
 
@@ -268,7 +298,7 @@ def run_backtest(
     entry_price = 0.0
     last_bar_date: str | None = None
 
-    in_scope_indices = [i for i, bar in enumerate(bars) if bar["date"] >= start_date]
+    in_scope_indices = [i for i, bar in enumerate(bars) if bar["date"] >= effective_start]
 
     def _clear_position() -> None:
         nonlocal qty, avg_cost, highest, stop_price, entry_date, entry_price, last_bar_date
@@ -282,6 +312,16 @@ def run_backtest(
 
     for idx in in_scope_indices:
         bar = bars[idx]
+        if not comparable[idx]:
+            if qty > 0:
+                logger.warning(
+                    "run_backtest: voiding open position from %s — incomparable "
+                    "qfq bar on %s (non-positive or extreme-range OHLC)",
+                    entry_date,
+                    bar["date"],
+                )
+                _clear_position()
+            continue
 
         if qty > 0:
             assert (
@@ -294,7 +334,7 @@ def run_backtest(
                 date_cls.fromisoformat(bar["date"]) - date_cls.fromisoformat(last_bar_date)
             ).days
             if hold_gap > _MAX_BAR_GAP_CALENDAR_DAYS:
-                # Data hole after sanitize: cannot manage risk across the gap.
+                # True halt / missing rows: cannot manage risk across the gap.
                 # Void the open position (no SL/TP/PERIOD_END row) and fall
                 # through so this bar may still trigger a fresh buy.
                 logger.warning(
@@ -337,13 +377,14 @@ def run_backtest(
                 continue
 
         if qty == 0:
+            comparable_before = [bars[j] for j in range(idx) if comparable[j]]
             # Full N-day warm-up required (design.md 7.2): never enter on a
             # partial window — a short window lets a single dirty low dominate.
-            if idx < n:
+            if len(comparable_before) < n:
                 continue
-            window = bars[max(0, idx - feed_n) : idx]
-            # Baseline is only trustworthy when the N prior bars and today form
-            # a continuous calendar sequence (no multi-month/year sanitize hole).
+            window = comparable_before[-feed_n:]
+            # Baseline is only trustworthy when the N prior comparable bars and
+            # today form a continuous calendar sequence (no multi-month halt).
             window_dates = [b["date"] for b in window[-n:]] + [bar["date"]]
             gap = _max_consecutive_gap_days(window_dates)
             if gap > _MAX_BAR_GAP_CALENDAR_DAYS:
@@ -375,17 +416,26 @@ def run_backtest(
                 last_bar_date = bar["date"]
             continue
 
-    if qty > 0 and entry_date is not None and in_scope_indices:
-        last_bar = bars[in_scope_indices[-1]]
-        trades.append(
-            _make_trade(
-                entry_date,
-                entry_price,
-                last_bar["date"],
-                float(last_bar["close"]),
-                EXIT_PERIOD_END,
-            )
+    if qty > 0 and entry_date is not None:
+        last_comparable = next(
+            (bars[i] for i in reversed(in_scope_indices) if comparable[i]),
+            None,
         )
+        if last_comparable is not None:
+            trades.append(
+                _make_trade(
+                    entry_date,
+                    entry_price,
+                    last_comparable["date"],
+                    float(last_comparable["close"]),
+                    EXIT_PERIOD_END,
+                )
+            )
 
-    summary = _summarize(trades, min_trade_count)
+    summary = _summarize(
+        trades,
+        min_trade_count,
+        effective_start_date=effective_start if bars else None,
+        qfq_prefix_skipped=prefix_skipped,
+    )
     return BacktestResult(trades=trades, summary=summary)

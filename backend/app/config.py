@@ -60,6 +60,8 @@ class Settings(BaseSettings):
     # Buy/sell alert delivery (user story 08+)
     alert_send_max_retries: int = 3
     alert_send_retry_backoff_seconds: float = 0.5
+    # Max successful notifications per stock per trade date (0 = unlimited).
+    alert_max_per_stock_per_day: int = 0
 
     # Backtest worker (V2 user stories 08-10)
     backtest_worker_interval_seconds: int = 3

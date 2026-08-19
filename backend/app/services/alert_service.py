@@ -2,8 +2,8 @@
 
 Consumes candidates from the intraday polling task, enforces
 trading-hours DND + once-per-day frequency control (memory Set + unique
-index claim), sends text via enabled ``TextNotifier`` channels, and persists
-results to ``alert_logs``.
+index claim) plus an optional per-stock daily send cap, sends text via
+enabled ``TextNotifier`` channels, and persists results to ``alert_logs``.
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ from datetime import UTC, datetime
 from enum import Enum
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 
 from app.config import settings
@@ -151,6 +151,7 @@ class AlertOutcome(str, Enum):
     SKIPPED_ALREADY_SENT = "skipped_already_sent"
     SKIPPED_RACE = "skipped_race"
     SKIPPED_INVALID = "skipped_invalid"
+    SKIPPED_DAILY_CAP = "skipped_daily_cap"
 
 
 @dataclass
@@ -323,6 +324,64 @@ def _freq_key(
     stock_code: str, trade_date: str, signal_type: str
 ) -> tuple[str, str, str]:
     return (stock_code, trade_date, signal_type)
+
+
+def _daily_cap_key(stock_code: str, trade_date: str) -> tuple[str, str]:
+    return (stock_code, trade_date)
+
+
+def count_successful_alerts(stock_code: str, trade_date: str) -> int:
+    """Count SUCCESS notifications for one stock on one trade date."""
+    with get_db() as session:
+        n = session.scalar(
+            select(func.count())
+            .select_from(AlertLog)
+            .where(
+                AlertLog.stock_code == stock_code,
+                AlertLog.trade_date == trade_date,
+                AlertLog.sent_status == STATUS_SUCCESS,
+            )
+        )
+        return int(n or 0)
+
+
+def _skip_if_daily_cap(
+    *,
+    stock_code: str,
+    trade_date: str,
+    log_prefix: str,
+) -> AlertProcessResult | None:
+    """Return a skip result when the per-stock daily send cap is reached."""
+    max_per_day = int(settings.alert_max_per_stock_per_day)
+    if max_per_day <= 0:
+        return None
+
+    cap_key = _daily_cap_key(stock_code, trade_date)
+    if cap_key in runtime_state.daily_cap_reached:
+        return AlertProcessResult(
+            outcome=AlertOutcome.SKIPPED_DAILY_CAP,
+            stock_code=stock_code,
+            message="daily notification cap reached",
+        )
+
+    sent_count = count_successful_alerts(stock_code, trade_date)
+    if sent_count < max_per_day:
+        return None
+
+    runtime_state.daily_cap_reached.add(cap_key)
+    logger.info(
+        "%s daily cap reached stock=%s date=%s count=%d max=%d; skip send",
+        log_prefix,
+        stock_code,
+        trade_date,
+        sent_count,
+        max_per_day,
+    )
+    return AlertProcessResult(
+        outcome=AlertOutcome.SKIPPED_DAILY_CAP,
+        stock_code=stock_code,
+        message="daily notification cap reached",
+    )
 
 
 def _error_fields(result: SendResult) -> tuple[str | None, str | None]:
@@ -667,6 +726,14 @@ def process_alert(candidate: dict[str, Any], *, signal_type: str) -> AlertProces
             stock_code=stock_code,
             message="already sent today (memory)",
         )
+
+    capped = _skip_if_daily_cap(
+        stock_code=stock_code,
+        trade_date=trade_date,
+        log_prefix=log_prefix,
+    )
+    if capped is not None:
+        return capped
 
     claimed, skip = _claim_alert_slot(
         stock_code=stock_code,

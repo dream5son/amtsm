@@ -1,9 +1,12 @@
-from unittest.mock import MagicMock, patch
+import threading
+import time
+from unittest.mock import MagicMock
 
 import pandas as pd
 import pytest
 
 from app.services.market_data_service import (
+    _AKSHARE_SOURCES,
     MarketDataUnavailableError,
     _parse_sina_realtime_quotes,
     _source_failure_time,
@@ -30,6 +33,13 @@ def test_parse_sina_realtime_quotes() -> None:
     assert data["sz000001"]["high"] is None
     assert data["sz000001"]["has_quote"] is False
     assert data["sz000001"]["is_halted"] is False
+
+
+def test_akshare_sources_include_sina() -> None:
+    names = [entry[0] for entry in _AKSHARE_SOURCES]
+    fn_names = [getattr(entry[1], "__name__", "") for entry in _AKSHARE_SOURCES]
+    assert names == ["eastmoney", "tencent", "sina"]
+    assert "stock_zh_a_daily" in fn_names
 
 
 def _make_em_df() -> pd.DataFrame:
@@ -141,4 +151,110 @@ def test_high_available_akshare_raises_when_all_fail() -> None:
     finally:
         svc._AKSHARE_SOURCES = original
         _source_failure_time.clear()
+
+
+def test_sina_source_calls_are_serialized() -> None:
+    """Concurrent Sina fetches must not overlap (MiniRacer is not thread-safe)."""
+    _source_failure_time.clear()
+    in_flight = 0
+    max_in_flight = 0
+    counter_lock = threading.Lock()
+
+    def slow_sina(**_kwargs: object) -> pd.DataFrame:
+        nonlocal in_flight, max_in_flight
+        with counter_lock:
+            in_flight += 1
+            max_in_flight = max(max_in_flight, in_flight)
+        time.sleep(0.05)
+        with counter_lock:
+            in_flight -= 1
+        return _make_tx_df()
+
+    import app.services.market_data_service as svc
+
+    original = svc._AKSHARE_SOURCES
+    try:
+        sina_entry = next(entry for entry in original if entry[0] == "sina")
+        svc._AKSHARE_SOURCES = [("sina", slow_sina, sina_entry[2], sina_entry[3])]
+        errors: list[BaseException] = []
+
+        def worker() -> None:
+            try:
+                bars = high_available_akshare("600519", "20240101", "20240103")
+                assert bars[0]["close"] == 10.5
+            except BaseException as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        threads = [threading.Thread(target=worker) for _ in range(4)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+    finally:
+        svc._AKSHARE_SOURCES = original
+        _source_failure_time.clear()
+
+    assert errors == []
+    assert max_in_flight == 1
+
+
+def test_iter_date_chunks_splits_long_range() -> None:
+    from datetime import date, timedelta
+
+    from app.services.market_data_service import _iter_date_chunks
+
+    chunks = _iter_date_chunks(date(2020, 1, 1), date(2022, 6, 30), chunk_days=365)
+    assert chunks[0] == (date(2020, 1, 1), date(2020, 12, 30))
+    assert chunks[-1][1] == date(2022, 6, 30)
+    assert all((end - start).days + 1 <= 365 for start, end in chunks)
+    for i in range(1, len(chunks)):
+        assert chunks[i][0] == chunks[i - 1][1] + timedelta(days=1)
+
+
+def test_merge_bars_by_date_dedupes_overlap_and_sorts() -> None:
+    from app.services.market_data_service import _merge_bars_by_date
+
+    older = [
+        {"date": "2024-01-03", "close": 1.0},
+        {"date": "2024-01-02", "close": 2.0},
+    ]
+    newer = [
+        {"date": "2024-01-03", "close": 3.0},
+        {"date": "2024-01-04", "close": 4.0},
+    ]
+    merged = _merge_bars_by_date([older, newer])
+    assert [bar["date"] for bar in merged] == ["2024-01-02", "2024-01-03", "2024-01-04"]
+    assert merged[1]["close"] == 3.0
+
+
+def test_fetch_qfq_bars_range_requests_year_chunks(monkeypatch) -> None:
+    from datetime import date
+
+    from app.services.market_data_service import fetch_qfq_bars_range
+
+    calls: list[tuple[str, str]] = []
+
+    def fake_ha(numeric_code, start_date, end_date, adjust="qfq"):
+        calls.append((start_date, end_date, adjust))
+        return [
+            {
+                "date": f"{start_date[:4]}-{start_date[4:6]}-{start_date[6:8]}",
+                "open": 10.0,
+                "high": 11.0,
+                "low": 9.0,
+                "close": 10.0,
+                "volume": 1.0,
+            }
+        ]
+
+    monkeypatch.setattr(
+        "app.services.market_data_service.high_available_akshare",
+        fake_ha,
+    )
+    bars = fetch_qfq_bars_range("sh600900", date(2020, 1, 1), date(2021, 6, 1), retries=0)
+    assert len(calls) >= 2
+    assert calls[0][0] == "20200101"
+    assert calls[0][2] == "qfq"
+    assert calls[-1][1] == "20210601"
+    assert [bar["date"] for bar in bars] == sorted(bar["date"] for bar in bars)
 

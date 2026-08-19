@@ -4,7 +4,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
 from app.db.connection import get_db
-from app.db.models import Position, PositionLedger, Watchlist
+from app.db.models import Position, PositionLedger, StockStrategyOverride, Watchlist
 from app.engine.state import runtime_state
 from app.schemas.watchlist import WatchlistCreate
 from app.services.backtest_service import get_watchlist_backtest_summary
@@ -161,12 +161,22 @@ def remove_watchlist(stock_code: str) -> int:
             PositionLedger.stock_code == normalized_code
         ).delete()
         session.query(Position).filter(Position.stock_code == normalized_code).delete()
+        session.query(StockStrategyOverride).filter(
+            StockStrategyOverride.stock_code == normalized_code
+        ).delete()
         deleted = (
             session.query(Watchlist)
             .filter(Watchlist.stock_code == normalized_code)
             .delete()
         )
         session.commit()
+
+    if deleted:
+        runtime_state.drop_stock(normalized_code)
+        # Lazy import avoids circular import: tasks -> watchlist_service -> scheduler -> tasks
+        from app.engine.scheduler import cancel_snapshot_bootstrap
+
+        cancel_snapshot_bootstrap(normalized_code)
     return deleted
 
 

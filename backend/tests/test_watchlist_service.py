@@ -1,7 +1,12 @@
 from app.config import settings
 from app.db.connection import get_db
 from app.db.init_db import init_db
-from app.db.models import DailyBaseline, DailyMarketSnapshot, Watchlist
+from app.db.models import (
+    DailyBaseline,
+    DailyMarketSnapshot,
+    StockStrategyOverride,
+    Watchlist,
+)
 from app.engine.state import runtime_state
 from app.schemas.watchlist import WatchlistCreate
 from app.services.watchlist_service import (
@@ -70,8 +75,48 @@ def test_remove_watchlist_normalizes_code(tmp_path, monkeypatch) -> None:
     runtime_state.reset_daily()
     add_watchlist(WatchlistCreate(stock_code="600519", stock_name="贵州茅台"))
 
+    runtime_state.baseline_cache["sh600519"] = {"trade_date": "2026-08-05"}
+    runtime_state.set_signal("sh600519", "BUY")
+    runtime_state.position_cache["sh600519"] = {"qty": 100}
+    runtime_state.partial_tp_ladder_idx["sh600519"] = 1
+    runtime_state.exit_fired_today.add("sh600519")
+    runtime_state.sent_signal_keys.add(("sh600519", "2026-08-05", "BUY"))
+    runtime_state.daily_cap_reached.add(("sh600519", "2026-08-05"))
+    runtime_state.baseline_cache["sz000001"] = {"trade_date": "2026-08-05"}
+    runtime_state.set_signal("sz000001", "SELL")
+
     assert remove_watchlist("sh600519") == 1
     assert list_watchlist() == []
+    assert "sh600519" not in runtime_state.baseline_cache
+    assert "sh600519" not in runtime_state.signal_state
+    assert "sh600519" not in runtime_state.signal_meta
+    assert "sh600519" not in runtime_state.position_cache
+    assert "sh600519" not in runtime_state.partial_tp_ladder_idx
+    assert "sh600519" not in runtime_state.exit_fired_today
+    assert ("sh600519", "2026-08-05", "BUY") not in runtime_state.sent_signal_keys
+    assert ("sh600519", "2026-08-05") not in runtime_state.daily_cap_reached
+    assert runtime_state.baseline_cache["sz000001"]["trade_date"] == "2026-08-05"
+    assert runtime_state.signal_state["sz000001"] == "SELL"
+
+
+def test_remove_watchlist_deletes_strategy_override(tmp_path, monkeypatch) -> None:
+    sqlite_path = tmp_path / "amtsm.db"
+    monkeypatch.setattr(settings, "sqlite_path", str(sqlite_path))
+
+    init_db()
+    runtime_state.reset_daily()
+    add_watchlist(WatchlistCreate(stock_code="600519", stock_name="贵州茅台"))
+
+    with get_db() as session:
+        session.add(
+            StockStrategyOverride(stock_code="sh600519", custom_n=30, custom_x=1.05)
+        )
+        session.commit()
+
+    assert remove_watchlist("sh600519") == 1
+    with get_db() as session:
+        assert session.get(StockStrategyOverride, "sh600519") is None
+        assert session.query(Watchlist).filter_by(stock_code="sh600519").one_or_none() is None
 
 
 def test_list_watchlist_includes_market_fields_and_insufficient_days(tmp_path, monkeypatch) -> None:
