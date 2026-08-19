@@ -22,8 +22,13 @@ from app.services.alert_service import (
     process_buy_alert,
     process_buy_candidates,
 )
+from app.services.notifier.email_notifier import email_notifier
 from app.services.watchlist_service import add_watchlist
 from app.services.wechat_notifier import ErrorCategory, SendResult
+
+
+def _ok_send() -> SendResult:
+    return SendResult(ok=True, errcode=0, errmsg="ok", message="发送成功")
 
 
 @pytest.fixture(autouse=True)
@@ -32,6 +37,23 @@ def _open_alert_window(monkeypatch) -> None:
     monkeypatch.setattr(
         "app.services.alert_service.is_alert_window_open",
         lambda **_kwargs: True,
+    )
+
+
+@pytest.fixture(autouse=True)
+def _block_real_notifications(monkeypatch) -> None:
+    """Never hit WeChat/SMTP even if local .env enables extra channels."""
+    monkeypatch.setattr(settings, "notify_channels", "wechat")
+    monkeypatch.setattr(settings, "alert_max_per_stock_per_day", 0)
+    monkeypatch.setattr(
+        alert_service.wechat_notifier,
+        "send_text",
+        MagicMock(return_value=_ok_send()),
+    )
+    monkeypatch.setattr(
+        email_notifier,
+        "send_text",
+        MagicMock(return_value=_ok_send()),
     )
 
 

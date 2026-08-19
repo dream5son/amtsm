@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 
 from sqlalchemy import inspect, text
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
@@ -21,7 +22,10 @@ from app.schemas.strategy import (
 logger = logging.getLogger(__name__)
 
 _PRICE_ADJUST_META_KEY = "price_adjust"
-_PRICE_ADJUST_QFQ = "qfq"
+# Bump when the snapshot cache basis changes (e.g. unadjusted → qfq) so stale
+# OHLC rows are purged once and backtests refetch on the new basis.
+_PRICE_ADJUST_QFQ = "qfq_v2"
+_PRICE_ADJUST_MIGRATED_AT_KEY = "price_adjust_migrated_at"
 
 
 def _existing_columns(table_name: str) -> set[str]:
@@ -202,6 +206,37 @@ def _migrate_factory_risk_defaults() -> None:
         )
 
 
+def get_price_adjust_version() -> str:
+    """Current ``schema_meta.price_adjust`` value (defaults to qfq_v2 target)."""
+    with get_engine().begin() as conn:
+        conn.execute(
+            text(
+                "CREATE TABLE IF NOT EXISTS schema_meta ("
+                "key TEXT PRIMARY KEY NOT NULL, "
+                "value TEXT NOT NULL)"
+            )
+        )
+        return conn.execute(
+            text("SELECT value FROM schema_meta WHERE key = :key"),
+            {"key": _PRICE_ADJUST_META_KEY},
+        ).scalar() or _PRICE_ADJUST_QFQ
+
+
+def get_price_adjust_migrated_at() -> datetime | None:
+    """When the snapshot cache was last cleared for a price-adjust migration."""
+    with get_engine().begin() as conn:
+        raw = conn.execute(
+            text("SELECT value FROM schema_meta WHERE key = :key"),
+            {"key": _PRICE_ADJUST_MIGRATED_AT_KEY},
+        ).scalar()
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(str(raw))
+    except ValueError:
+        return None
+
+
 def _migrate_snapshots_to_qfq() -> None:
     """Drop non-qfq OHLC cache once so the next job refetches forward-adjusted bars."""
     with get_engine().begin() as conn:
@@ -228,6 +263,7 @@ def _migrate_snapshots_to_qfq() -> None:
             conn.execute(text("DELETE FROM daily_market_snapshots"))
         if "daily_baselines" in tables:
             conn.execute(text("DELETE FROM daily_baselines"))
+        migrated_at = datetime.now().replace(microsecond=0).isoformat()
         conn.execute(
             text(
                 "INSERT INTO schema_meta(key, value) VALUES (:key, :value) "
@@ -235,9 +271,17 @@ def _migrate_snapshots_to_qfq() -> None:
             ),
             {"key": _PRICE_ADJUST_META_KEY, "value": _PRICE_ADJUST_QFQ},
         )
+        conn.execute(
+            text(
+                "INSERT INTO schema_meta(key, value) VALUES (:key, :value) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value"
+            ),
+            {"key": _PRICE_ADJUST_MIGRATED_AT_KEY, "value": migrated_at},
+        )
         logger.info(
-            "cleared %s snapshot/baseline cache; next fetch uses qfq bars",
+            "cleared %s snapshot/baseline cache; next fetch uses %s bars",
             current or "missing",
+            _PRICE_ADJUST_QFQ,
         )
 
 

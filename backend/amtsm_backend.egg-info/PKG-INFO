@@ -11,6 +11,7 @@ Requires-Dist: apscheduler>=3.10.4
 Requires-Dist: httpx>=0.28.1
 Requires-Dist: wechatpy[cryptography]>=1.8.18
 Requires-Dist: akshare>=1.17.48
+Requires-Dist: baostock>=0.9.3
 Requires-Dist: pypinyin>=0.55.0
 Requires-Dist: certifi>=2024.0.0
 Provides-Extra: dev

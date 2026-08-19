@@ -6,6 +6,7 @@ apscheduler>=3.10.4
 httpx>=0.28.1
 wechatpy[cryptography]>=1.8.18
 akshare>=1.17.48
+baostock>=0.9.3
 pypinyin>=0.55.0
 certifi>=2024.0.0
 

@@ -3,14 +3,12 @@
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-import httpx
 import pytest
 
 from app.config import settings
 from app.db.connection import get_db
 from app.db.init_db import init_db
 from app.db.models import DailyBaseline, StrategyConfig, Watchlist
-from app.services.alert_service import get_alert
 from app.engine.baseline_calculator import compute_baseline
 from app.engine.resilience import (
     SYSTEM_ALERT_SIGNAL_TYPE,
@@ -22,9 +20,10 @@ from app.engine.resilience import (
 from app.engine.state import runtime_state
 from app.engine.tasks import baseline_precompute_task, market_polling_task
 from app.schemas.watchlist import WatchlistCreate
+from app.services.alert_service import get_alert
+from app.services.market_data.akshare_provider import _parse_sina_realtime_quotes
 from app.services.market_data_service import (
     MarketDataUnavailableError,
-    _parse_sina_realtime_quotes,
     fetch_daily_bars,
     fetch_realtime_quotes_batch,
 )
@@ -54,26 +53,28 @@ def test_qfq_daily_bars_requested(monkeypatch) -> None:
     """Daily bars request forward-adjusted prices so ex-rights history stays continuous."""
     captured: dict = {}
 
-    def fake_ha(numeric_code, start_date, end_date, adjust="qfq"):
-        captured["adjust"] = adjust
-        captured["code"] = numeric_code
-        return [
-            {
-                "date": "2026-08-04",
-                "open": 10.0,
-                "high": 11.0,
-                "low": 9.0,
-                "close": 10.5,
-                "volume": 1000,
-            }
-        ]
+    class _Fake:
+        def fetch_daily_ohlcv(self, stock_code, start_date, end_date, *, adjust="qfq"):
+            captured["adjust"] = adjust
+            captured["code"] = stock_code
+            return [
+                {
+                    "date": "2026-08-04",
+                    "open": 10.0,
+                    "high": 11.0,
+                    "low": 9.0,
+                    "close": 10.5,
+                    "volume": 1000,
+                }
+            ]
 
     monkeypatch.setattr(
-        "app.services.market_data_service.high_available_akshare",
-        fake_ha,
+        "app.services.market_data_service.get_market_data_provider",
+        lambda: _Fake(),
     )
     bars = fetch_daily_bars("sh600519", 60)
     assert captured["adjust"] == "qfq"
+    assert captured["code"] == "sh600519"
     assert len(bars) == 1
     low_min, high_max, actual_n = compute_baseline(bars, 60)
     assert actual_n == 1
@@ -115,11 +116,15 @@ def test_realtime_retry_exponential_backoff(monkeypatch) -> None:
 
     calls = {"n": 0}
 
-    def fake_get(*args, **kwargs):
-        calls["n"] += 1
-        raise httpx.TimeoutException("timed out")
+    class _Boom:
+        def fetch_realtime_quotes(self, stock_codes, *, timeout_seconds=3.0):
+            calls["n"] += 1
+            raise MarketDataUnavailableError("timed out")
 
-    monkeypatch.setattr("app.services.market_data_service.httpx.get", fake_get)
+    monkeypatch.setattr(
+        "app.services.market_data_service.get_market_data_provider",
+        lambda: _Boom(),
+    )
 
     with pytest.raises(MarketDataUnavailableError):
         fetch_realtime_quotes_batch(
@@ -188,8 +193,12 @@ def test_halt_persisted_and_excluded_from_polling(tmp_path, monkeypatch) -> None
 
     fake_now = datetime(2026, 8, 5, 10, 0, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
     monkeypatch.setattr("app.engine.tasks.datetime", _FrozenDateTime(fake_now))
-    monkeypatch.setattr("app.engine.tasks.process_buy_candidates", lambda candidates: [])
-    monkeypatch.setattr("app.engine.tasks.process_sell_candidates", lambda candidates: [])
+    monkeypatch.setattr(
+        "app.engine.tasks.process_buy_candidates", lambda candidates: []
+    )
+    monkeypatch.setattr(
+        "app.engine.tasks.process_sell_candidates", lambda candidates: []
+    )
     monkeypatch.setattr(
         "app.engine.tasks.fetch_realtime_quotes_batch",
         lambda *args, **kwargs: {
@@ -220,7 +229,9 @@ def test_halt_persisted_and_excluded_from_polling(tmp_path, monkeypatch) -> None
         called["hit"] = True
         return {}
 
-    monkeypatch.setattr("app.engine.tasks.fetch_realtime_quotes_batch", _should_not_call)
+    monkeypatch.setattr(
+        "app.engine.tasks.fetch_realtime_quotes_batch", _should_not_call
+    )
     market_polling_task()
     assert called["hit"] is False
 
@@ -277,7 +288,9 @@ def test_baseline_restores_halt_stock(tmp_path, monkeypatch) -> None:
     _reset_runtime()
     add_watchlist(WatchlistCreate(stock_code="600519", stock_name="贵州茅台"))
     with get_db() as session:
-        session.query(Watchlist).filter_by(stock_code="sh600519").update({"status": "HALT"})
+        session.query(Watchlist).filter_by(stock_code="sh600519").update(
+            {"status": "HALT"}
+        )
         session.commit()
 
     bars = [
@@ -297,13 +310,17 @@ def test_baseline_restores_halt_stock(tmp_path, monkeypatch) -> None:
 
     with get_db() as session:
         status = session.query(Watchlist).filter_by(stock_code="sh600519").one().status
-        baseline = session.query(DailyBaseline).filter_by(stock_code="sh600519").one_or_none()
+        baseline = (
+            session.query(DailyBaseline).filter_by(stock_code="sh600519").one_or_none()
+        )
     assert status == "NORMAL"
     assert baseline is not None
     assert baseline.actual_n == 20
 
 
-def test_poll_round_records_quote_delay_on_all_batch_failures(tmp_path, monkeypatch) -> None:
+def test_poll_round_records_quote_delay_on_all_batch_failures(
+    tmp_path, monkeypatch
+) -> None:
     sqlite_path = tmp_path / "amtsm.db"
     monkeypatch.setattr(settings, "sqlite_path", str(sqlite_path))
     monkeypatch.setattr(settings, "polling_consecutive_failure_threshold", 2)

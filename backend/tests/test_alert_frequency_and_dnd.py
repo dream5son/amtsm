@@ -8,6 +8,8 @@ from datetime import datetime
 from unittest.mock import MagicMock
 from zoneinfo import ZoneInfo
 
+import pytest
+
 from app.config import settings
 from app.db.connection import get_db
 from app.db.init_db import init_db
@@ -21,6 +23,7 @@ from app.services.alert_service import (
     process_buy_alert,
     process_sell_alert,
 )
+from app.services.notifier.email_notifier import email_notifier
 from app.services.wechat_notifier import SendResult
 
 
@@ -41,6 +44,23 @@ def _candidate(**overrides) -> dict:
 
 def _ok_send() -> SendResult:
     return SendResult(ok=True, errcode=0, errmsg="ok", message="发送成功")
+
+
+@pytest.fixture(autouse=True)
+def _block_real_notifications(monkeypatch) -> None:
+    """Never hit WeChat/SMTP even if local .env enables extra channels."""
+    monkeypatch.setattr(settings, "notify_channels", "wechat")
+    monkeypatch.setattr(settings, "alert_max_per_stock_per_day", 0)
+    monkeypatch.setattr(
+        alert_service.wechat_notifier,
+        "send_text",
+        MagicMock(return_value=_ok_send()),
+    )
+    monkeypatch.setattr(
+        email_notifier,
+        "send_text",
+        MagicMock(return_value=_ok_send()),
+    )
 
 
 def test_is_alert_window_open_boundaries() -> None:

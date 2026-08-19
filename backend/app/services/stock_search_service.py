@@ -1,59 +1,24 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from threading import Lock
 
-import akshare as ak
-from pypinyin import Style, lazy_pinyin
-
-
-@dataclass(slots=True)
-class StockMeta:
-    stock_code: str
-    stock_name: str
-    exchange: str
-    short_code: str
-    initials: str
-
+from app.services.market_data import (
+    StockMeta,
+    get_market_data_provider,
+    normalize_stock_code,
+)
 
 _CACHE_TTL = timedelta(hours=12)
 _cache_lock = Lock()
 _cached_items: list[StockMeta] = []
 _cached_at: datetime | None = None
 
-
-def normalize_stock_code(raw: str) -> str:
-    value = raw.strip().lower()
-    if len(value) == 8 and value[:2] in {"sh", "sz", "bj"} and value[2:].isdigit():
-        return value
-
-    if len(value) == 6 and value.isdigit():
-        first = value[0]
-        if first in {"6", "9"}:
-            return f"sh{value}"
-        if first in {"0", "2", "3"}:
-            return f"sz{value}"
-        if first in {"4", "8"}:
-            return f"bj{value}"
-
-    raise ValueError("invalid stock code")
-
-
-def _exchange_from_normalized(code: str) -> str:
-    prefix = code[:2]
-    if prefix == "sh":
-        return "SH"
-    if prefix == "sz":
-        return "SZ"
-    if prefix == "bj":
-        return "BJ"
-    return "UNKNOWN"
-
-
-def _get_initials(name: str) -> str:
-    letters = lazy_pinyin(name, style=Style.FIRST_LETTER, strict=False)
-    return "".join(letters).upper()
+__all__ = [
+    "StockMeta",
+    "normalize_stock_code",
+    "search_stocks",
+]
 
 
 def _is_cache_valid(now: datetime) -> bool:
@@ -63,31 +28,7 @@ def _is_cache_valid(now: datetime) -> bool:
 
 
 def _build_cache() -> list[StockMeta]:
-    df = ak.stock_info_a_code_name()
-    items: list[StockMeta] = []
-
-    for row in df.itertuples(index=False):
-        code = str(getattr(row, "code", "")).strip()
-        name = str(getattr(row, "name", "")).strip()
-        if not code or not name:
-            continue
-
-        try:
-            normalized = normalize_stock_code(code)
-        except ValueError:
-            continue
-
-        items.append(
-            StockMeta(
-                stock_code=normalized,
-                stock_name=name,
-                exchange=_exchange_from_normalized(normalized),
-                short_code=normalized[2:],
-                initials=_get_initials(name),
-            )
-        )
-
-    return items
+    return get_market_data_provider().list_a_share_universe()
 
 
 def _load_stock_meta() -> list[StockMeta]:

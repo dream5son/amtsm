@@ -14,11 +14,18 @@ from app.services.alert_service import (
     format_take_profit_message,
     process_alert,
 )
+from app.services.notifier.email_notifier import email_notifier
 from app.services.wechat_notifier import SendResult
+
+
+def _ok_send() -> SendResult:
+    return SendResult(ok=True, errcode=0, errmsg="ok")
 
 
 def _setup(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(settings, "sqlite_path", str(tmp_path / "amtsm.db"))
+    monkeypatch.setattr(settings, "notify_channels", "wechat")
+    monkeypatch.setattr(settings, "alert_max_per_stock_per_day", 0)
     init_db()
     runtime_state.reset_daily()
     runtime_state.exit_fired_today.clear()
@@ -29,7 +36,12 @@ def _setup(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(
         alert_service.wechat_notifier,
         "send_text",
-        lambda _content: SendResult(ok=True, errcode=0, errmsg="ok"),
+        lambda _content: _ok_send(),
+    )
+    monkeypatch.setattr(
+        email_notifier,
+        "send_text",
+        lambda _content: _ok_send(),
     )
 
 

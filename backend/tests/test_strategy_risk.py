@@ -194,5 +194,5 @@ def test_unadjusted_cache_migrates_back_to_qfq(tmp_path, monkeypatch) -> None:
         value = conn.execute(
             text("SELECT value FROM schema_meta WHERE key = 'price_adjust'")
         ).scalar()
-    assert value == "qfq"
+    assert value == "qfq_v2"
 

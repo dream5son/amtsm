@@ -437,3 +437,51 @@ def test_voided_gap_allows_fresh_buy_after_window_rebuilds() -> None:
     assert trade.entry_price == 9.6
     assert trade.exit_date == "2024-03-08"
     assert trade.exit_reason == EXIT_STOP_LOSS
+
+
+def test_detect_unadjusted_corporate_actions_flags_ex_rights_gap() -> None:
+    """sh600900 2010-07-20 十转五 on an unadjusted series: 12.12 → 8.11."""
+    from app.services.backtest_engine import detect_unadjusted_corporate_actions
+
+    bars = [
+        _bar("2024-01-04", 12.0, 12.3, 11.9, 12.12),
+        _bar("2024-01-05", 8.11, 8.14, 8.02, 8.13),
+    ]
+    assert detect_unadjusted_corporate_actions(bars) == ["2024-01-05"]
+
+
+def test_validate_bar_series_accepts_qfq_ex_rights_sequence() -> None:
+    from app.services.backtest_engine import validate_bar_series
+
+    bars = [
+        _bar("2024-01-04", 8.10, 8.20, 8.05, 8.12),
+        _bar("2024-01-05", 8.11, 8.18, 8.08, 8.15),
+    ]
+    validate_bar_series(bars)
+
+
+def test_validate_bar_series_rejects_unadjusted_sequence() -> None:
+    import pytest
+
+    from app.services.backtest_engine import validate_bar_series
+
+    bars = [
+        _bar("2024-01-04", 12.0, 12.3, 11.9, 12.12),
+        _bar("2024-01-05", 8.11, 8.14, 8.02, 8.13),
+    ]
+    with pytest.raises(ValueError, match="unadjusted"):
+        validate_bar_series(bars)
+
+
+def test_sh600900_qfq_ex_rights_not_stop_loss() -> None:
+    """Regression: qfq 除权日不应产生 -33% 假止损（见 job #18 不复权 bug）。"""
+    bars = _WARMUP + [
+        _bar(_START_DATE, 8.10, 8.20, 8.05, 8.12, _SURGE_VOL),
+        _bar("2024-01-08", 8.11, 8.18, 8.08, 8.15),
+    ]
+    result = run_backtest(bars, start_date=_START_DATE, n=3, x=1.10, risk=_params())
+    assert len(result.trades) == 1
+    trade = result.trades[0]
+    assert trade.exit_reason == EXIT_PERIOD_END
+    assert trade.pnl_pct > 0
+    assert trade.pnl_pct < 0.05

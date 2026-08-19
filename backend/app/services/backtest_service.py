@@ -18,6 +18,7 @@ from sqlalchemy.exc import IntegrityError
 
 from app.config import settings
 from app.db.connection import get_db
+from app.db.init_db import get_price_adjust_migrated_at
 from app.db.models import BacktestJob, BacktestTrade, DailyMarketSnapshot, Watchlist
 from app.engine.market_hours import SH_TZ
 from app.market_signal import RiskParams
@@ -29,8 +30,10 @@ from app.schemas.strategy import (
 )
 from app.services.backtest_engine import (
     BacktestResult,
+    detect_unadjusted_corporate_actions,
     run_backtest,
     sanitize_bars_for_backtest,
+    validate_bar_series,
 )
 from app.services.market_data_service import (
     MarketDataUnavailableError,
@@ -657,7 +660,37 @@ def _fetch_and_upsert_range(stock_code: str, start: date, end: date) -> int:
     return written
 
 
-def _ensure_snapshot_range(stock_code: str, start: date, end: date) -> None:
+def _invalidate_snapshot_range(stock_code: str, start: date, end: date) -> int:
+    """Delete cached OHLC rows for ``[start, end]`` so the next fetch is fresh."""
+    with get_db() as session:
+        deleted = (
+            session.query(DailyMarketSnapshot)
+            .filter(
+                DailyMarketSnapshot.stock_code == stock_code,
+                DailyMarketSnapshot.trade_date >= start.isoformat(),
+                DailyMarketSnapshot.trade_date <= end.isoformat(),
+            )
+            .delete(synchronize_session=False)
+        )
+        session.commit()
+    if deleted:
+        logger.info(
+            "backtest job invalidated %d cached bar(s) stock=%s range=%s..%s",
+            deleted,
+            stock_code,
+            start.isoformat(),
+            end.isoformat(),
+        )
+    return deleted
+
+
+def _ensure_snapshot_range(
+    stock_code: str,
+    start: date,
+    end: date,
+    *,
+    force: bool = False,
+) -> None:
     with get_db() as session:
         trade_dates = _snapshot_trade_dates(session, stock_code, start, end)
         calendar_days = (end - start).days + 1
@@ -665,7 +698,7 @@ def _ensure_snapshot_range(stock_code: str, start: date, end: date) -> None:
         count_ok = len(trade_dates) >= expected_min
         holes = _coverage_holes(trade_dates, start, end)
 
-    if count_ok and not holes:
+    if not force and count_ok and not holes:
         logger.info(
             "backtest job cache hit stock=%s range=%s..%s",
             stock_code,
@@ -674,7 +707,7 @@ def _ensure_snapshot_range(stock_code: str, start: date, end: date) -> None:
         )
         return
 
-    fetch_ranges = [(start, end)] if not count_ok or not trade_dates else holes
+    fetch_ranges = [(start, end)] if force or not count_ok or not trade_dates else holes
     logger.info(
         "backtest job fetching market data stock=%s range=%s..%s windows=%s",
         stock_code,
@@ -730,6 +763,43 @@ def _load_bars(stock_code: str, start: date, end: date) -> list[dict]:
         }
         for row in rows
     ]
+
+
+def _load_and_validate_bars(
+    stock_code: str,
+    warmup_start: date,
+    end: date,
+) -> list[dict]:
+    """Load bars, refetching once when the cache looks like unadjusted OHLC."""
+    _ensure_snapshot_range(stock_code, warmup_start, end)
+    bars = _load_bars(stock_code, warmup_start, end)
+    if not bars:
+        raise BacktestDataError(
+            f"no cached market data for {stock_code} in [{warmup_start}, {end}]"
+        )
+    try:
+        validate_bar_series(bars)
+        return bars
+    except ValueError as exc:
+        logger.warning(
+            "backtest job stale/unadjusted cache for %s: %s — refetching",
+            stock_code,
+            exc,
+        )
+    _invalidate_snapshot_range(stock_code, warmup_start, end)
+    _ensure_snapshot_range(stock_code, warmup_start, end, force=True)
+    bars = _load_bars(stock_code, warmup_start, end)
+    if not bars:
+        raise BacktestDataError(
+            f"no cached market data for {stock_code} in [{warmup_start}, {end}]"
+        )
+    try:
+        validate_bar_series(bars)
+    except ValueError as exc:
+        raise BacktestDataError(
+            f"suspected unadjusted bars for {stock_code}: {exc}"
+        ) from exc
+    return bars
 
 
 def _mark_failed(job_id: int, message: str) -> None:
@@ -812,12 +882,7 @@ def run_job(job_id: int) -> None:
         end = date.fromisoformat(end_date_str)
         warmup_start = _warmup_start(start, n)
 
-        _ensure_snapshot_range(stock_code, warmup_start, end)
-        bars = _load_bars(stock_code, warmup_start, end)
-        if not bars:
-            raise BacktestDataError(
-                f"no cached market data for {stock_code} in [{warmup_start}, {end}]"
-            )
+        bars = _load_and_validate_bars(stock_code, warmup_start, end)
         logger.info(
             "backtest job %s loaded %d bars stock=%s warmup=%s..%s",
             job_id,
@@ -935,8 +1000,31 @@ def get_watchlist_backtest_summary(stock_codes: list[str]) -> dict[str, dict]:
             "backtest_sample_insufficient": (
                 bool(chosen_success.sample_insufficient) if chosen_success else False
             ),
-            "backtest_stale": bool(chosen_success and success_matching is None),
+            "backtest_stale": _is_backtest_stale(
+                chosen_success, success_matching, get_price_adjust_migrated_at()
+            ),
             "backtest_error_message": latest_failed.error_message if latest_failed else None,
         }
 
     return result
+
+
+def _is_backtest_stale(
+    chosen_success: BacktestJob | None,
+    success_matching: BacktestJob | None,
+    price_adjust_migrated_at: datetime | None,
+) -> bool:
+    """True when params drifted or the job ran on pre-migration OHLC cache."""
+    if chosen_success is None:
+        return False
+    if success_matching is None:
+        return True
+    if price_adjust_migrated_at is None or chosen_success.finished_at is None:
+        return False
+    finished = chosen_success.finished_at
+    migrated = price_adjust_migrated_at
+    if finished.tzinfo is None and migrated.tzinfo is not None:
+        finished = finished.replace(tzinfo=migrated.tzinfo)
+    elif finished.tzinfo is not None and migrated.tzinfo is None:
+        migrated = migrated.replace(tzinfo=finished.tzinfo)
+    return finished < migrated

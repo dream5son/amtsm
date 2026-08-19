@@ -105,6 +105,8 @@ def test_market_polling_generates_signal_and_keeps_previous_signal(tmp_path, mon
     fake_now = datetime(2026, 8, 5, 10, 0, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
     monkeypatch.setattr("app.engine.tasks.datetime", _FrozenDateTime(fake_now))
     monkeypatch.setattr("app.engine.tasks.process_buy_candidates", lambda candidates: [])
+    monkeypatch.setattr("app.engine.tasks.process_sell_candidates", lambda candidates: [])
+    monkeypatch.setattr("app.engine.tasks.process_risk_candidates", lambda candidates: [])
     monkeypatch.setattr(
         "app.engine.tasks.fetch_realtime_quotes_batch",
         lambda *args, **kwargs: {

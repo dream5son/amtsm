@@ -1,5 +1,5 @@
 from datetime import date
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pandas as pd
 import pytest
@@ -10,12 +10,11 @@ from app.db.init_db import init_db
 from app.db.models import DailyMarketSnapshot
 from app.engine.tasks import daily_snapshot_task, get_snapshot, upsert_snapshot
 from app.schemas.watchlist import WatchlistCreate
+from app.services.market_data.akshare_provider import _normalize_df_em
 from app.services.market_data_service import (
     MarketDataUnavailableError,
     MissingTradeDayBarError,
     StockDataFetchError,
-    _normalize_df_em,
-    _source_failure_time,
     fetch_trade_day_bar,
 )
 from app.services.watchlist_service import add_watchlist
@@ -41,7 +40,6 @@ def test_normalize_df_em_includes_turnover_rate() -> None:
 
 
 def test_fetch_trade_day_bar_returns_matching_day() -> None:
-    _source_failure_time.clear()
     fake_bars = [
         {
             "date": "2026-08-05",
@@ -53,39 +51,42 @@ def test_fetch_trade_day_bar_returns_matching_day() -> None:
             "turnover_rate": 2.5,
         }
     ]
+    provider = MagicMock()
+    provider.fetch_daily_ohlcv.return_value = fake_bars
     with patch(
-        "app.services.market_data_service.high_available_akshare",
-        return_value=fake_bars,
-    ) as mock_fetch:
+        "app.services.market_data_service.get_market_data_provider",
+        return_value=provider,
+    ):
         bar = fetch_trade_day_bar("sh600519", date(2026, 8, 5), retries=0)
 
     assert bar["close"] == 10.5
     assert bar["turnover_rate"] == 2.5
-    mock_fetch.assert_called_once_with(
-        numeric_code="600519",
-        start_date="20260805",
-        end_date="20260805",
-        adjust="qfq",
+    provider.fetch_daily_ohlcv.assert_called_once_with(
+        "sh600519", date(2026, 8, 5), date(2026, 8, 5), adjust="qfq"
     )
 
 
 def test_fetch_trade_day_bar_missing_day_raises() -> None:
-    with patch(
-        "app.services.market_data_service.high_available_akshare",
-        return_value=[
-            {
-                "date": "2026-08-04",
-                "open": 10.0,
-                "high": 11.0,
-                "low": 9.5,
-                "close": 10.5,
-                "volume": 1000.0,
-                "turnover_rate": None,
-            }
-        ],
+    provider = MagicMock()
+    provider.fetch_daily_ohlcv.return_value = [
+        {
+            "date": "2026-08-04",
+            "open": 10.0,
+            "high": 11.0,
+            "low": 9.5,
+            "close": 10.5,
+            "volume": 1000.0,
+            "turnover_rate": None,
+        }
+    ]
+    with (
+        patch(
+            "app.services.market_data_service.get_market_data_provider",
+            return_value=provider,
+        ),
+        pytest.raises(MissingTradeDayBarError),
     ):
-        with pytest.raises(MissingTradeDayBarError):
-            fetch_trade_day_bar("sh600519", date(2026, 8, 5), retries=0)
+        fetch_trade_day_bar("sh600519", date(2026, 8, 5), retries=0)
 
 
 def test_upsert_snapshot_is_idempotent(tmp_path, monkeypatch) -> None:

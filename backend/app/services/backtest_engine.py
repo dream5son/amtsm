@@ -86,6 +86,50 @@ def has_valid_ohlc(open_price: float, high_price: float, low_price: float, close
     return True
 
 
+# Minimum overnight open gap (vs prior close) that suggests an unadjusted
+# ex-rights / ex-dividend discontinuity rather than a real session move.
+_UNADJUSTED_OVERNIGHT_GAP_PCT = 0.20
+
+
+def detect_unadjusted_corporate_actions(bars: list[dict]) -> list[str]:
+    """Return ISO dates where overnight gaps look like unadjusted corporate actions.
+
+    A large drop from ``prev.close`` to ``curr.open`` with a normal intraday
+    range (not an extreme-range dirty qfq bar) is the signature of a bonus
+    issue or dividend paid on an unadjusted series — e.g. sh600900 2010-07-20.
+    """
+    anomalies: list[str] = []
+    prev: dict | None = None
+    for bar in bars:
+        if not is_comparable_bar(bar):
+            continue
+        if prev is not None:
+            prev_close = float(prev["close"])
+            curr_open = float(bar["open"])
+            close = float(bar["close"])
+            if prev_close > 0:
+                overnight_gap = (prev_close - curr_open) / prev_close
+                intraday_range = (float(bar["high"]) - float(bar["low"])) / close
+                if (
+                    overnight_gap > _UNADJUSTED_OVERNIGHT_GAP_PCT + 1e-12
+                    and intraday_range <= _MAX_INTRADAY_RANGE_PCT + 1e-12
+                ):
+                    anomalies.append(str(bar["date"]))
+        prev = bar
+    return anomalies
+
+
+def validate_bar_series(bars: list[dict]) -> None:
+    """Raise ValueError when cached bars look like an unadjusted OHLC series."""
+    anomalies = detect_unadjusted_corporate_actions(bars)
+    if anomalies:
+        sample = ", ".join(anomalies[:5])
+        suffix = "..." if len(anomalies) > 5 else ""
+        raise ValueError(
+            f"suspected unadjusted corporate-action gaps on: {sample}{suffix}"
+        )
+
+
 def sanitize_bars_for_backtest(bars: list[dict]) -> list[dict]:
     """Drop incomparable bars for kline display, preserving oldest-first order.
 
