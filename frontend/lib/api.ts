@@ -156,42 +156,6 @@ export const DEFAULT_STRATEGY: StrategyConfig = {
   enable_tech_sell_while_holding: false,
 };
 
-export type JobStatus = {
-  status: string;
-  latest_job: JobLog | null;
-};
-
-export type JobLog = {
-  id: number;
-  job_name: string;
-  trade_date: string;
-  status: string;
-  started_at: string;
-  finished_at: string | null;
-  total_count: number;
-  success_count: number;
-  failed_count: number;
-  error_summary: string | null;
-};
-
-export type JobLogItem = {
-  id: number;
-  stock_code: string;
-  stock_name: string | null;
-  strategy_n: number;
-  actual_n: number | null;
-  status: string;
-  low_min: number | null;
-  high_max: number | null;
-  error_message: string | null;
-  processed_at: string | null;
-};
-
-export type JobLogDetail = {
-  job_log: JobLog | null;
-  items: JobLogItem[];
-};
-
 export async function fetchWatchlist(): Promise<WatchlistItem[]> {
   const res = await fetch(`${API_BASE}/api/watchlist`, { cache: "no-store" });
   if (!res.ok) {
@@ -318,23 +282,6 @@ export async function clearStrategyOverride(stockCode: string): Promise<StockStr
   return (await res.json()) as StockStrategyOverride;
 }
 
-export async function fetchJobStatus(): Promise<JobStatus> {
-  const res = await fetch(`${API_BASE}/api/jobs/daily-baseline/status`, { cache: "no-store" });
-  if (!res.ok) {
-    throw new Error("failed to fetch job status");
-  }
-  return (await res.json()) as JobStatus;
-}
-
-export async function fetchJobLogLatest(page = 1, size = 50): Promise<JobLogDetail> {
-  const params = new URLSearchParams({ page: String(page), size: String(size) });
-  const res = await fetch(`${API_BASE}/api/jobs/daily-baseline/logs/latest?${params}`, { cache: "no-store" });
-  if (!res.ok) {
-    throw new Error("failed to fetch job log");
-  }
-  return (await res.json()) as JobLogDetail;
-}
-
 export type SystemStatus = {
   quote_delay: boolean;
   consecutive_poll_failures: number;
@@ -348,10 +295,6 @@ export async function fetchSystemStatus(): Promise<SystemStatus> {
     throw new Error("failed to fetch system status");
   }
   return (await res.json()) as SystemStatus;
-}
-
-export function getJobStatusSSEUrl(): string {
-  return `${API_BASE}/api/jobs/daily-baseline/status/stream`;
 }
 
 export function getSystemStatusSSEUrl(): string {

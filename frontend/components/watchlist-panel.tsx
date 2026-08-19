@@ -5,7 +5,6 @@ import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import BacktestConfigDialog from "@/components/backtest-config-dialog";
 import BacktestDetailDialog from "@/components/backtest-detail-dialog";
 import BacktestRing from "@/components/backtest-ring";
-import JobLogDialog from "@/components/job-log-dialog";
 import PositionLedgerDrawer from "@/components/position-ledger-drawer";
 import RegisterBuyDialog from "@/components/register-buy-dialog";
 import RegisterSellDialog from "@/components/register-sell-dialog";
@@ -13,7 +12,6 @@ import StatusBadge from "@/components/status-badge";
 import {
   createWatchlist,
   fetchWatchlist,
-  getJobStatusSSEUrl,
   getSystemStatusSSEUrl,
   removeWatchlist,
   searchStocks,
@@ -93,9 +91,6 @@ export default function WatchlistPanel({ onOpenStrategy }: WatchlistPanelProps) 
   const [addingCode, setAddingCode] = useState<string | null>(null);
   const [removingCode, setRemovingCode] = useState<string | null>(null);
   const [message, setMessage] = useState("");
-  const [jobStatus, setJobStatus] = useState("未开始");
-  const [sseError, setSseError] = useState(false);
-  const [logDialogOpen, setLogDialogOpen] = useState(false);
   const [quoteDelay, setQuoteDelay] = useState(false);
   const [buyTarget, setBuyTarget] = useState<WatchlistItem | null>(null);
   const [sellTarget, setSellTarget] = useState<WatchlistItem | null>(null);
@@ -175,20 +170,6 @@ export default function WatchlistPanel({ onOpenStrategy }: WatchlistPanelProps) 
       } catch {
         // Keep last known flag; status stream is best-effort.
       }
-    };
-    return () => es.close();
-  }, []);
-
-  // SSE subscription for job status
-  useEffect(() => {
-    const url = getJobStatusSSEUrl();
-    const es = new EventSource(url);
-    es.onmessage = (event) => {
-      setJobStatus(event.data);
-      setSseError(false);
-    };
-    es.onerror = () => {
-      setSseError(true);
     };
     return () => es.close();
   }, []);
@@ -383,7 +364,6 @@ export default function WatchlistPanel({ onOpenStrategy }: WatchlistPanelProps) 
                 <th className="whitespace-nowrap py-2 pr-2 text-left font-medium">距止损</th>
                 <th className="whitespace-nowrap py-2 pr-2 text-left font-medium">状态</th>
                 <th className="whitespace-nowrap py-2 pr-2 text-left font-medium">信号</th>
-                <th className="whitespace-nowrap py-2 pr-2 text-left font-medium">定时任务</th>
                 <th className="w-[320px] min-w-[320px] whitespace-nowrap py-2 text-left font-medium">操作</th>
               </tr>
             </thead>
@@ -464,46 +444,6 @@ export default function WatchlistPanel({ onOpenStrategy }: WatchlistPanelProps) 
                         ) : null}
                       </span>
                     </td>
-                    <td className="py-2 pr-2">
-                      <span
-                        className={
-                          jobStatus === "执行中"
-                            ? "inline-flex items-center gap-1 rounded-full bg-blue-100 px-2 py-0.5 text-xs text-blue-700"
-                            : jobStatus === "执行失败"
-                              ? "inline-flex items-center rounded-full bg-rose-100 px-2 py-0.5 text-xs text-rose-700"
-                              : "inline-flex items-center rounded-full bg-slate-100 px-2 py-0.5 text-xs text-slate-600"
-                        }
-                      >
-                        {jobStatus === "执行中" && <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-blue-500" />}
-                        {jobStatus}
-                      </span>
-                      {sseError && <span className="ml-1 text-xs text-amber-600">⚠</span>}
-                      <button
-                        type="button"
-                        onClick={() => setLogDialogOpen(true)}
-                        title="查看日志"
-                        aria-label="查看日志"
-                        className="ml-2 inline-flex items-center justify-center rounded p-0.5 text-sky-600 hover:bg-sky-50 hover:text-sky-800"
-                      >
-                        <svg
-                          xmlns="http://www.w3.org/2000/svg"
-                          viewBox="0 0 24 24"
-                          fill="none"
-                          stroke="currentColor"
-                          strokeWidth="1.75"
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                          className="h-3.5 w-3.5"
-                          aria-hidden="true"
-                        >
-                          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-                          <polyline points="14 2 14 8 20 8" />
-                          <line x1="8" y1="13" x2="16" y2="13" />
-                          <line x1="8" y1="17" x2="16" y2="17" />
-                          <line x1="8" y1="9" x2="10" y2="9" />
-                        </svg>
-                      </button>
-                    </td>
                     <td className="w-[320px] min-w-[320px] py-2">
                       <div className="flex flex-wrap gap-1">
                         <button
@@ -581,7 +521,6 @@ export default function WatchlistPanel({ onOpenStrategy }: WatchlistPanelProps) 
         <div className="mt-4 rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-700 shadow-sm">{message}</div>
       ) : null}
 
-      <JobLogDialog open={logDialogOpen} onClose={() => setLogDialogOpen(false)} />
       <RegisterBuyDialog
         open={buyTarget != null}
         item={buyTarget}
