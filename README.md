@@ -24,6 +24,7 @@ This project does **not** place orders or sync broker positions.
 - docs/: product and design docs
 - backend/: API service, scheduler and engine skeleton
 - frontend/: web UI skeleton
+- deploy/: Docker Compose, Dockerfiles, and nginx config
 - scripts/: local start scripts
 
 ## Quick Start
@@ -38,6 +39,20 @@ This project does **not** place orders or sync broker positions.
    - pnpm install
    - pnpm dev
 2. Open http://localhost:3000
+
+### 3) Docker (backend + frontend + nginx)
+Images are pinned to **Python 3.12**, **Node 22**, and **pnpm 11.20.0**. Python packages come from `backend/uv.lock` (`uv sync --frozen --no-dev`); Node packages come from `pnpm-lock.yaml` (`pnpm install --frozen-lockfile`). Do not use `python:latest` / `node:latest` or unlocked `pip` / `npm` installs.
+
+Env files stay with each app (Compose reads them; `deploy/.env` is only the nginx port):
+
+1. Copy `backend/.env.example` to `backend/.env` and fill WeChat / SMTP (and `CORS_ORIGINS` if you open the UI from a host other than `localhost`).
+2. Copy `frontend/.env.example` to `frontend/.env` for local `pnpm dev`. Docker builds with an empty `NEXT_PUBLIC_API_BASE_URL` so the browser calls same-origin `/api` through nginx.
+3. Optionally copy `deploy/.env.example` to `deploy/.env` to change `HTTP_PORT`.
+4. From `deploy/`:
+   - `docker compose up -d --build`
+5. Open http://localhost (or `http://localhost:$HTTP_PORT`).
+
+nginx is the only published port. It proxies `/` to the Next.js app and `/api/` (including SSE) to FastAPI. SQLite is stored in the `amtsm-data` volume at `/data/amtsm.db`.
 
 ## Notification Channels
 

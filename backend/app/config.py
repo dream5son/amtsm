@@ -12,6 +12,8 @@ class Settings(BaseSettings):
     api_host: str = "0.0.0.0"
     api_port: int = 8000
     sqlite_path: str = str(Path(__file__).resolve().parents[2] / "data" / "amtsm.db")
+    # Comma-separated browser origins (scheme + host + optional port).
+    cors_origins: str = "http://localhost:3000,http://localhost"
 
     # Schedule placeholders
     baseline_hour: int = 8
@@ -68,6 +70,10 @@ class Settings(BaseSettings):
     backtest_min_trade_count: int = 5
     backtest_snapshot_fetch_retries: int = 2
     backtest_snapshot_fetch_retry_backoff_seconds: float = 0.5
+
+    @property
+    def cors_origin_list(self) -> list[str]:
+        return [item.strip() for item in self.cors_origins.split(",") if item.strip()]
 
 
 settings = Settings()
