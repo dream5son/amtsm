@@ -1,6 +1,13 @@
 from __future__ import annotations
 
-from app.schemas.strategy import LEGACY_TRAILING_LADDER, parse_trailing_ladder
+from app.schemas.strategy import (
+    DEFAULT_BREAK_EVEN_BUFFER_PCT,
+    DEFAULT_BREAK_EVEN_TRIGGER_PCT,
+    DEFAULT_STOP_LOSS_PCT,
+    DEFAULT_TRAILING_LADDER,
+    LEGACY_TRAILING_LADDER,
+    parse_trailing_ladder,
+)
 from app.services.backtest_engine import (
     EXIT_PERIOD_END,
     EXIT_STOP_LOSS,
@@ -22,6 +29,16 @@ def _params(**overrides) -> RiskParams:
     )
     base.update(overrides)
     return RiskParams(**base)
+
+
+def _growth_risk() -> RiskParams:
+    return RiskParams(
+        stop_loss_pct=DEFAULT_STOP_LOSS_PCT,
+        break_even_trigger_pct=DEFAULT_BREAK_EVEN_TRIGGER_PCT,
+        break_even_buffer_pct=DEFAULT_BREAK_EVEN_BUFFER_PCT,
+        trailing_ladder=parse_trailing_ladder(DEFAULT_TRAILING_LADDER),
+        enable_partial_take_profit=False,
+    )
 
 
 _QUIET_VOL = 1000.0
@@ -86,8 +103,8 @@ def test_buy_then_stop_loss_exit() -> None:
 def test_buy_then_trailing_take_profit_exit() -> None:
     bars = _WARMUP + [
         _bar(_START_DATE, 10.0, 10.1, 9.9, 10.0, _SURGE_VOL),  # entry at 10.0
-        _bar("2024-01-08", 11.0, 11.5, 11.0, 11.3),  # rally: ratchets stop to 10.05
-        _bar("2024-01-09", 10.2, 11.6, 10.0, 10.1),  # pullback triggers exit
+        # +15% high; profit-based stop = 10 + 1.5*0.85 = 11.275; low 11.0 fills.
+        _bar("2024-01-08", 11.0, 11.5, 11.0, 11.3),
     ]
     risk = _params()
     result = run_backtest(bars, start_date=_START_DATE, n=3, x=1.10, risk=risk)
@@ -95,9 +112,9 @@ def test_buy_then_trailing_take_profit_exit() -> None:
     assert len(result.trades) == 1
     trade = result.trades[0]
     assert trade.entry_price == 10.0
-    assert trade.exit_date == "2024-01-09"
+    assert trade.exit_date == "2024-01-08"
     assert trade.exit_reason == EXIT_TAKE_PROFIT
-    assert abs(trade.exit_price - 10.05) < 1e-9
+    assert abs(trade.exit_price - 11.0) < 1e-9
     assert trade.pnl_pct > 0
 
     # Cross-check against a hand-rolled risk_rules.evaluate replay (design.md
@@ -112,19 +129,9 @@ def test_buy_then_trailing_take_profit_exit() -> None:
         price=11.5,
         params=risk,
     )
-    assert abs(step2.stop_price - 10.05) < 1e-9
-    assert 11.0 > step2.stop_price  # day-2 low does not breach -> no exit yet
-
-    step3 = evaluate(
-        avg_cost=10.0,
-        highest_since_hold=step2.highest_since_hold,
-        prev_stop=step2.stop_price,
-        price=11.6,
-        params=risk,
-    )
-    assert abs(step3.stop_price - 10.05) < 1e-9
-    assert 10.0 <= step3.stop_price  # day-3 low breaches -> exit
-    manual_exit_price = min(10.2, step3.stop_price)
+    assert abs(step2.stop_price - 11.275) < 1e-9
+    assert 11.0 <= step2.stop_price  # day-2 low breaches -> same-day exit
+    manual_exit_price = min(11.0, step2.stop_price)
     assert abs(manual_exit_price - trade.exit_price) < 1e-9
     manual_reason = EXIT_STOP_LOSS if manual_exit_price < 10.0 - 1e-12 else EXIT_TAKE_PROFIT
     assert manual_reason == trade.exit_reason
@@ -177,7 +184,6 @@ def test_enable_partial_take_profit_is_forced_off() -> None:
     bars = _WARMUP + [
         _bar(_START_DATE, 10.0, 10.1, 9.9, 10.0, _SURGE_VOL),
         _bar("2024-01-08", 11.0, 11.5, 11.0, 11.3),
-        _bar("2024-01-09", 10.2, 11.6, 10.0, 10.1),
     ]
     risk = _params(enable_partial_take_profit=True)
     result = run_backtest(bars, start_date=_START_DATE, n=3, x=1.10, risk=risk)
@@ -516,6 +522,101 @@ def test_sh600900_unadjusted_job18_gap_is_flagged() -> None:
     assert detect_unadjusted_corporate_actions(bars) == ["2010-07-20"]
 
 
+def test_detect_skips_share_reform_resume_after_zero_volume_halt() -> None:
+    """sz000651 2006-03-08 股改复牌: halt fills then ~24% gap is still qfq."""
+    from app.services.backtest_engine import detect_unadjusted_corporate_actions
+
+    bars = [
+        _bar("2006-02-20", 0.55, 0.572, 0.5412, 0.56364, 4_099_356.0),
+        _bar("2006-03-07", 0.56364, 0.56364, 0.56364, 0.56364, 0.0),
+        _bar("2006-03-08", 0.42592, 0.4378, 0.4202, 0.42108, 4_363_122.0),
+    ]
+    assert detect_unadjusted_corporate_actions(bars) == []
+
+
+def test_detect_skips_share_reform_resume_when_halt_dates_omitted() -> None:
+    """Same 股改 gap when the provider drops halt days instead of filling them."""
+    from app.services.backtest_engine import detect_unadjusted_corporate_actions
+
+    bars = [
+        _bar("2006-02-20", 0.55, 0.572, 0.5412, 0.56364, 4_099_356.0),
+        _bar("2006-03-08", 0.42592, 0.4378, 0.4202, 0.42108, 4_363_122.0),
+    ]
+    assert detect_unadjusted_corporate_actions(bars) == []
+
+
+def test_unadjusted_ex_rights_after_weekend_is_still_flagged() -> None:
+    """Friday→Monday 10转5 must still fail the safety net (not a halt)."""
+    from app.services.backtest_engine import detect_unadjusted_corporate_actions
+
+    bars = [
+        _bar("2010-07-16", 12.0, 12.3, 11.9, 12.12),
+        _bar("2010-07-19", 8.11, 8.14, 8.02, 8.13),
+    ]
+    assert detect_unadjusted_corporate_actions(bars) == ["2010-07-19"]
+
+
+def test_trailing_band_locks_gain_instead_of_stop_below_cost() -> None:
+    """+22% wick locks ~80% of the gain; never a -2% stop (sh600900 2011-07-26).
+
+    stop2 = 3.90 + (4.76-3.90)*0.80 = 4.588; same-day low 4.29 fills at open 4.34.
+    """
+    warmup = [
+        _bar("2023-12-26", 4.10, 4.15, 4.05, 4.10),
+        _bar("2023-12-27", 4.10, 4.15, 4.05, 4.10),
+        _bar("2023-12-28", 4.10, 4.15, 4.05, 4.10),
+        _bar("2023-12-29", 4.10, 4.15, 4.05, 4.10),
+        _bar("2024-01-02", 4.00, 4.05, 3.95, 4.00),
+        _bar("2024-01-03", 4.00, 4.05, 3.95, 3.98),
+        _bar("2024-01-04", 3.95, 4.00, 3.90, 3.95),
+    ]
+    bars = warmup + [
+        _bar("2024-01-05", 3.94, 3.95, 3.89, 3.90, _SURGE_VOL),
+        _bar("2024-01-08", 4.34, 4.76, 4.29, 4.29),
+    ]
+    result = run_backtest(bars, start_date="2024-01-05", n=3, x=1.10, risk=_growth_risk())
+    assert len(result.trades) == 1
+    trade = result.trades[0]
+    assert trade.entry_date == "2024-01-05"
+    assert abs(trade.entry_price - 3.90) < 1e-9
+    assert trade.exit_reason == EXIT_TAKE_PROFIT
+    assert trade.exit_date == "2024-01-08"
+    assert abs(trade.exit_price - 4.34) < 1e-9
+    assert trade.pnl_pct > 0.10
+
+
+def test_sh600660_style_trailing_locks_most_of_peak_gain() -> None:
+    """Peak +37% must lock ~+30%, not give back to +9.7% (sh600660 2007-11-29).
+
+    stop2 = 7.34 + (10.07-7.34)*0.80 = 9.524. Peak-day low stays above that;
+    the next day's 9.40 low fills at the stop.
+    """
+    warmup = [
+        _bar("2023-12-26", 7.50, 7.55, 7.45, 7.50),
+        _bar("2023-12-27", 7.50, 7.55, 7.45, 7.50),
+        _bar("2023-12-28", 7.50, 7.55, 7.45, 7.50),
+        _bar("2023-12-29", 7.50, 7.55, 7.45, 7.50),
+        _bar("2024-01-02", 7.40, 7.45, 7.35, 7.40),
+        _bar("2024-01-03", 7.40, 7.45, 7.35, 7.38),
+        _bar("2024-01-04", 7.36, 7.40, 7.34, 7.36),
+    ]
+    bars = warmup + [
+        _bar("2024-01-05", 7.35, 7.36, 7.30, 7.34, _SURGE_VOL),
+        _bar("2024-01-08", 9.90, 10.07, 9.60, 9.70),
+        _bar("2024-01-09", 9.60, 9.60, 9.40, 9.45),
+    ]
+    result = run_backtest(bars, start_date="2024-01-05", n=3, x=1.10, risk=_growth_risk())
+    assert len(result.trades) == 1
+    trade = result.trades[0]
+    assert trade.entry_date == "2024-01-05"
+    assert abs(trade.entry_price - 7.34) < 1e-9
+    assert trade.exit_reason == EXIT_TAKE_PROFIT
+    expected_stop = 7.34 + (10.07 - 7.34) * 0.80
+    assert abs(trade.exit_price - expected_stop) < 1e-9
+    assert trade.pnl_pct > 0.25
+    assert abs(trade.pnl_pct - 0.097) > 0.05
+
+
 def test_replay_sh600900_from_local_snapshots_no_ex_rights_stop() -> None:
     """Replay cached qfq for 长江电力; 2010-07-20 must not be a -33% false stop."""
     import sqlite3
@@ -523,7 +624,6 @@ def test_replay_sh600900_from_local_snapshots_no_ex_rights_stop() -> None:
 
     import pytest
 
-    from app.schemas.strategy import DEFAULT_TRAILING_LADDER, parse_trailing_ladder
     from app.services.backtest_engine import detect_unadjusted_corporate_actions
 
     db_path = Path(__file__).resolve().parents[2] / "data" / "amtsm.db"
@@ -559,13 +659,7 @@ def test_replay_sh600900_from_local_snapshots_no_ex_rights_stop() -> None:
         start_date="2000-01-01",
         n=60,
         x=1.10,
-        risk=RiskParams(
-            stop_loss_pct=0.15,
-            break_even_trigger_pct=0.25,
-            break_even_buffer_pct=0.005,
-            trailing_ladder=parse_trailing_ladder(DEFAULT_TRAILING_LADDER),
-            enable_partial_take_profit=False,
-        ),
+        risk=_growth_risk(),
     )
     bad = [
         trade
@@ -575,3 +669,108 @@ def test_replay_sh600900_from_local_snapshots_no_ex_rights_stop() -> None:
         and trade.pnl_pct < -0.20
     ]
     assert not bad
+
+    false_trailing = [
+        trade
+        for trade in result.trades
+        if trade.entry_date == "2011-07-26"
+        and trade.exit_reason == EXIT_STOP_LOSS
+        and abs(trade.pnl_pct + 0.023) < 0.01
+    ]
+    assert not false_trailing
+
+
+def test_replay_sh600660_from_local_snapshots_no_premature_tp() -> None:
+    """Replay cached qfq for 福耀玻璃; 2007-11-29 must not take profit at ~+9.7%."""
+    import sqlite3
+    from pathlib import Path
+
+    import pytest
+
+    from app.services.backtest_engine import detect_unadjusted_corporate_actions
+
+    db_path = Path(__file__).resolve().parents[2] / "data" / "amtsm.db"
+    if not db_path.exists():
+        pytest.skip("local data/amtsm.db is not present")
+    conn = sqlite3.connect(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT trade_date, open_price, high_price, low_price, close_price, volume "
+            "FROM daily_market_snapshots WHERE stock_code = 'sh600660' "
+            "ORDER BY trade_date"
+        ).fetchall()
+    finally:
+        conn.close()
+    if len(rows) < 100:
+        pytest.skip("sh600660 snapshots are missing from local db")
+
+    bars = [
+        {
+            "date": trade_date,
+            "open": open_price,
+            "high": high_price,
+            "low": low_price,
+            "close": close_price,
+            "volume": volume,
+        }
+        for trade_date, open_price, high_price, low_price, close_price, volume in rows
+    ]
+    assert detect_unadjusted_corporate_actions(bars) == []
+
+    result = run_backtest(
+        bars,
+        start_date="2000-01-01",
+        n=60,
+        x=1.10,
+        risk=_growth_risk(),
+    )
+    premature = [
+        trade
+        for trade in result.trades
+        if trade.entry_date == "2007-11-29"
+        and trade.exit_reason == EXIT_TAKE_PROFIT
+        and abs(trade.pnl_pct - 0.097) < 0.01
+    ]
+    assert not premature
+
+
+def test_replay_sz000651_from_local_snapshots_accepts_share_reform_gap() -> None:
+    """Replay cached qfq for 格力电器; 2006-03-08 股改复牌 must not fail validation."""
+    import sqlite3
+    from pathlib import Path
+
+    import pytest
+
+    from app.services.backtest_engine import (
+        detect_unadjusted_corporate_actions,
+        validate_bar_series,
+    )
+
+    db_path = Path(__file__).resolve().parents[2] / "data" / "amtsm.db"
+    if not db_path.exists():
+        pytest.skip("local data/amtsm.db is not present")
+    conn = sqlite3.connect(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT trade_date, open_price, high_price, low_price, close_price, volume "
+            "FROM daily_market_snapshots WHERE stock_code = 'sz000651' "
+            "ORDER BY trade_date"
+        ).fetchall()
+    finally:
+        conn.close()
+    if len(rows) < 100:
+        pytest.skip("sz000651 snapshots are missing from local db")
+
+    bars = [
+        {
+            "date": trade_date,
+            "open": open_price,
+            "high": high_price,
+            "low": low_price,
+            "close": close_price,
+            "volume": volume,
+        }
+        for trade_date, open_price, high_price, low_price, close_price, volume in rows
+    ]
+    assert detect_unadjusted_corporate_actions(bars) == []
+    validate_bar_series(bars)

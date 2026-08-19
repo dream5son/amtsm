@@ -243,6 +243,47 @@ def test_get_kline_data_include_trades_false(tmp_path, monkeypatch) -> None:
     assert [bar["trade_date"] for bar in result["bars"]] == ["2024-01-09", "2024-01-10"]
 
 
+def test_get_kline_data_trades_newest_first(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(settings, "sqlite_path", str(tmp_path / "amtsm.db"))
+    init_db()
+    with get_db() as session:
+        job_id = _seed_kline_window_job(session)
+        session.add_all(
+            [
+                BacktestTrade(
+                    job_id=job_id,
+                    entry_date="2024-01-03",
+                    entry_price=10.0,
+                    exit_date="2024-01-09",
+                    exit_price=11.0,
+                    hold_days=6,
+                    pnl_pct=0.1,
+                    pnl_amount=100.0,
+                    exit_reason="TAKE_PROFIT",
+                ),
+                BacktestTrade(
+                    job_id=job_id,
+                    entry_date="2024-01-06",
+                    entry_price=10.0,
+                    exit_date="2024-01-09",
+                    exit_price=9.0,
+                    hold_days=3,
+                    pnl_pct=-0.1,
+                    pnl_amount=-100.0,
+                    exit_reason="STOP_LOSS",
+                ),
+            ]
+        )
+        session.commit()
+
+    result = get_kline_data(job_id)
+    assert [(t["entry_date"], t["exit_date"]) for t in result["trades"]] == [
+        ("2024-01-06", "2024-01-09"),
+        ("2024-01-03", "2024-01-09"),
+        ("2024-01-02", "2024-01-05"),
+    ]
+
+
 def test_get_kline_data_backfills_empty_snapshot_cache(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(settings, "sqlite_path", str(tmp_path / "amtsm.db"))
     init_db()

@@ -37,7 +37,7 @@ def test_register_buy_open_and_addon_keeps_highest(tmp_path, monkeypatch) -> Non
     assert first["position"]["qty"] == 100
     assert first["position"]["avg_cost"] == 100.0
     assert first["position"]["position_status"] == "HOLDING"
-    assert abs(first["position"]["stop_price"] - 92.0) < 1e-9
+    assert abs(first["position"]["stop_price"] - 85.0) < 1e-9
     assert first["position"]["highest_since_hold"] == 100.0
 
     with get_db() as session:

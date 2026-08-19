@@ -67,8 +67,7 @@ def test_holding_day_stop_loss_fill_at_stop() -> None:
 def test_holding_day_take_profit_via_trailing() -> None:
     # High ratchets trailing stop above cost; low pierces it → TAKE_PROFIT.
     params = _params()
-    # First establish trailing: high pushes pnl into ladder.
-    # avg=100, high=120 → pnl 20% → trailing drawdown typically 8% → stop=110.4
+    # avg=100, high=121 → +21% (20-50% band, dd 10% of gain) → stop=118.9
     result = evaluate_bar_holding(
         avg_cost=100.0,
         highest_since_hold=120.0,
@@ -81,3 +80,4 @@ def test_holding_day_take_profit_via_trailing() -> None:
     assert result.exit_reason == SIGNAL_TAKE_PROFIT
     assert result.exit_price is not None
     assert result.exit_price >= 100.0 - 1e-12
+    assert abs(result.exit_price - 112.0) < 1e-12

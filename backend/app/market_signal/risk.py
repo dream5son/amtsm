@@ -110,8 +110,13 @@ def evaluate(
     ladder_idx = match_ladder_idx(pnl_pct, params.trailing_ladder)
     if ladder_idx is not None:
         level = params.trailing_ladder[ladder_idx]
-        stop2 = highest * (1.0 - level.drawdown)
-        candidates.append(stop2)
+        # Give back ``drawdown`` of unrealized gain, keep the rest.
+        # Price-based ``highest * (1-dd)`` (e.g. +37% / dd 20% → +9.7%)
+        # locked almost nothing; profit-based locks ~80% of the peak gain.
+        stop2 = avg_cost + (highest - avg_cost) * (1.0 - level.drawdown)
+        profit_floor = avg_cost * (1.0 + params.break_even_buffer_pct)
+        if stop2 + 1e-12 >= profit_floor:
+            candidates.append(stop2)
 
     stop_price = max(candidates)
 

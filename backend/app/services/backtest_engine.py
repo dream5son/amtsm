@@ -90,6 +90,19 @@ def has_valid_ohlc(open_price: float, high_price: float, low_price: float, close
 # ex-rights / ex-dividend discontinuity rather than a real session move.
 _UNADJUSTED_OVERNIGHT_GAP_PCT = 0.20
 
+# Overnight-gap checks only apply across a short calendar hole (weekend /
+# 春节 ~11d). Longer holes are stock-specific halts (股改停牌 is typically
+# 2+ weeks) and must not trip the unadjusted-series safety net.
+_MAX_UNADJUSTED_GAP_CALENDAR_DAYS = 13
+
+
+def _is_halt_placeholder(bar: dict) -> bool:
+    """True when the row is a zero-volume halt fill, not a traded session."""
+    raw = bar.get("volume")
+    if raw is None:
+        return False
+    return float(raw) <= 0
+
 
 def detect_unadjusted_corporate_actions(bars: list[dict]) -> list[str]:
     """Return ISO dates where overnight gaps look like unadjusted corporate actions.
@@ -97,17 +110,34 @@ def detect_unadjusted_corporate_actions(bars: list[dict]) -> list[str]:
     A large drop from ``prev.close`` to ``curr.open`` with a normal intraday
     range (not an extreme-range dirty qfq bar) is the signature of a bonus
     issue or dividend paid on an unadjusted series — e.g. sh600900 2010-07-20.
+
+    Halt-resume gaps are excluded. A-share 股改 (e.g. sz000651 2006-03-08)
+    often copies the last close into zero-volume placeholder bars, then gaps
+    ~20%+ on resume; that is a real session after a halt, not an unadjusted
+    10送转. The same skip applies when the provider omits the halt dates
+    (calendar hole longer than 春节).
     """
     anomalies: list[str] = []
     prev: dict | None = None
+    halt_since_prev = False
     for bar in bars:
         if not is_comparable_bar(bar):
             continue
-        if prev is not None:
+        if _is_halt_placeholder(bar):
+            halt_since_prev = True
+            continue
+        if prev is not None and not halt_since_prev:
             prev_close = float(prev["close"])
             curr_open = float(bar["open"])
             close = float(bar["close"])
-            if prev_close > 0:
+            calendar_gap = (
+                date_cls.fromisoformat(str(bar["date"]))
+                - date_cls.fromisoformat(str(prev["date"]))
+            ).days
+            if (
+                prev_close > 0
+                and calendar_gap <= _MAX_UNADJUSTED_GAP_CALENDAR_DAYS
+            ):
                 overnight_gap = (prev_close - curr_open) / prev_close
                 intraday_range = (float(bar["high"]) - float(bar["low"])) / close
                 if (
@@ -116,6 +146,7 @@ def detect_unadjusted_corporate_actions(bars: list[dict]) -> list[str]:
                 ):
                     anomalies.append(str(bar["date"]))
         prev = bar
+        halt_since_prev = False
     return anomalies
 
 

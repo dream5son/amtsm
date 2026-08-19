@@ -522,7 +522,11 @@ def get_kline_data(
                 session.execute(
                     select(BacktestTrade)
                     .where(BacktestTrade.job_id == job_id)
-                    .order_by(BacktestTrade.entry_date)
+                    .order_by(
+                        BacktestTrade.exit_date.desc(),
+                        BacktestTrade.entry_date.desc(),
+                        BacktestTrade.id.desc(),
+                    )
                 )
                 .scalars()
                 .all()
