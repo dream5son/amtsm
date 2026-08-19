@@ -741,3 +741,17 @@ def test_run_job_qfq_data_avoids_ex_rights_false_stop(tmp_path, monkeypatch) -> 
             if t.exit_date == "2010-07-20" and t.exit_reason == "STOP_LOSS" and t.pnl_pct < -0.20
         ]
         assert not bad
+
+
+def test_last_closed_bar_date_excludes_in_session_today() -> None:
+    from datetime import datetime, time
+
+    from app.engine.market_hours import SH_TZ
+    from app.services.backtest_service import _last_closed_bar_date
+
+    friday = date(2026, 8, 14)  # Friday
+    during = datetime.combine(friday, time(10, 0), tzinfo=SH_TZ)
+    after = datetime.combine(friday, time(15, 30), tzinfo=SH_TZ)
+    assert _last_closed_bar_date(friday, now=during) == date(2026, 8, 13)
+    assert _last_closed_bar_date(friday, now=after) == friday
+    assert _last_closed_bar_date(date(2020, 1, 1), now=after) == date(2020, 1, 1)

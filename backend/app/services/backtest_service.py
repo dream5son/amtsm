@@ -20,7 +20,7 @@ from app.config import settings
 from app.db.connection import get_db
 from app.db.init_db import get_price_adjust_migrated_at
 from app.db.models import BacktestJob, BacktestTrade, DailyMarketSnapshot, Watchlist
-from app.engine.market_hours import SH_TZ
+from app.engine.market_hours import AFTERNOON_END, SH_TZ, is_trading_day
 from app.market_signal import RiskParams
 from app.schemas.strategy import (
     StockStrategyOverride as StockStrategyOverrideSchema,
@@ -30,7 +30,6 @@ from app.schemas.strategy import (
 )
 from app.services.backtest_engine import (
     BacktestResult,
-    detect_unadjusted_corporate_actions,
     run_backtest,
     sanitize_bars_for_backtest,
     validate_bar_series,
@@ -63,6 +62,24 @@ _KLINE_LIMIT_OVERFETCH = 20
 # Same threshold as backtest_engine: holes longer than this are fetched again,
 # then treated as legitimate halts if still empty.
 _MAX_SNAPSHOT_GAP_CALENDAR_DAYS = 30
+
+
+def _last_closed_bar_date(end: date, *, now: datetime | None = None) -> date:
+    """Drop an in-session (or pre-close) today bar so backtest never uses a half day.
+
+    After 15:00 Shanghai on a trading day, today's session is complete and may
+    be included. Non-trading days clip to ``min(end, today)``.
+    """
+    current = now or datetime.now(SH_TZ)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=SH_TZ)
+    else:
+        current = current.astimezone(SH_TZ)
+    today = current.date()
+    if is_trading_day(today) and current.time() < AFTERNOON_END:
+        return min(end, today - timedelta(days=1))
+    return min(end, today)
+
 
 _BACKTEST_PARAM_KEYS = (
     "n",
@@ -879,7 +896,11 @@ def run_job(job_id: int) -> None:
         risk = _risk_params_from_resolved(params)
 
         start = date.fromisoformat(start_date_str)
-        end = date.fromisoformat(end_date_str)
+        end = _last_closed_bar_date(date.fromisoformat(end_date_str))
+        if start > end:
+            raise BacktestDataError(
+                f"no closed trading session in [{start_date_str}, {end_date_str}]"
+            )
         warmup_start = _warmup_start(start, n)
 
         bars = _load_and_validate_bars(stock_code, warmup_start, end)

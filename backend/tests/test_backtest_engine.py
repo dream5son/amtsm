@@ -485,3 +485,93 @@ def test_sh600900_qfq_ex_rights_not_stop_loss() -> None:
     assert trade.exit_reason == EXIT_PERIOD_END
     assert trade.pnl_pct > 0
     assert trade.pnl_pct < 0.05
+
+
+# Real sh600900 qfq around the 2010-07-20 十转五 (from daily_market_snapshots).
+_SH600900_QFQ_EX_RIGHTS_WEEK = [
+    _bar("2010-07-15", 4.4734, 4.5131, 4.4409, 4.4481),
+    _bar("2010-07-16", 4.4445, 4.4950, 4.4048, 4.4734),
+    _bar("2010-07-19", 4.4770, 4.5275, 4.4553, 4.5239),
+    _bar("2010-07-20", 4.5239, 4.5407, 4.4737, 4.5351),
+    _bar("2010-07-21", 4.5351, 4.6578, 4.4626, 4.5574),
+    _bar("2010-07-22", 4.5295, 4.5685, 4.5072, 4.5462),
+    _bar("2010-07-23", 4.5630, 4.5797, 4.5128, 4.5239),
+]
+
+
+def test_sh600900_qfq_ex_rights_week_has_no_unadjusted_gap() -> None:
+    from app.services.backtest_engine import detect_unadjusted_corporate_actions
+
+    assert detect_unadjusted_corporate_actions(_SH600900_QFQ_EX_RIGHTS_WEEK) == []
+
+
+def test_sh600900_unadjusted_job18_gap_is_flagged() -> None:
+    """Job #18 unadjusted 12.12 → 8.11 must keep tripping the safety net."""
+    from app.services.backtest_engine import detect_unadjusted_corporate_actions
+
+    bars = [
+        _bar("2010-07-19", 12.0, 12.3, 11.9, 12.12),
+        _bar("2010-07-20", 8.11, 8.14, 8.02, 8.13),
+    ]
+    assert detect_unadjusted_corporate_actions(bars) == ["2010-07-20"]
+
+
+def test_replay_sh600900_from_local_snapshots_no_ex_rights_stop() -> None:
+    """Replay cached qfq for 长江电力; 2010-07-20 must not be a -33% false stop."""
+    import sqlite3
+    from pathlib import Path
+
+    import pytest
+
+    from app.schemas.strategy import DEFAULT_TRAILING_LADDER, parse_trailing_ladder
+    from app.services.backtest_engine import detect_unadjusted_corporate_actions
+
+    db_path = Path(__file__).resolve().parents[2] / "data" / "amtsm.db"
+    if not db_path.exists():
+        pytest.skip("local data/amtsm.db is not present")
+    conn = sqlite3.connect(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT trade_date, open_price, high_price, low_price, close_price, volume "
+            "FROM daily_market_snapshots WHERE stock_code = 'sh600900' "
+            "ORDER BY trade_date"
+        ).fetchall()
+    finally:
+        conn.close()
+    if len(rows) < 100:
+        pytest.skip("sh600900 snapshots are missing from local db")
+
+    bars = [
+        {
+            "date": trade_date,
+            "open": open_price,
+            "high": high_price,
+            "low": low_price,
+            "close": close_price,
+            "volume": volume,
+        }
+        for trade_date, open_price, high_price, low_price, close_price, volume in rows
+    ]
+    assert detect_unadjusted_corporate_actions(bars) == []
+
+    result = run_backtest(
+        bars,
+        start_date="2000-01-01",
+        n=60,
+        x=1.10,
+        risk=RiskParams(
+            stop_loss_pct=0.15,
+            break_even_trigger_pct=0.25,
+            break_even_buffer_pct=0.005,
+            trailing_ladder=parse_trailing_ladder(DEFAULT_TRAILING_LADDER),
+            enable_partial_take_profit=False,
+        ),
+    )
+    bad = [
+        trade
+        for trade in result.trades
+        if trade.exit_date == "2010-07-20"
+        and trade.exit_reason == EXIT_STOP_LOSS
+        and trade.pnl_pct < -0.20
+    ]
+    assert not bad

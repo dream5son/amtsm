@@ -16,9 +16,12 @@ from app.services.market_data import (
 
 logger = logging.getLogger(__name__)
 
-# Long history is requested in ~1-year slices so EastMoney/Tencent do not
-# silently truncate a 20-year window to the most recent ~1000 bars.
+# EastMoney/Tencent silently truncate a 20-year window to the most recent
+# ~1000 bars. Only those providers (``chunks_long_qfq``) are sliced; baostock
+# 涨跌幅复权 is consistent across any range and must be fetched in one shot.
 _QFQ_RANGE_CHUNK_DAYS = 365
+_QFQ_CHUNK_OVERLAP_DAYS = 14
+_PRICE_KEYS = ("open", "high", "low", "close")
 
 __all__ = [
     "QFQ",
@@ -126,17 +129,29 @@ def _iter_date_chunks(
     start: date,
     end: date,
     chunk_days: int = _QFQ_RANGE_CHUNK_DAYS,
+    overlap_days: int = 0,
 ) -> list[tuple[date, date]]:
-    """Split ``[start, end]`` into inclusive chunks of at most ``chunk_days``."""
+    """Split ``[start, end]`` into inclusive chunks of at most ``chunk_days``.
+
+    When ``overlap_days`` > 0, adjacent chunks share that many calendar days so
+    EastMoney-style qfq (relative to each chunk's last bar) can be rescaled
+    onto a common basis.
+    """
     if start > end:
         return []
     chunks: list[tuple[date, date]] = []
     cursor = start
     step = timedelta(days=max(1, chunk_days))
+    overlap = timedelta(days=max(0, overlap_days))
     while cursor <= end:
         chunk_end = min(cursor + step - timedelta(days=1), end)
         chunks.append((cursor, chunk_end))
-        cursor = chunk_end + timedelta(days=1)
+        if chunk_end >= end:
+            break
+        next_start = chunk_end + timedelta(days=1) - overlap
+        if next_start <= cursor:
+            next_start = chunk_end + timedelta(days=1)
+        cursor = next_start
     return chunks
 
 
@@ -151,7 +166,54 @@ def _merge_bars_by_date(chunks: list[list[dict]]) -> list[dict]:
     return [by_date[key] for key in sorted(by_date)]
 
 
-def _fetch_qfq_chunk(
+def _scale_ohlc(bar: dict, ratio: float) -> dict:
+    """Return a copy of ``bar`` with OHLC multiplied by ``ratio`` (volume unchanged)."""
+    scaled = dict(bar)
+    for key in _PRICE_KEYS:
+        value = scaled.get(key)
+        if value is not None:
+            scaled[key] = float(value) * ratio
+    return scaled
+
+
+def _overlap_scale_ratio(older: list[dict], newer: list[dict]) -> float:
+    """Median ``newer.close / older.close`` on overlapping dates (1.0 if none)."""
+    newer_by_date = {bar_date_str(bar.get("date")): bar for bar in newer}
+    ratios: list[float] = []
+    for bar in older:
+        key = bar_date_str(bar.get("date"))
+        other = newer_by_date.get(key)
+        if other is None:
+            continue
+        old_close = float(bar.get("close") or 0.0)
+        new_close = float(other.get("close") or 0.0)
+        if old_close > 0 and new_close > 0:
+            ratios.append(new_close / old_close)
+    if not ratios:
+        return 1.0
+    ratios.sort()
+    return ratios[len(ratios) // 2]
+
+
+def _merge_qfq_chunks_rescaled(chunks: list[list[dict]]) -> list[dict]:
+    """Stitch qfq chunks onto the newest chunk's price basis via overlap ratios."""
+    non_empty = [bars for bars in chunks if bars]
+    if not non_empty:
+        return []
+    merged = list(non_empty[-1])
+    for older in reversed(non_empty[:-1]):
+        ratio = _overlap_scale_ratio(older, merged)
+        scaled = (
+            older
+            if abs(ratio - 1.0) <= 1e-12
+            else [_scale_ohlc(bar, ratio) for bar in older]
+        )
+        merged = _merge_bars_by_date([scaled, merged])
+    return merged
+
+
+def _fetch_qfq_once(
+    provider,
     stock_code: str,
     start: date,
     end: date,
@@ -159,14 +221,12 @@ def _fetch_qfq_chunk(
     retries: int,
     retry_backoff_seconds: float,
 ) -> list[dict]:
-    """Fetch one date chunk with the same retry policy as the old full-range call."""
+    """Fetch one inclusive range from a pinned provider, with retries."""
     attempts = max(1, retries + 1)
     last_exc: Exception | None = None
     for attempt in range(attempts):
         try:
-            return get_market_data_provider().fetch_daily_ohlcv(
-                stock_code, start, end, adjust=QFQ
-            )
+            return provider.fetch_daily_ohlcv(stock_code, start, end, adjust=QFQ)
         except MarketDataUnavailableError as exc:
             last_exc = exc
             if attempt + 1 >= attempts:
@@ -203,6 +263,78 @@ def _fetch_qfq_chunk(
     ) from last_exc
 
 
+def _fetch_qfq_chunked(
+    provider,
+    stock_code: str,
+    start_date: date,
+    end_date: date,
+    *,
+    retries: int,
+    retry_backoff_seconds: float,
+) -> list[dict]:
+    """Year-chunk a truncating qfq source and rescale onto the newest basis."""
+    chunk_bars: list[list[dict]] = []
+    seen_bars = False
+    today = datetime.now(UTC).date()
+    for chunk_start, chunk_end in _iter_date_chunks(
+        start_date,
+        end_date,
+        overlap_days=_QFQ_CHUNK_OVERLAP_DAYS,
+    ):
+        try:
+            bars = _fetch_qfq_once(
+                provider,
+                stock_code,
+                chunk_start,
+                chunk_end,
+                retries=retries,
+                retry_backoff_seconds=retry_backoff_seconds,
+            )
+        except (MarketDataUnavailableError, StockDataFetchError):
+            if seen_bars and chunk_end < today - timedelta(days=7):
+                raise
+            bars = []
+        if bars:
+            seen_bars = True
+            chunk_bars.append(bars)
+            continue
+        if seen_bars and chunk_end < today - timedelta(days=7):
+            raise MarketDataUnavailableError(
+                f"empty qfq chunk after listed history for {stock_code} "
+                f"{chunk_start.isoformat()}..{chunk_end.isoformat()}"
+            )
+        chunk_bars.append([])
+    return _merge_qfq_chunks_rescaled(chunk_bars)
+
+
+def _fetch_qfq_from_provider(
+    provider,
+    stock_code: str,
+    start_date: date,
+    end_date: date,
+    *,
+    retries: int,
+    retry_backoff_seconds: float,
+) -> list[dict]:
+    if getattr(provider, "chunks_long_qfq", False):
+        return _fetch_qfq_chunked(
+            provider,
+            stock_code,
+            start_date,
+            end_date,
+            retries=retries,
+            retry_backoff_seconds=retry_backoff_seconds,
+        )
+    return _fetch_qfq_once(
+        provider,
+        stock_code,
+        start_date,
+        end_date,
+        retries=retries,
+        retry_backoff_seconds=retry_backoff_seconds,
+    )
+
+
 def fetch_qfq_bars_range(
     stock_code: str,
     start_date: date,
@@ -218,8 +350,11 @@ def fetch_qfq_bars_range(
     backtest worker to backfill gaps in ``daily_market_snapshots`` for the exact
     window a backtest job needs.
 
-    Long ranges are requested in ~1-year chunks and merged oldest-first so a
-    single-call API cap cannot silently drop the early history.
+    Baostock is queried as a single ``[start, end]`` call (涨跌幅复权 is already
+    on today's basis). Truncating sources (EastMoney/Tencent via akshare) are
+    requested in overlapping ~1-year chunks, rescaled onto the newest chunk,
+    and merged oldest-first. The whole range pins one provider so chunks never
+    mix qfq algorithms.
 
     Returns list of bar dicts (oldest-first) with keys: date, open, high, low,
     close, volume, turnover_rate (optional). Dates outside the stock's listed
@@ -227,17 +362,33 @@ def fetch_qfq_bars_range(
     """
     if start_date > end_date:
         return []
-    chunk_bars: list[list[dict]] = []
-    for chunk_start, chunk_end in _iter_date_chunks(start_date, end_date):
-        bars = _fetch_qfq_chunk(
-            stock_code,
-            chunk_start,
-            chunk_end,
-            retries=retries,
-            retry_backoff_seconds=retry_backoff_seconds,
-        )
-        chunk_bars.append(bars)
-    return _merge_bars_by_date(chunk_bars)
+    root = get_market_data_provider()
+    targets = list(getattr(root, "failover_targets", lambda: [root])())
+    last_exc: Exception | None = None
+    for provider in targets:
+        try:
+            return _fetch_qfq_from_provider(
+                provider,
+                stock_code,
+                start_date,
+                end_date,
+                retries=retries,
+                retry_backoff_seconds=retry_backoff_seconds,
+            )
+        except (MarketDataUnavailableError, StockDataFetchError) as exc:
+            last_exc = exc
+            logger.warning(
+                "fetch_qfq_bars_range provider '%s' failed for %s: %s",
+                getattr(provider, "provider_id", "?"),
+                stock_code,
+                exc,
+            )
+    if isinstance(last_exc, MarketDataUnavailableError):
+        raise last_exc
+    msg = str(last_exc) if last_exc else "unknown error"
+    raise StockDataFetchError(
+        f"Failed to fetch qfq bars range for {stock_code}: {msg}"
+    ) from last_exc
 
 
 def fetch_trade_day_bar(

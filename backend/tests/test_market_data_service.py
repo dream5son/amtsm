@@ -18,6 +18,7 @@ from app.services.market_data.base import (
     MarketDataUnavailableError,
     StockMeta,
 )
+from app.services.market_data.failover import FailoverMarketDataProvider
 from app.services.market_data_service import (
     fetch_daily_bars,
     fetch_qfq_bars_range,
@@ -197,6 +198,18 @@ def test_iter_date_chunks_splits_long_range() -> None:
         assert chunks[i][0] == chunks[i - 1][1] + timedelta(days=1)
 
 
+def test_iter_date_chunks_overlap_shares_calendar_days() -> None:
+    from app.services.market_data_service import _iter_date_chunks
+
+    chunks = _iter_date_chunks(
+        date(2020, 1, 1), date(2021, 6, 1), chunk_days=365, overlap_days=14
+    )
+    assert chunks[0][0] == date(2020, 1, 1)
+    assert chunks[1][0] < chunks[0][1]
+    assert (chunks[0][1] - chunks[1][0]).days + 1 == 14
+    assert chunks[-1][1] == date(2021, 6, 1)
+
+
 def test_merge_bars_by_date_dedupes_overlap_and_sorts() -> None:
     from app.services.market_data_service import _merge_bars_by_date
 
@@ -211,6 +224,58 @@ def test_merge_bars_by_date_dedupes_overlap_and_sorts() -> None:
     merged = _merge_bars_by_date([older, newer])
     assert [bar["date"] for bar in merged] == ["2024-01-02", "2024-01-03", "2024-01-04"]
     assert merged[1]["close"] == 3.0
+
+
+def test_merge_qfq_chunks_rescaled_aligns_older_chunk_to_newer_basis() -> None:
+    from app.services.market_data_service import _merge_qfq_chunks_rescaled
+
+    older = [
+        {
+            "date": "2020-12-30",
+            "open": 5.0,
+            "high": 5.2,
+            "low": 4.9,
+            "close": 5.0,
+            "volume": 10.0,
+            "turnover_rate": None,
+        },
+        {
+            "date": "2020-12-31",
+            "open": 5.0,
+            "high": 5.1,
+            "low": 4.8,
+            "close": 5.0,
+            "volume": 10.0,
+            "turnover_rate": None,
+        },
+    ]
+    newer = [
+        {
+            "date": "2020-12-31",
+            "open": 10.0,
+            "high": 10.2,
+            "low": 9.6,
+            "close": 10.0,
+            "volume": 10.0,
+            "turnover_rate": None,
+        },
+        {
+            "date": "2021-01-04",
+            "open": 10.1,
+            "high": 10.3,
+            "low": 10.0,
+            "close": 10.2,
+            "volume": 10.0,
+            "turnover_rate": None,
+        },
+    ]
+    merged = _merge_qfq_chunks_rescaled([older, newer])
+    by_date = {bar["date"]: bar for bar in merged}
+    assert by_date["2020-12-30"]["close"] == pytest.approx(10.0)
+    assert by_date["2020-12-30"]["open"] == pytest.approx(10.0)
+    assert by_date["2020-12-30"]["volume"] == pytest.approx(10.0)
+    assert by_date["2020-12-31"]["close"] == pytest.approx(10.0)
+    assert by_date["2021-01-04"]["close"] == pytest.approx(10.2)
 
 
 class _FakeDailyProvider(MarketDataProvider):
@@ -254,8 +319,29 @@ class _FakeDailyProvider(MarketDataProvider):
         return []
 
 
-def test_fetch_qfq_bars_range_requests_year_chunks(monkeypatch) -> None:
+class _ChunkingFakeProvider(_FakeDailyProvider):
+    provider_id = "akshare"
+    chunks_long_qfq = True
+
+
+def test_fetch_qfq_bars_range_baostock_is_single_shot(monkeypatch) -> None:
     fake = _FakeDailyProvider()
+    monkeypatch.setattr(
+        "app.services.market_data_service.get_market_data_provider",
+        lambda: fake,
+    )
+    bars = fetch_qfq_bars_range(
+        "sh600900", date(2020, 1, 1), date(2021, 6, 1), retries=0
+    )
+    assert len(fake.ohlcv_calls) == 1
+    assert fake.ohlcv_calls[0][1] == date(2020, 1, 1)
+    assert fake.ohlcv_calls[0][2] == date(2021, 6, 1)
+    assert fake.ohlcv_calls[0][3] == "qfq"
+    assert bars[0]["date"] == "2020-01-01"
+
+
+def test_fetch_qfq_bars_range_akshare_requests_year_chunks(monkeypatch) -> None:
+    fake = _ChunkingFakeProvider()
     monkeypatch.setattr(
         "app.services.market_data_service.get_market_data_provider",
         lambda: fake,
@@ -268,6 +354,95 @@ def test_fetch_qfq_bars_range_requests_year_chunks(monkeypatch) -> None:
     assert fake.ohlcv_calls[0][3] == "qfq"
     assert fake.ohlcv_calls[-1][2] == date(2021, 6, 1)
     assert [bar["date"] for bar in bars] == sorted(bar["date"] for bar in bars)
+
+
+def test_fetch_qfq_bars_range_empty_listed_chunk_failovers(monkeypatch) -> None:
+    class _EmptyAfterListed(_ChunkingFakeProvider):
+        provider_id = "primary-chunked"
+
+        def fetch_daily_ohlcv(self, stock_code, start_date, end_date, *, adjust="qfq"):
+            self.ohlcv_calls.append((stock_code, start_date, end_date, adjust))
+            if end_date.year <= 2010:
+                return [
+                    {
+                        "date": "2010-06-01",
+                        "open": 10.0,
+                        "high": 11.0,
+                        "low": 9.0,
+                        "close": 10.0,
+                        "volume": 1.0,
+                        "turnover_rate": None,
+                    }
+                ]
+            return []
+
+    class _Fallback(_FakeDailyProvider):
+        provider_id = "fallback"
+
+        def fetch_daily_ohlcv(self, stock_code, start_date, end_date, *, adjust="qfq"):
+            self.ohlcv_calls.append((stock_code, start_date, end_date, adjust))
+            return [
+                {
+                    "date": "2010-06-01",
+                    "open": 4.5,
+                    "high": 4.6,
+                    "low": 4.4,
+                    "close": 4.5,
+                    "volume": 1.0,
+                    "turnover_rate": None,
+                },
+                {
+                    "date": "2011-06-01",
+                    "open": 4.6,
+                    "high": 4.7,
+                    "low": 4.5,
+                    "close": 4.6,
+                    "volume": 1.0,
+                    "turnover_rate": None,
+                },
+            ]
+
+    primary = _EmptyAfterListed()
+    fallback = _Fallback()
+    monkeypatch.setattr(
+        "app.services.market_data_service.get_market_data_provider",
+        lambda: FailoverMarketDataProvider([primary, fallback]),
+    )
+    bars = fetch_qfq_bars_range(
+        "sh600900", date(2010, 1, 1), date(2011, 12, 31), retries=0
+    )
+    assert len(fallback.ohlcv_calls) == 1
+    assert [bar["date"] for bar in bars] == ["2010-06-01", "2011-06-01"]
+    assert bars[0]["close"] == pytest.approx(4.5)
+
+
+def test_fetch_qfq_bars_range_prelisting_empty_chunks_ok(monkeypatch) -> None:
+    class _EmptyThenData(_ChunkingFakeProvider):
+        def fetch_daily_ohlcv(self, stock_code, start_date, end_date, *, adjust="qfq"):
+            self.ohlcv_calls.append((stock_code, start_date, end_date, adjust))
+            if end_date.year < 2010:
+                return []
+            return [
+                {
+                    "date": "2010-06-01",
+                    "open": 10.0,
+                    "high": 11.0,
+                    "low": 9.0,
+                    "close": 10.0,
+                    "volume": 1.0,
+                    "turnover_rate": None,
+                }
+            ]
+
+    fake = _EmptyThenData()
+    monkeypatch.setattr(
+        "app.services.market_data_service.get_market_data_provider",
+        lambda: fake,
+    )
+    bars = fetch_qfq_bars_range(
+        "sh600900", date(2008, 1, 1), date(2010, 6, 1), retries=0
+    )
+    assert bars[0]["date"] == "2010-06-01"
 
 
 def test_orchestration_fetch_daily_bars_excludes_end_date(monkeypatch) -> None:

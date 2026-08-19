@@ -29,6 +29,10 @@ class FailoverMarketDataProvider(MarketDataProvider):
             raise ValueError("at least one provider is required")
         self._providers = list(providers)
 
+    def failover_targets(self) -> list[MarketDataProvider]:
+        """Pin one inner provider for a whole-range fetch so chunks never mix sources."""
+        return list(self._providers)
+
     def fetch_daily_ohlcv(
         self,
         stock_code: str,

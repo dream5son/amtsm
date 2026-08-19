@@ -266,6 +266,7 @@ class AkshareMarketDataProvider(MarketDataProvider):
     """Daily bars via akshare failover; realtime quotes via Sina HTTP."""
 
     provider_id = "akshare"
+    chunks_long_qfq = True
 
     def __init__(self, sources: list[AkshareSource] | None = None) -> None:
         self._sources = sources if sources is not None else list(_AKSHARE_SOURCES)

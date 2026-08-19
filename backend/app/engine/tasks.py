@@ -242,11 +242,12 @@ def upsert_snapshot(
 
 
 def upsert_qfq_bars(stock_code: str, bars: list[dict]) -> int:
-    """Bulk-upsert daily bars into ``daily_market_snapshots``.
+    """Bulk-upsert **forward-adjusted (qfq)** daily bars into ``daily_market_snapshots``.
 
     Thin batch wrapper around :func:`upsert_snapshot`; this is the single write
     entrypoint the backtest worker uses to backfill missing history (design.md
-    "唯一写入口" contract). Returns the number of bars written.
+    "唯一写入口" contract). Callers must pass qfq OHLC — unadjusted history
+    must not be written here. Returns the number of bars written.
     """
     written = 0
     for bar in bars:

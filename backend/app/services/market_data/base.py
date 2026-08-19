@@ -90,6 +90,12 @@ class MarketDataProvider(ABC):
     """Vendor I/O for daily bars, realtime quotes, and the A-share universe."""
 
     provider_id: str
+    # EastMoney/Tencent silently truncate long qfq windows; baostock does not.
+    chunks_long_qfq: bool = False
+
+    def failover_targets(self) -> list[MarketDataProvider]:
+        """Providers to try for one whole-range fetch (self unless this is a chain)."""
+        return [self]
 
     @abstractmethod
     def fetch_daily_ohlcv(
