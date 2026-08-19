@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import math
 from collections.abc import Callable
 from datetime import UTC, date, datetime
 from threading import Lock
@@ -22,10 +21,11 @@ from app.services.market_data.base import (
     RealtimeQuote,
     StockDataFetchError,
     StockMeta,
-    bar_date_str,
+    build_daily_bar,
     normalize_stock_code,
     to_numeric_code,
 )
+from app.services.market_data.numbers import coerce_optional_float
 
 logger = logging.getLogger(__name__)
 
@@ -52,35 +52,23 @@ def _code_prefixed(numeric_code: str) -> str:
     return f"sh{numeric_code}"
 
 
-def _optional_float(value: object) -> float | None:
-    try:
-        if value is None or (isinstance(value, float) and math.isnan(value)):
-            return None
-        if pd.isna(value):
-            return None
-        return float(value)  # type: ignore[arg-type]
-    except (TypeError, ValueError):
-        return None
-
-
 def _normalize_df_em(df: pd.DataFrame) -> list[DailyBar]:
     """Normalise a stock_zh_a_hist (EastMoney) DataFrame to bar dicts."""
     bars: list[DailyBar] = []
     has_turnover = "换手率" in df.columns
     for _, row in df.iterrows():
-        bars.append(
-            {
-                "date": bar_date_str(row["日期"]),
-                "open": float(row["开盘"]),
-                "high": float(row["最高"]),
-                "low": float(row["最低"]),
-                "close": float(row["收盘"]),
-                "volume": float(row["成交量"]),
-                "turnover_rate": _optional_float(row["换手率"])
-                if has_turnover
-                else None,
-            }
+        bar = build_daily_bar(
+            date=row["日期"],
+            open_price=row["开盘"],
+            high_price=row["最高"],
+            low_price=row["最低"],
+            close_price=row["收盘"],
+            volume=row["成交量"],
+            turnover_rate=row["换手率"] if has_turnover else None,
+            has_turnover=has_turnover,
         )
+        if bar is not None:
+            bars.append(bar)
     return bars
 
 
@@ -100,21 +88,23 @@ def _normalize_df_tx(df: pd.DataFrame) -> list[DailyBar]:
         k: next((c for c in candidates if c in df.columns), None)
         for k, candidates in col_map.items()
     }
+    required = ("date", "open", "high", "low", "close", "volume")
+    if any(cols[key] is None for key in required):
+        return []
     for _, row in df.iterrows():
         turnover_col = cols["turnover_rate"]
-        bars.append(
-            {
-                "date": bar_date_str(row[cols["date"]]),
-                "open": float(row[cols["open"]]),
-                "high": float(row[cols["high"]]),
-                "low": float(row[cols["low"]]),
-                "close": float(row[cols["close"]]),
-                "volume": float(row[cols["volume"]]),
-                "turnover_rate": _optional_float(row[turnover_col])
-                if turnover_col
-                else None,
-            }
+        bar = build_daily_bar(
+            date=row[cols["date"]],
+            open_price=row[cols["open"]],
+            high_price=row[cols["high"]],
+            low_price=row[cols["low"]],
+            close_price=row[cols["close"]],
+            volume=row[cols["volume"]],
+            turnover_rate=row[turnover_col] if turnover_col else None,
+            has_turnover=turnover_col is not None,
         )
+        if bar is not None:
+            bars.append(bar)
     return bars
 
 
@@ -134,21 +124,23 @@ def _normalize_df_sina(df: pd.DataFrame) -> list[DailyBar]:
         k: next((c for c in candidates if c in df.columns), None)
         for k, candidates in col_map.items()
     }
+    required = ("date", "open", "high", "low", "close", "volume")
+    if any(cols[key] is None for key in required):
+        return []
     for _, row in df.iterrows():
         turnover_col = cols["turnover_rate"]
-        bars.append(
-            {
-                "date": bar_date_str(row[cols["date"]]),
-                "open": float(row[cols["open"]]),
-                "high": float(row[cols["high"]]),
-                "low": float(row[cols["low"]]),
-                "close": float(row[cols["close"]]),
-                "volume": float(row[cols["volume"]]),
-                "turnover_rate": _optional_float(row[turnover_col])
-                if turnover_col
-                else None,
-            }
+        bar = build_daily_bar(
+            date=row[cols["date"]],
+            open_price=row[cols["open"]],
+            high_price=row[cols["high"]],
+            low_price=row[cols["low"]],
+            close_price=row[cols["close"]],
+            volume=row[cols["volume"]],
+            turnover_rate=row[turnover_col] if turnover_col else None,
+            has_turnover=turnover_col is not None,
         )
+        if bar is not None:
+            bars.append(bar)
     return bars
 
 
@@ -164,16 +156,6 @@ _AKSHARE_SOURCES: list[AkshareSource] = [
     ("tencent", ak.stock_zh_a_hist_tx, _code_prefixed, _normalize_df_tx),
     ("sina", ak.stock_zh_a_daily, _code_prefixed, _normalize_df_sina),
 ]
-
-
-def _to_float(value: str) -> float | None:
-    try:
-        number = float(value)
-        if math.isnan(number):
-            return None
-        return number
-    except (TypeError, ValueError):
-        return None
 
 
 def _empty_quote(code: str) -> RealtimeQuote:
@@ -211,12 +193,12 @@ def _parse_sina_realtime_quotes(
 
         has_quote = bool(payload) and len(fields) >= 4
         name = fields[0].strip() if len(fields) >= 1 and fields[0].strip() else code
-        open_price = _to_float(fields[1]) if len(fields) >= 2 else None
-        prev_close = _to_float(fields[2]) if len(fields) >= 3 else None
-        price = _to_float(fields[3]) if len(fields) >= 4 else None
-        high_price = _to_float(fields[4]) if len(fields) >= 5 else None
-        low_price = _to_float(fields[5]) if len(fields) >= 6 else None
-        volume = _to_float(fields[8]) if len(fields) >= 9 else None
+        open_price = coerce_optional_float(fields[1]) if len(fields) >= 2 else None
+        prev_close = coerce_optional_float(fields[2]) if len(fields) >= 3 else None
+        price = coerce_optional_float(fields[3]) if len(fields) >= 4 else None
+        high_price = coerce_optional_float(fields[4]) if len(fields) >= 5 else None
+        low_price = coerce_optional_float(fields[5]) if len(fields) >= 6 else None
+        volume = coerce_optional_float(fields[8]) if len(fields) >= 9 else None
         quote_date = (
             fields[30].strip() if len(fields) >= 31 and fields[30].strip() else None
         )
@@ -224,7 +206,8 @@ def _parse_sina_realtime_quotes(
             fields[31].strip() if len(fields) >= 32 and fields[31].strip() else None
         )
 
-        is_halted = has_quote and (price is None or price <= 0)
+        # Halt is a parsed non-positive price, not a missing/unparseable field.
+        is_halted = has_quote and price is not None and price <= 0
 
         result[code] = {
             "stock_name": name,
@@ -370,6 +353,10 @@ class AkshareMarketDataProvider(MarketDataProvider):
                     )
 
                 bars = normalise(df)
+                if not bars:
+                    raise StockDataFetchError(
+                        f"source '{source_name}' returned unusable data for {numeric_code}"
+                    )
                 with self._source_lock:
                     self._mark_source_ok(source_name)
                 logger.debug(
@@ -420,18 +407,13 @@ class AkshareMarketDataProvider(MarketDataProvider):
             response = httpx.get(url, timeout=timeout_seconds, headers=headers)
             response.raise_for_status()
             return _parse_sina_realtime_quotes(response.text, stock_codes)
-        except (httpx.HTTPError, ValueError) as exc:
-            msg = str(exc)
-            if (
-                "timed out" in msg.lower()
-                or "timeout" in msg.lower()
-                or "connection" in msg.lower()
-            ):
-                raise MarketDataUnavailableError(
-                    f"Realtime market data unavailable: {msg}"
-                ) from exc
+        except httpx.TransportError as exc:
+            raise MarketDataUnavailableError(
+                f"Realtime market data unavailable: {exc}"
+            ) from exc
+        except httpx.HTTPError as exc:
             raise StockDataFetchError(
-                f"Failed to fetch realtime quotes: {msg}"
+                f"Failed to fetch realtime quotes: {exc}"
             ) from exc
 
     def list_a_share_universe(self) -> list[StockMeta]:

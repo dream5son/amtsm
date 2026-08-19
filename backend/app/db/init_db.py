@@ -165,9 +165,14 @@ def _ladder_is_legacy_or_empty(raw: str | None) -> bool:
     if raw is None or not str(raw).strip():
         return True
     try:
-        return _ladder_signature(raw) == _ladder_signature(LEGACY_TRAILING_LADDER)
-    except (TypeError, ValueError):
+        current = _ladder_signature(raw)
+    except (TypeError, ValueError) as exc:
+        logger.warning(
+            "unparseable trailing_ladder_json; skipping factory risk migration: %s",
+            exc,
+        )
         return False
+    return current == _ladder_signature(LEGACY_TRAILING_LADDER)
 
 
 def _migrate_factory_risk_defaults() -> None:
@@ -234,6 +239,7 @@ def get_price_adjust_migrated_at() -> datetime | None:
     try:
         return datetime.fromisoformat(str(raw))
     except ValueError:
+        logger.warning("invalid schema_meta.price_adjust_migrated_at=%r", raw)
         return None
 
 

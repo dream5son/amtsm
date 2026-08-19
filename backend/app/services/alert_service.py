@@ -23,6 +23,7 @@ from app.db.connection import get_db
 from app.db.models import AlertLog
 from app.engine.market_hours import is_alert_window_open
 from app.engine.state import runtime_state
+from app.services.market_data.numbers import coerce_optional_float
 from app.services.notifier.base import ErrorCategory, SendResult, TextNotifier
 from app.services.notifier.registry import resolve_alert_channels
 from app.services.wechat_notifier import (
@@ -613,7 +614,7 @@ def _build_message(
         limit_flag = is_limit_up(
             stock_code=parsed["stock_code"],
             price=parsed["price"],
-            prev_close=_optional_float(candidate.get("prev_close")),
+            prev_close=coerce_optional_float(candidate.get("prev_close")),
             stock_name=parsed["stock_name"],
         )
     return format_sell_message(
@@ -625,15 +626,6 @@ def _build_message(
         used_coeff=parsed["used_coeff"],
         is_limit_up=bool(limit_flag),
     )
-
-
-def _optional_float(value: Any) -> float | None:
-    if value is None:
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
 
 
 def _parse_candidate(

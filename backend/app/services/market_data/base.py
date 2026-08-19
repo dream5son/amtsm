@@ -7,6 +7,11 @@ from dataclasses import dataclass
 from datetime import date
 from typing import TypedDict
 
+from app.services.market_data.numbers import (
+    coerce_optional_float,
+    parse_float,
+)
+
 QFQ = "qfq"
 UNADJUSTED = ""
 
@@ -59,6 +64,43 @@ class MissingTradeDayBarError(StockDataFetchError):
 def bar_date_str(value: object) -> str:
     """Normalise a date-like value to ``YYYY-MM-DD``."""
     return str(value).strip()[:10]
+
+
+def build_daily_bar(
+    *,
+    date: object,
+    open_price: object,
+    high_price: object,
+    low_price: object,
+    close_price: object,
+    volume: object,
+    turnover_rate: object | None = None,
+    has_turnover: bool = False,
+) -> DailyBar | None:
+    """Build one bar, or ``None`` when a required OHLC field is missing/invalid.
+
+    Invalid optional turnover is coerced to ``None`` and does not drop the bar.
+    """
+    if date is None:
+        return None
+    date_str = bar_date_str(date)
+    if len(date_str) < 10 or not date_str[0].isdigit():
+        return None
+    try:
+        bar: DailyBar = {
+            "date": date_str,
+            "open": parse_float(open_price),
+            "high": parse_float(high_price),
+            "low": parse_float(low_price),
+            "close": parse_float(close_price),
+            "volume": parse_float(volume),
+            "turnover_rate": None,
+        }
+    except (TypeError, ValueError):
+        return None
+    if has_turnover:
+        bar["turnover_rate"] = coerce_optional_float(turnover_rate)
+    return bar
 
 
 def normalize_stock_code(raw: str) -> str:

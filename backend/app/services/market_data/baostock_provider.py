@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import io
 import logging
-import math
 from contextlib import redirect_stderr, redirect_stdout
 from datetime import date
 from threading import Lock
@@ -20,7 +19,7 @@ from app.services.market_data.base import (
     MarketDataUnavailableError,
     RealtimeQuote,
     StockMeta,
-    bar_date_str,
+    build_daily_bar,
     normalize_stock_code,
 )
 
@@ -75,21 +74,6 @@ class _BaostockClient(Protocol):
     ) -> _QueryResult: ...
 
 
-def _optional_float(value: object) -> float | None:
-    try:
-        if value is None:
-            return None
-        text = str(value).strip()
-        if not text or text.lower() in {"nan", "none"}:
-            return None
-        number = float(text)
-        if math.isnan(number):
-            return None
-        return number
-    except (TypeError, ValueError):
-        return None
-
-
 def _exchange_from_normalized(code: str) -> str:
     prefix = code[:2]
     if prefix == "sh":
@@ -140,24 +124,18 @@ def _collect_rows(result: _QueryResult) -> list[dict[str, str]]:
 def _normalize_daily_rows(rows: list[dict[str, str]]) -> list[DailyBar]:
     bars: list[DailyBar] = []
     for row in rows:
-        open_price = _optional_float(row.get("open"))
-        high_price = _optional_float(row.get("high"))
-        low_price = _optional_float(row.get("low"))
-        close_price = _optional_float(row.get("close"))
-        volume = _optional_float(row.get("volume"))
-        if None in (open_price, high_price, low_price, close_price, volume):
-            continue
-        bars.append(
-            {
-                "date": bar_date_str(row.get("date", "")),
-                "open": open_price,
-                "high": high_price,
-                "low": low_price,
-                "close": close_price,
-                "volume": volume,
-                "turnover_rate": _optional_float(row.get("turn")),
-            }
+        bar = build_daily_bar(
+            date=row.get("date"),
+            open_price=row.get("open"),
+            high_price=row.get("high"),
+            low_price=row.get("low"),
+            close_price=row.get("close"),
+            volume=row.get("volume"),
+            turnover_rate=row.get("turn"),
+            has_turnover=True,
         )
+        if bar is not None:
+            bars.append(bar)
     return bars
 
 
