@@ -85,9 +85,9 @@ bash scripts/run_engine.sh
 
 ## Environment Variables
 
-Copy `.env.example` to `.env` in both `backend/` and `frontend/` and fill in values. Key settings:
+Local: copy `.env.example` to `.env` in both `backend/` and `frontend/` and fill in values. Docker: copy `deploy/.env.backend.example` to `deploy/.env.backend` (do not reuse the local app env files). Key settings:
 
-- `SQLITE_PATH` — path to the SQLite database file (default: `data/amtsm.db`)
+- `SQLITE_PATH` — path to the SQLite database file (local default: `data/amtsm.db`; Docker: keep `/data/amtsm.db`, host dir via `SQLITE_DATA_DIR`)
 - `API_HOST` / `API_PORT` — backend bind address (default: `0.0.0.0:8000`)
 - `NOTIFY_CHANNELS` — comma-separated text channels (`wechat`, `email`; default: `wechat`)
 - `WECHAT_CORP_ID` / `WECHAT_AGENT_ID` / `WECHAT_SECRET` / `WECHAT_TO_USER` — enterprise WeChat channel (see README)

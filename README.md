@@ -43,16 +43,16 @@ This project does **not** place orders or sync broker positions.
 ### 3) Docker (backend + frontend + nginx)
 Images are pinned to **Python 3.12**, **Node 22**, and **pnpm 11.20.0**. Python packages come from `backend/uv.lock` (`uv sync --frozen --no-dev`); Node packages come from `pnpm-lock.yaml` (`pnpm install --frozen-lockfile`). Do not use `python:latest` / `node:latest` or unlocked `pip` / `npm` installs.
 
-Env files stay with each app (Compose reads them; `deploy/.env` is only the nginx port):
+Local `uv` / `pnpm dev` and Docker use **separate** env files:
 
-1. Copy `backend/.env.example` to `backend/.env` and fill WeChat / SMTP (and `CORS_ORIGINS` if you open the UI from a host other than `localhost`).
-2. Copy `frontend/.env.example` to `frontend/.env` for local `pnpm dev`. Docker builds with an empty `NEXT_PUBLIC_API_BASE_URL` so the browser calls same-origin `/api` through nginx.
-3. Optionally copy `deploy/.env.example` to `deploy/.env` to change `HTTP_PORT`.
+1. Local: copy `backend/.env.example` → `backend/.env` and `frontend/.env.example` → `frontend/.env`.
+2. Docker: copy `deploy/.env.backend.example` → `deploy/.env.backend` and fill WeChat / SMTP (and `CORS_ORIGINS` if you open the UI from a host other than `localhost`). Do not reuse `backend/.env` or `frontend/.env`.
+3. Optionally copy `deploy/.env.example` to `deploy/.env` to change `HTTP_PORT` or `SQLITE_DATA_DIR`. Docker builds with an empty `NEXT_PUBLIC_API_BASE_URL` so the browser calls same-origin `/api` through nginx.
 4. From `deploy/`:
    - `docker compose up -d --build`
 5. Open http://localhost (or `http://localhost:$HTTP_PORT`).
 
-nginx is the only published port. It proxies `/` to the Next.js app and `/api/` (including SSE) to FastAPI. SQLite is stored in the `amtsm-data` volume at `/data/amtsm.db`.
+nginx is the only published port. It proxies `/` to Next.js and `/api/` (including SSE) to FastAPI. SQLite is bind-mounted from the host (`deploy/data` by default, overridable via `SQLITE_DATA_DIR`) to `/data/amtsm.db` in the backend container, so rebuilds do not overwrite it.
 
 ## Notification Channels
 

@@ -20,9 +20,11 @@ out/
 *.db
 *.db-shm
 *.db-wal
+deploy/data/
 .env
 .env.*
 !.env.example
+!.env.*.example
 
 # Logs
 *.log

@@ -6,26 +6,20 @@ services:
       context: ..
       dockerfile: deploy/Dockerfile.backend
     env_file:
-      - path: ../backend/.env.example
+      - path: ./.env.backend.example
         required: true
-      - path: ../backend/.env
+      - path: ./.env.backend
         required: false
-    environment:
-      # Win over env files: container paths and production mode.
-      APP_ENV: production
-      API_HOST: 0.0.0.0
-      API_PORT: 8000
-      SQLITE_PATH: /data/amtsm.db
-      TZ: Asia/Shanghai
     volumes:
-      - amtsm-data:/data
+      # Host dir is independent of the image. Rebuild / recreate / `down` never overwrite it.
+      - ${SQLITE_DATA_DIR:-./data}:/data
     healthcheck:
       test:
         [
           "CMD",
           "python",
           "-c",
-          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health')",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8800/api/health')",
         ]
       interval: 10s
       timeout: 5s
@@ -39,16 +33,11 @@ services:
       dockerfile: deploy/Dockerfile.frontend
       args:
         # NEXT_PUBLIC_* is baked at build time. Empty = same-origin /api via nginx.
-        # Do not pass frontend/.env's local-dev http://localhost:8000 into the image.
+        # Do not pass frontend/.env (local-dev http://localhost:8800) into the image.
         NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-}
-    env_file:
-      - path: ../frontend/.env.example
-        required: true
-      - path: ../frontend/.env
-        required: false
     environment:
       TZ: Asia/Shanghai
-      PORT: 3000
+      PORT: 3800
       HOSTNAME: 0.0.0.0
     depends_on:
       backend:
@@ -59,7 +48,7 @@ services:
           "CMD",
           "node",
           "-e",
-          "fetch('http://127.0.0.1:3000').then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))",
+          "fetch('http://127.0.0.1:3800').then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))",
         ]
       interval: 10s
       timeout: 5s
@@ -85,6 +74,3 @@ services:
       retries: 6
       start_period: 10s
     restart: unless-stopped
-
-volumes:
-  amtsm-data:

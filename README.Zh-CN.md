@@ -43,16 +43,16 @@ A 股交易信号监控与提醒系统。
 ### 3) Docker（后端 + 前端 + nginx）
 镜像锁定 **Python 3.12**、**Node 22** 和 **pnpm 11.20.0**。Python 依赖来自 `backend/uv.lock`（`uv sync --frozen --no-dev`）；Node 依赖来自 `pnpm-lock.yaml`（`pnpm install --frozen-lockfile`）。不要使用 `python:latest` / `node:latest`，也不要在镜像里做无 lock 的 `pip` / `npm` 安装。
 
-环境变量仍放在各自应用目录（Compose 会读取；`deploy/.env` 只负责 nginx 端口）：
+本地 `uv` / `pnpm dev` 与 Docker 使用**两套**环境文件，不要互相复制：
 
-1. 将 `backend/.env.example` 复制为 `backend/.env`，填写微信 / SMTP（若从非 `localhost` 打开界面，还要改 `CORS_ORIGINS`）。
-2. 将 `frontend/.env.example` 复制为 `frontend/.env`，供本地 `pnpm dev` 使用。Docker 构建时使用空的 `NEXT_PUBLIC_API_BASE_URL`，浏览器通过 nginx 同源访问 `/api`。
-3. 如需改端口，将 `deploy/.env.example` 复制为 `deploy/.env` 并设置 `HTTP_PORT`。
+1. 本地：将 `backend/.env.example` 复制为 `backend/.env`，将 `frontend/.env.example` 复制为 `frontend/.env`。
+2. Docker：将 `deploy/.env.backend.example` 复制为 `deploy/.env.backend`，填写微信 / SMTP（若从非 `localhost` 打开界面，还要改 `CORS_ORIGINS`）。不要复用 `backend/.env` 或 `frontend/.env`。
+3. 如需改端口或 SQLite 宿主机目录，将 `deploy/.env.example` 复制为 `deploy/.env` 并设置 `HTTP_PORT` / `SQLITE_DATA_DIR`。Docker 构建时使用空的 `NEXT_PUBLIC_API_BASE_URL`，浏览器通过 nginx 同源访问 `/api`。
 4. 在 `deploy/` 目录执行：
    - `docker compose up -d --build`
 5. 打开 http://localhost（或 `http://localhost:$HTTP_PORT`）。
 
-对外只暴露 nginx。`/` 反代到 Next.js，`/api/`（含 SSE）反代到 FastAPI。SQLite 保存在 `amtsm-data` 数据卷的 `/data/amtsm.db`。
+对外只暴露 nginx。`/` 反代到 Next.js，`/api/`（含 SSE）反代到 FastAPI。SQLite 从宿主机目录（默认 `deploy/data`，可用 `SQLITE_DATA_DIR` 覆盖）挂载到容器内 `/data/amtsm.db`，重建镜像或容器不会覆盖数据库。
 
 ## 通知渠道
 
