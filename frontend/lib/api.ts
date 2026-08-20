@@ -307,7 +307,7 @@ export const SCHEDULER_JOBS = [
     label: "行情轮询",
     kind: "interval",
     group: "recurring",
-    intervalSeconds: 5,
+    intervalSeconds: 30,
     note: "含盘中快照",
   },
   {

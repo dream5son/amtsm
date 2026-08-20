@@ -22,7 +22,7 @@ class Settings(BaseSettings):
     snapshot_minute: int = 30
     snapshot_fetch_retries: int = 2
     snapshot_fetch_retry_backoff_seconds: float = 0.5
-    polling_interval_seconds: int = 5
+    polling_interval_seconds: int = 30
     # Throttle for writing today's snapshot from polling quotes (no separate job).
     intraday_snapshot_interval_seconds: int = 60
     polling_batch_size: int = 50
