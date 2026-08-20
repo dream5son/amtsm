@@ -383,9 +383,9 @@ export default function WatchlistPanel({ onOpenStrategy }: WatchlistPanelProps) 
                     <td
                       className={
                         item.change_pct !== null && item.change_pct > 0
-                          ? "py-2 pr-2 text-emerald-700"
+                          ? "py-2 pr-2 text-rose-700"
                           : item.change_pct !== null && item.change_pct < 0
-                            ? "py-2 pr-2 text-rose-700"
+                            ? "py-2 pr-2 text-emerald-700"
                             : "py-2 pr-2 text-slate-700"
                       }
                     >
@@ -401,9 +401,9 @@ export default function WatchlistPanel({ onOpenStrategy }: WatchlistPanelProps) 
                         !holding
                           ? "py-2 pr-2 text-slate-500"
                           : item.unrealized_pnl != null && item.unrealized_pnl > 0
-                            ? "py-2 pr-2 font-semibold text-emerald-700"
+                            ? "py-2 pr-2 font-semibold text-rose-700"
                             : item.unrealized_pnl != null && item.unrealized_pnl < 0
-                              ? "py-2 pr-2 font-semibold text-rose-700"
+                              ? "py-2 pr-2 font-semibold text-emerald-700"
                               : "py-2 pr-2 font-semibold text-slate-900"
                       }
                     >
