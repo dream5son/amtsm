@@ -1,7 +1,7 @@
 import asyncio
 import logging
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Query, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 
@@ -89,10 +89,12 @@ def get_status():
 
 
 @router.get("/status/stream")
-async def status_stream():
+async def status_stream(request: Request):
     async def event_generator():
         last_status = None
         while True:
+            if await request.is_disconnected():
+                break
             current = runtime_state.job_status
             if current != last_status:
                 label = _STATUS_MAP.get(current, "未开始")

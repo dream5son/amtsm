@@ -66,7 +66,7 @@ class Settings(BaseSettings):
     alert_max_per_stock_per_day: int = 0
 
     # Backtest worker (V2 user stories 08-10)
-    backtest_worker_interval_seconds: int = 3
+    backtest_worker_interval_seconds: int = 10
     backtest_min_trade_count: int = 5
     backtest_snapshot_fetch_retries: int = 2
     backtest_snapshot_fetch_retry_backoff_seconds: float = 0.5

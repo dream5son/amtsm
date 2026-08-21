@@ -483,3 +483,34 @@ def test_system_status_stream_heartbeat_is_comment() -> None:
             await gen.aclose()
 
     asyncio.run(_run())
+
+
+def test_system_status_stream_stops_when_disconnected() -> None:
+    import asyncio
+
+    from app.api.health import system_status_event_generator
+
+    class _FakeRequest:
+        def __init__(self) -> None:
+            self._disconnected = False
+
+        async def is_disconnected(self) -> bool:
+            return self._disconnected
+
+    _reset_runtime()
+    request = _FakeRequest()
+
+    async def _run() -> None:
+        gen = system_status_event_generator(
+            request, poll_seconds=0.01, heartbeat_seconds=10.0
+        )
+        try:
+            first = await anext(gen)
+            assert first.startswith("data: ")
+            request._disconnected = True
+            with pytest.raises(StopAsyncIteration):
+                await asyncio.wait_for(anext(gen), timeout=0.5)
+        finally:
+            await gen.aclose()
+
+    asyncio.run(_run())

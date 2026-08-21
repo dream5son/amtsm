@@ -19,14 +19,15 @@ def _run_worker() -> None:
     track_job("backtest_worker", backtest_worker_task)()
 
 
-def test_idle_emits_activity_log(tmp_path, monkeypatch) -> None:
+def test_idle_does_not_emit_activity_log(tmp_path, monkeypatch) -> None:
+    """Idle ticks stay at DEBUG so overnight SSE panels are not flooded."""
     monkeypatch.setattr(settings, "sqlite_path", str(tmp_path / "amtsm.db"))
     init_db()
 
     _run_worker()
 
     messages = [item["message"] for item in recent("backtest_worker")]
-    assert any("backtest_worker idle: no PENDING jobs" in msg for msg in messages)
+    assert messages == []
 
 
 def test_pending_job_emits_started_and_finished(tmp_path, monkeypatch) -> None:

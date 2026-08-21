@@ -61,7 +61,9 @@ def backtest_worker_task() -> None:
         ).scalar_one_or_none()
 
     if job_id is None:
-        logger.info("backtest_worker idle: no PENDING jobs")
+        # Debug only: INFO would hit the activity SSE panel every few seconds
+        # when idle and amplify CPU under leaked long-lived connections.
+        logger.debug("backtest_worker idle: no PENDING jobs")
         return
 
     logger.info("backtest_worker started job_id=%s", job_id)

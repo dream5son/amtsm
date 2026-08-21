@@ -1,5 +1,11 @@
 name: amtsm
 
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   backend:
     build:
@@ -13,6 +19,7 @@ services:
     volumes:
       # Host dir is independent of the image. Rebuild / recreate / `down` never overwrite it.
       - ${SQLITE_DATA_DIR:-./data}:/data
+    logging: *default-logging
     healthcheck:
       test:
         [
@@ -21,9 +28,9 @@ services:
           "-c",
           "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8800/api/health')",
         ]
-      interval: 10s
+      interval: 30s
       timeout: 5s
-      retries: 6
+      retries: 3
       start_period: 30s
     restart: unless-stopped
 
@@ -42,6 +49,7 @@ services:
     depends_on:
       backend:
         condition: service_healthy
+    logging: *default-logging
     healthcheck:
       test:
         [
@@ -50,9 +58,9 @@ services:
           "-e",
           "fetch('http://127.0.0.1:3800').then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))",
         ]
-      interval: 10s
+      interval: 30s
       timeout: 5s
-      retries: 6
+      retries: 3
       start_period: 20s
     restart: unless-stopped
 
@@ -67,10 +75,11 @@ services:
         condition: service_healthy
       frontend:
         condition: service_healthy
+    logging: *default-logging
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1/api/health"]
-      interval: 10s
+      interval: 30s
       timeout: 5s
-      retries: 6
+      retries: 3
       start_period: 10s
     restart: unless-stopped

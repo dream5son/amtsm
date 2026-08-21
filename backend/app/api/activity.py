@@ -2,7 +2,7 @@ import asyncio
 import json
 import time
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 
 from app.engine.activity_log import (
@@ -17,8 +17,10 @@ from app.engine.scheduler import list_activity_jobs
 
 router = APIRouter(prefix="/api/jobs", tags=["jobs"])
 
-SSE_POLL_SECONDS = 0.5
+SSE_POLL_SECONDS = 2.0
 SSE_HEARTBEAT_SECONDS = 30.0
+# Scheduler job metadata changes rarely; avoid get_jobs() on every poll tick.
+SSE_SCHEDULER_SECONDS = 5.0
 _SSE_HEADERS = {
     "Cache-Control": "no-cache",
     "Connection": "keep-alive",
@@ -40,12 +42,17 @@ def get_activity(
 
 
 async def activity_event_generator(
+    request: Request | None = None,
     *,
     poll_seconds: float = SSE_POLL_SECONDS,
     heartbeat_seconds: float = SSE_HEARTBEAT_SECONDS,
+    scheduler_seconds: float = SSE_SCHEDULER_SECONDS,
     limit: int = DEFAULT_LIMIT,
 ):
-    """Yield a per-job snapshot first, then incremental items as they appear."""
+    """Yield a per-job snapshot first, then incremental items as they appear.
+
+    Exit when the client disconnects so leaked SSE connections cannot pile up.
+    """
     scheduler_jobs = list_activity_jobs()
     yield (
         "data: "
@@ -57,24 +64,29 @@ async def activity_event_generator(
     )
     last_seen = max_id()
     last_heartbeat = time.monotonic()
+    last_scheduler_check = time.monotonic()
     last_scheduler = scheduler_jobs
     while True:
+        if request is not None and await request.is_disconnected():
+            break
         new_items = since(last_seen)
         if new_items:
             yield f"data: {json.dumps({'type': 'delta', 'items': new_items}, ensure_ascii=False)}\n\n"
             last_seen = new_items[-1]["id"]
-        current_scheduler = list_activity_jobs()
-        if current_scheduler != last_scheduler:
-            yield (
-                "data: "
-                + json.dumps(
-                    {"type": "scheduler", "scheduler": current_scheduler},
-                    ensure_ascii=False,
-                )
-                + "\n\n"
-            )
-            last_scheduler = current_scheduler
         now = time.monotonic()
+        if now - last_scheduler_check >= scheduler_seconds:
+            current_scheduler = list_activity_jobs()
+            if current_scheduler != last_scheduler:
+                yield (
+                    "data: "
+                    + json.dumps(
+                        {"type": "scheduler", "scheduler": current_scheduler},
+                        ensure_ascii=False,
+                    )
+                    + "\n\n"
+                )
+                last_scheduler = current_scheduler
+            last_scheduler_check = now
         if now - last_heartbeat >= heartbeat_seconds:
             yield ": ping\n\n"
             last_heartbeat = now
@@ -82,10 +94,10 @@ async def activity_event_generator(
 
 
 @router.get("/activity/stream")
-async def activity_stream():
+async def activity_stream(request: Request):
     """Push scheduler activity; wait (with heartbeat) otherwise."""
     return StreamingResponse(
-        activity_event_generator(),
+        activity_event_generator(request),
         media_type="text/event-stream",
         headers=_SSE_HEADERS,
     )

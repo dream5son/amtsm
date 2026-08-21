@@ -77,7 +77,79 @@ docker compose up -d --build
 - 前端：`GET /`
 - nginx：`GET /api/health`
 
-## 3. 日常命令
+之后改代码或配置，走第 3 节。`.env.backend` 已填过就不要再 `cp` 覆盖。
+
+## 3. 代码 / 配置变更后如何部署
+
+源码和依赖打进镜像，改完必须 `--build`；运行时配置（`.env.backend`、端口、`nginx.conf`）一般只重建容器或 reload，不必重建镜像。SQLite 在宿主机，下面操作都不会丢数据。
+
+一律在 `deploy/` 下执行。若机器上的代码不是刚改的，先 `git pull`。
+
+不确定改了什么、或一次改了多处时，用这一条即可：
+
+```bash
+cd deploy
+docker compose up -d --build
+```
+
+Compose 会按变更重建镜像、重建容器并启动。已有层缓存会复用，日常更新够用。
+
+### 按改动选命令
+
+| 改了什么 | 要不要重建镜像 | 命令 |
+|----------|----------------|------|
+| `backend/app/` 源码 | 是（backend） | `docker compose up -d --build backend` |
+| `backend/pyproject.toml` / `uv.lock` | 是（backend） | 同上；依赖没装上见第 5 节无缓存重建 |
+| `frontend/` 页面、组件、样式 | 是（frontend） | `docker compose up -d --build frontend` |
+| `pnpm-lock.yaml` / `frontend/package.json` | 是（frontend） | 同上；依赖没装上见第 5 节 |
+| `deploy/.env` 里的 `NEXT_PUBLIC_API_BASE_URL` | 是（frontend，构建期写入包内） | `docker compose up -d --build frontend` |
+| `deploy/.env.backend`（微信、SMTP、`CORS_ORIGINS`、轮询间隔等） | 否 | `docker compose up -d --force-recreate backend` |
+| `deploy/.env` 里的 `HTTP_PORT` / `SQLITE_DATA_DIR` | 否 | `docker compose up -d` |
+| `deploy/nginx.conf` | 否（已只读挂载进容器） | `docker compose exec nginx nginx -s reload` |
+| `deploy/Dockerfile.*` / `docker-compose.yml` | 视变更 | `docker compose up -d --build` |
+
+不要用 `docker compose restart` 加载新环境变量：`restart` 只重启现有容器，不会重新读 `.env.backend` 或端口映射。改配置用 `up -d`（必要时加 `--force-recreate`）。
+
+### 只改后端运行时配置
+
+编辑 `deploy/.env.backend` 后：
+
+```bash
+docker compose up -d --force-recreate backend
+```
+
+容器会用新变量启动，数据库文件不动。改了 `CORS_ORIGINS` 后，用实际打开界面的 origin 再访问一次确认。
+
+### 只改 nginx
+
+`nginx.conf` 已挂载，改完 reload 即可，不必重建镜像：
+
+```bash
+docker compose exec nginx nginx -s reload
+```
+
+reload 失败再 `docker compose restart nginx`。若改了 `HTTP_PORT`，必须 `docker compose up -d` 才能改端口映射。
+
+### 前端 API 地址
+
+`NEXT_PUBLIC_API_BASE_URL` 在**构建镜像时**打进前端，容器启动后再改 `deploy/.env` 无效。Docker 默认空字符串（浏览器走 nginx 同源 `/api`）。只有要强制指定时才构建：
+
+```bash
+NEXT_PUBLIC_API_BASE_URL= docker compose up -d --build frontend
+```
+
+### 更新后核对
+
+```bash
+docker compose ps
+curl -sS http://localhost/api/health    # 若改了 HTTP_PORT，换成对应端口
+```
+
+三个服务应为 `healthy`。有问题看日志：`docker compose logs -f backend`（或 `frontend` / `nginx`）。
+
+依赖改了但镜像行为仍像旧的、或 `--build` 后依赖没装上，再做第 5 节的无缓存重建。
+
+## 4. 日常命令
 
 均在 `deploy/` 下执行：
 
@@ -85,24 +157,12 @@ docker compose up -d --build
 docker compose ps
 docker compose logs -f
 docker compose logs -f backend
-docker compose restart backend
-docker compose down          # 停止并删除容器，保留宿主机 SQLite 目录
-docker compose down -v       # 同样不会删除 SQLITE_DATA_DIR（已不再使用 named volume）
+docker compose restart backend   # 只重启进程，不重新读 env / 不重建镜像
+docker compose down              # 停止并删除容器，保留宿主机 SQLite 目录
+docker compose down -v           # 同样不会删除 SQLITE_DATA_DIR（已不再使用 named volume）
 ```
 
-增量重建（尽量复用缓存，日常改代码后用这个）：
-
-```bash
-docker compose up -d --build
-```
-
-改了 `NEXT_PUBLIC_API_BASE_URL` 必须重新构建前端镜像（该值在构建时打进包）。Docker 默认用空字符串。若要强制指定：
-
-```bash
-NEXT_PUBLIC_API_BASE_URL= docker compose up -d --build frontend
-```
-
-## 4. 删除并重建镜像
+## 5. 删除并重建镜像
 
 `--build` 会复用 Docker 层缓存。依赖没装上、Dockerfile / lock 改了但镜像还是旧的、或怀疑缓存脏了时，需要先删镜像再无缓存重建。
 
@@ -209,3 +269,67 @@ docker run --rm -v amtsm_amtsm-data:/from -v "$(pwd)/data:/to" alpine cp -a /fro
 | `data/` | 默认 SQLite 宿主机目录（启动后自动出现，已 gitignore） |
 
 时区均为 `Asia/Shanghai`（与 A 股交易时段、调度任务一致）。当前不包含 HTTPS；需要证书时再在 nginx 前加一层或自行扩展配置。
+
+## 排障：运行一天后 CPU 飙高
+
+### 现象
+
+Docker Compose 跑一段时间（常见过夜）后 CPU 明显升高。nginx access log 里大量出现：
+
+```text
+127.0.0.1 ... "GET /api/health HTTP/1.1" 200 34 "-" "Wget" "-"
+```
+
+间隔约 10～30 秒，看起来像健康检查把机器打满。
+
+### 结论：健康检查不是根因
+
+这些请求来自 **Docker HEALTHCHECK**（nginx 容器内 `wget` 打本机 `/api/health`），不是公网流量：
+
+- `User-Agent: Wget`、来源 `127.0.0.1`
+- 当前 compose 探活间隔为 **30s**（历史上曾为 10s）
+- 每次立刻 `200`，体量约 34 字节，**撑不起 CPU 飙高**
+
+市场收盘后日志里几乎只剩探活行，所以容易误判。真正需要怀疑的是：浏览器经 **ngrok**（或其它隧道）长时间挂着首页时，**SSE 长连接泄漏 / 重连堆积**。
+
+### 更可能的根因
+
+首页会立刻打开两条永不结束的 `EventSource`：
+
+| 流 | 路径 | 服务端行为 |
+|----|------|------------|
+| 系统状态 | `/api/system/status/stream` | 轮询内存状态 + 心跳 |
+| 调度活动 | `/api/jobs/activity/stream` | 轮询 activity buffer；调度器元数据定期 `get_jobs()` |
+
+叠加因素：
+
+1. **ngrok / 浏览器重连**：免费隧道对长连接不稳定；`EventSource` 默认约 3s 自动重连。上游到 backend 的旧连接不一定立刻关掉，`while True` 生成器会继续空转。
+2. **nginx 长超时**：`/api/` 曾设 `proxy_read_timeout 3600s`，死连接可挂很久；现已降到约 **90s**（仍大于约 30s 的 SSE 心跳）。
+3. **回测 worker 空闲刷日志**：历史上每 3s 打一条 INFO idle，会进 activity 面板再经 SSE 推前端；现已改为 DEBUG，空闲间隔默认 **10s**。
+
+堆积后 CPU 大致随残留 SSE 连接数线性上升，因此往往「跑了一天才明显」。
+
+### 已做的缓解（代码 / 配置）
+
+- SSE 生成器每轮检测 `request.is_disconnected()`，断开即退出
+- activity 轮询放宽；调度器视图不再每个 tick 都 `get_jobs()`
+- nginx：`location = /api/health` 关闭 access_log；`/api/` 读超时约 90s
+- compose：健康检查 30s；各服务 json-file 日志轮转（`10m × 3`）
+- 回测 idle 仅 DEBUG，避免空转刷面板
+
+### 如何确认
+
+服务起来后：
+
+```bash
+docker stats
+# backend 容器内看 8800 上 ESTABLISHED 数量（页面开着时大约几条 SSE，不应随时间涨到成百上千）
+docker compose exec backend sh -c "ss -tn state established '( sport = :8800 )' | wc -l"
+```
+
+正常：少量 ESTABLISHED（探活瞬时 + 页面约 2 条 SSE）。若连接数随 ngrok 标签页过夜持续上涨，仍可能是泄漏，需再查。
+
+### 使用建议
+
+- ngrok-free **不适合**长期挂 SSE；对外尽量用固定域名，或至少不要让标签页过夜挂着隧道地址。
+- 若 `docker stats` 高 CPU 在 frontend 而非 backend，再单独排查 Next.js 过夜内存 / GC，与上述 SSE 路径无关。

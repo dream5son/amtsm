@@ -331,7 +331,7 @@ export const SCHEDULER_JOBS = [
     label: "回测",
     kind: "interval",
     group: "recurring",
-    intervalSeconds: 3,
+    intervalSeconds: 10,
   },
   {
     id: "startup_market_data_catchup",

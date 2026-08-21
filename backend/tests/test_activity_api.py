@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app.engine.activity_log import emit, recent, reset_activity_log
@@ -87,3 +88,36 @@ def test_bootstrap_job_error_goes_to_bootstrap_bucket() -> None:
     items = recent("snapshot_bootstrap")
     assert items[-1]["job"] == "snapshot_bootstrap"
     assert recent("market_polling") == []
+
+
+def test_activity_stream_stops_when_disconnected() -> None:
+    import asyncio
+
+    from app.api.activity import activity_event_generator
+
+    class _FakeRequest:
+        def __init__(self) -> None:
+            self._disconnected = False
+
+        async def is_disconnected(self) -> bool:
+            return self._disconnected
+
+    request = _FakeRequest()
+
+    async def _run() -> None:
+        gen = activity_event_generator(
+            request,
+            poll_seconds=0.01,
+            heartbeat_seconds=10.0,
+            scheduler_seconds=10.0,
+        )
+        try:
+            first = await anext(gen)
+            assert first.startswith("data: ")
+            request._disconnected = True
+            with pytest.raises(StopAsyncIteration):
+                await asyncio.wait_for(anext(gen), timeout=0.5)
+        finally:
+            await gen.aclose()
+
+    asyncio.run(_run())
