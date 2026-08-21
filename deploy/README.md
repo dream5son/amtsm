@@ -13,11 +13,13 @@
 
 ## 版本锁定
 
-| 组件 | 版本 | 依赖来源 |
-|------|------|----------|
-| 后端 | Python 3.12（非 3.13） | `backend/uv.lock`（`uv sync --frozen --no-dev`） |
-| 前端 | Node 22 + pnpm 11.20.0 | `pnpm-lock.yaml`（`--frozen-lockfile`） |
-| 网关 | nginx 1.27-alpine | 官方镜像 |
+
+| 组件  | 版本                     | 依赖来源                                           |
+| --- | ---------------------- | ---------------------------------------------- |
+| 后端  | Python 3.12（非 3.13）    | `backend/uv.lock`（`uv sync --frozen --no-dev`） |
+| 前端  | Node 22 + pnpm 11.20.0 | `pnpm-lock.yaml`（`--frozen-lockfile`）          |
+| 网关  | nginx 1.27-alpine      | 官方镜像                                           |
+
 
 不要改成 `python:latest` / `node:latest`，也不要在镜像里做无 lock 的 `pip` / `npm` 安装。
 
@@ -25,6 +27,8 @@
 
 - Docker Engine + Docker Compose v2
 - 本机 80 端口空闲（或改 `HTTP_PORT`）
+
+
 
 ## 1. 准备环境变量
 
@@ -56,11 +60,15 @@ cp .env.example .env
 
 Compose 会读取：
 
-| 文件 | 用途 |
-|------|------|
-| `.env.backend.example` + `.env.backend` | 后端运行时（后者覆盖前者） |
-| 前端构建参数 | `NEXT_PUBLIC_API_BASE_URL`（默认空 = 同源 `/api`） |
-| `.env` | `HTTP_PORT`、`SQLITE_DATA_DIR`（及可选的 `NEXT_PUBLIC_API_BASE_URL`） |
+
+| 文件                                      | 用途                                                             |
+| --------------------------------------- | -------------------------------------------------------------- |
+| `.env.backend.example` + `.env.backend` | 后端运行时（后者覆盖前者）                                                  |
+| 前端构建参数                                  | `NEXT_PUBLIC_API_BASE_URL`（默认空 = 同源 `/api`）                    |
+| `.env`                                  | `HTTP_PORT`、`SQLITE_DATA_DIR`（及可选的 `NEXT_PUBLIC_API_BASE_URL`） |
+
+
+
 
 ## 2. 启动
 
@@ -69,7 +77,7 @@ cd deploy
 docker compose up -d --build
 ```
 
-打开 http://localhost（若改了端口则为 `http://localhost:$HTTP_PORT`）。
+打开 [http://localhost（若改了端口则为](http://localhost（若改了端口则为) `http://localhost:$HTTP_PORT`）。
 
 健康检查通过后再对外提供服务：
 
@@ -96,17 +104,19 @@ Compose 会按变更重建镜像、重建容器并启动。已有层缓存会复
 
 ### 按改动选命令
 
-| 改了什么 | 要不要重建镜像 | 命令 |
-|----------|----------------|------|
-| `backend/app/` 源码 | 是（backend） | `docker compose up -d --build backend` |
-| `backend/pyproject.toml` / `uv.lock` | 是（backend） | 同上；依赖没装上见第 5 节无缓存重建 |
-| `frontend/` 页面、组件、样式 | 是（frontend） | `docker compose up -d --build frontend` |
-| `pnpm-lock.yaml` / `frontend/package.json` | 是（frontend） | 同上；依赖没装上见第 5 节 |
-| `deploy/.env` 里的 `NEXT_PUBLIC_API_BASE_URL` | 是（frontend，构建期写入包内） | `docker compose up -d --build frontend` |
-| `deploy/.env.backend`（微信、SMTP、`CORS_ORIGINS`、轮询间隔等） | 否 | `docker compose up -d --force-recreate backend` |
-| `deploy/.env` 里的 `HTTP_PORT` / `SQLITE_DATA_DIR` | 否 | `docker compose up -d` |
-| `deploy/nginx.conf` | 否（已只读挂载进容器） | `docker compose exec nginx nginx -s reload` |
-| `deploy/Dockerfile.*` / `docker-compose.yml` | 视变更 | `docker compose up -d --build` |
+
+| 改了什么                                                | 要不要重建镜像             | 命令                                              |
+| --------------------------------------------------- | ------------------- | ----------------------------------------------- |
+| `backend/app/` 源码                                   | 是（backend）          | `docker compose up -d --build backend`          |
+| `backend/pyproject.toml` / `uv.lock`                | 是（backend）          | 同上；依赖没装上见第 5 节无缓存重建                             |
+| `frontend/` 页面、组件、样式                                | 是（frontend）         | `docker compose up -d --build frontend`         |
+| `pnpm-lock.yaml` / `frontend/package.json`          | 是（frontend）         | 同上；依赖没装上见第 5 节                                  |
+| `deploy/.env` 里的 `NEXT_PUBLIC_API_BASE_URL`         | 是（frontend，构建期写入包内） | `docker compose up -d --build frontend`         |
+| `deploy/.env.backend`（微信、SMTP、`CORS_ORIGINS`、轮询间隔等） | 否                   | `docker compose up -d --force-recreate backend` |
+| `deploy/.env` 里的 `HTTP_PORT` / `SQLITE_DATA_DIR`    | 否                   | `docker compose up -d`                          |
+| `deploy/nginx.conf`                                 | 否（已只读挂载进容器）         | `docker compose exec nginx nginx -s reload`     |
+| `deploy/Dockerfile.*` / `docker-compose.yml`        | 视变更                 | `docker compose up -d --build`                  |
+
 
 不要用 `docker compose restart` 加载新环境变量：`restart` 只重启现有容器，不会重新读 `.env.backend` 或端口映射。改配置用 `up -d`（必要时加 `--force-recreate`）。
 
@@ -138,6 +148,8 @@ reload 失败再 `docker compose restart nginx`。若改了 `HTTP_PORT`，必须
 NEXT_PUBLIC_API_BASE_URL= docker compose up -d --build frontend
 ```
 
+
+
 ### 更新后核对
 
 ```bash
@@ -162,6 +174,8 @@ docker compose down              # 停止并删除容器，保留宿主机 SQLit
 docker compose down -v           # 同样不会删除 SQLITE_DATA_DIR（已不再使用 named volume）
 ```
 
+
+
 ## 5. 删除并重建镜像
 
 `--build` 会复用 Docker 层缓存。依赖没装上、Dockerfile / lock 改了但镜像还是旧的、或怀疑缓存脏了时，需要先删镜像再无缓存重建。
@@ -176,6 +190,8 @@ docker compose down -v           # 同样不会删除 SQLITE_DATA_DIR（已不�
 docker compose build --no-cache backend    # 或 frontend
 docker compose up -d --force-recreate backend
 ```
+
+
 
 ### 删除本项目构建的镜像后全量重建
 
@@ -225,11 +241,13 @@ docker image prune -f
 
 SQLite **单独放在宿主机目录**，通过 bind mount 挂进 backend 容器。镜像重建、容器删除重建都不会覆盖这份文件。
 
-| 位置 | 路径 |
-|------|------|
-| 宿主机（可改） | `SQLITE_DATA_DIR`，默认 `deploy/data`（相对本目录即 `./data`） |
-| 容器内（不要改） | `/data/amtsm.db`（`SQLITE_PATH`） |
-| 实际文件 | `amtsm.db`、`amtsm.db-wal`、`amtsm.db-shm` |
+
+| 位置       | 路径                                                  |
+| -------- | --------------------------------------------------- |
+| 宿主机（可改）  | `SQLITE_DATA_DIR`，默认 `deploy/data`（相对本目录即 `./data`） |
+| 容器内（不要改） | `/data/amtsm.db`（`SQLITE_PATH`）                     |
+| 实际文件     | `amtsm.db`、`amtsm.db-wal`、`amtsm.db-shm`            |
+
 
 配置方式：复制 `.env.example` 为 `.env` 后设置，例如：
 
@@ -256,21 +274,27 @@ mkdir -p data
 docker run --rm -v amtsm_amtsm-data:/from -v "$(pwd)/data:/to" alpine cp -a /from/. /to/
 ```
 
+
+
 ## 本目录文件
 
-| 文件 | 说明 |
-|------|------|
-| `docker-compose.yml` | 三服务编排、健康检查、SQLite 宿主机目录挂载 |
-| `Dockerfile.backend` | Python 3.12-slim + uv |
-| `Dockerfile.frontend` | Node 22 + pnpm standalone |
-| `nginx.conf` | 反代；`/api/` 关闭缓冲以支持 SSE |
-| `.env.example` | `HTTP_PORT`、`SQLITE_DATA_DIR` 模板 |
-| `.env.backend.example` | Docker 后端运行时模板 |
-| `data/` | 默认 SQLite 宿主机目录（启动后自动出现，已 gitignore） |
+
+| 文件                     | 说明                                   |
+| ---------------------- | ------------------------------------ |
+| `docker-compose.yml`   | 三服务编排、健康检查、SQLite 宿主机目录挂载            |
+| `Dockerfile.backend`   | Python 3.12-slim + uv                |
+| `Dockerfile.frontend`  | Node 22 + pnpm standalone            |
+| `nginx.conf`           | 反代；`/api/` 关闭缓冲以支持 SSE               |
+| `.env.example`         | `HTTP_PORT`、`SQLITE_DATA_DIR` 模板     |
+| `.env.backend.example` | Docker 后端运行时模板                       |
+| `data/`                | 默认 SQLite 宿主机目录（启动后自动出现，已 gitignore） |
+
 
 时区均为 `Asia/Shanghai`（与 A 股交易时段、调度任务一致）。当前不包含 HTTPS；需要证书时再在 nginx 前加一层或自行扩展配置。
 
 ## 排障：运行一天后 CPU 飙高
+
+
 
 ### 现象
 
@@ -296,10 +320,12 @@ Docker Compose 跑一段时间（常见过夜）后 CPU 明显升高。nginx acc
 
 首页会立刻打开两条永不结束的 `EventSource`：
 
-| 流 | 路径 | 服务端行为 |
-|----|------|------------|
-| 系统状态 | `/api/system/status/stream` | 轮询内存状态 + 心跳 |
+
+| 流    | 路径                          | 服务端行为                                    |
+| ---- | --------------------------- | ---------------------------------------- |
+| 系统状态 | `/api/system/status/stream` | 轮询内存状态 + 心跳                              |
 | 调度活动 | `/api/jobs/activity/stream` | 轮询 activity buffer；调度器元数据定期 `get_jobs()` |
+
 
 叠加因素：
 
@@ -317,6 +343,8 @@ Docker Compose 跑一段时间（常见过夜）后 CPU 明显升高。nginx acc
 - compose：健康检查 30s；各服务 json-file 日志轮转（`10m × 3`）
 - 回测 idle 仅 DEBUG，避免空转刷面板
 
+
+
 ### 如何确认
 
 服务起来后：
@@ -333,3 +361,7 @@ docker compose exec backend sh -c "ss -tn state established '( sport = :8800 )' 
 
 - ngrok-free **不适合**长期挂 SSE；对外尽量用固定域名，或至少不要让标签页过夜挂着隧道地址。
 - 若 `docker stats` 高 CPU 在 frontend 而非 backend，再单独排查 Next.js 过夜内存 / GC，与上述 SSE 路径无关。
+
+## ngrok使用
+
+[https://dashboard.ngrok.com/get-started/setup/mac-os](https://dashboard.ngrok.com/get-started/setup/mac-os)
