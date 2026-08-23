@@ -1,12 +1,14 @@
 # AMTSM Docker 部署
 
-用 Docker Compose 同时启动 **backend**、**frontend**、**nginx**。浏览器只访问 nginx；页面走 `/`，接口和 SSE 走同源 `/api`。
+用 Docker Compose 同时启动 **backend**、**frontend**、**nginx**；可选 **cloudflared** 经 Cloudflare Tunnel 把内网栈挂到公网域名。浏览器只访问 nginx（本机 HTTP 或隧道 HTTPS）；页面走 `/`，接口和 SSE 走同源 `/api`。
 
 ```
 浏览器 ──HTTP :80──► nginx
-                      ├── /      → frontend:3000
-                      └── /api/  → backend:8000
+                      ├── /      → frontend:3800
+                      └── /api/  → backend:8800
                                     └── SQLite: 宿主机 SQLITE_DATA_DIR ↔ 容器 /data/amtsm.db
+
+浏览器 ──HTTPS──► Cloudflare Edge ──隧道──► cloudflared ──HTTP──► nginx:80
 ```
 
 在本目录执行 Compose 命令。构建上下文是仓库根目录。
@@ -19,6 +21,8 @@
 | 后端  | Python 3.12（非 3.13）    | `backend/uv.lock`（`uv sync --frozen --no-dev`） |
 | 前端  | Node 22 + pnpm 11.20.0 | `pnpm-lock.yaml`（`--frozen-lockfile`）          |
 | 网关  | nginx 1.27-alpine      | 官方镜像                                           |
+| 隧道  | cloudflared 2026.8.2   | 官方镜像 `cloudflare/cloudflared` |
+| 日志滚动 | alpine 3.20 + logrotate | `deploy/Dockerfile.logrotate` |
 
 
 不要改成 `python:latest` / `node:latest`，也不要在镜像里做无 lock 的 `pip` / `npm` 安装。
@@ -45,17 +49,18 @@ cp .env.backend.example .env.backend
 编辑 `.env.backend`：
 
 - 填写 `WECHAT_*`、`SMTP_*`、`NOTIFY_CHANNELS`
-- 若从非 `http://localhost` 打开界面（例如 `http://192.168.x.x` 或改了 `HTTP_PORT` 后的 `http://localhost:8080`），把该 origin 加入 `CORS_ORIGINS`（逗号分隔，需带 scheme）
+- 若从非 `http://localhost` 打开界面（例如 `http://192.168.x.x`、改了 `HTTP_PORT` 后的 `http://localhost:8080`，或 Cloudflare 域名 `https://market-signal.haojianli.me`），把该 origin 加入 `CORS_ORIGINS`（逗号分隔，需带 scheme）
 - 不要改 `SQLITE_PATH`，必须保持 `/data/amtsm.db`。数据库在宿主机，不在镜像里；改了这个路径会写进容器层，重建即丢失
 
 前端容器**不读取** `frontend/.env`。`NEXT_PUBLIC_API_BASE_URL` 是构建参数，默认空字符串，浏览器通过 nginx 同源请求 `/api`。
 
-可选：改 nginx 对外端口或 SQLite 宿主机目录：
+可选：改 nginx 对外端口、SQLite 宿主机目录或日志目录：
 
 ```bash
 cp .env.example .env
 # 编辑 HTTP_PORT=8080
 # 编辑 SQLITE_DATA_DIR=/var/lib/amtsm  （默认 ./data，相对本目录）
+# 编辑 LOG_DIR=/var/log/amtsm          （默认 ./log，相对本目录）
 ```
 
 Compose 会读取：
@@ -65,7 +70,8 @@ Compose 会读取：
 | --------------------------------------- | -------------------------------------------------------------- |
 | `.env.backend.example` + `.env.backend` | 后端运行时（后者覆盖前者）                                                  |
 | 前端构建参数                                  | `NEXT_PUBLIC_API_BASE_URL`（默认空 = 同源 `/api`）                    |
-| `.env`                                  | `HTTP_PORT`、`SQLITE_DATA_DIR`（及可选的 `NEXT_PUBLIC_API_BASE_URL`） |
+| `.env`                                  | `HTTP_PORT`、`SQLITE_DATA_DIR`、`LOG_DIR`（及可选的 `NEXT_PUBLIC_API_BASE_URL`） |
+| `cloudflared/config.yml` + `credentials.json` | 隧道 UUID / 对外域名 / 凭证（从 `*.example` 复制，已 gitignore） |
 
 
 
@@ -85,7 +91,7 @@ docker compose up -d --build
 - 前端：`GET /`
 - nginx：`GET /api/health`
 
-之后改代码或配置，走第 3 节。`.env.backend` 已填过就不要再 `cp` 覆盖。
+之后改代码或配置，走第 3 节。`.env.backend` 已填过就不要再 `cp` 覆盖。公网 HTTPS 见「Cloudflare Tunnel」。
 
 ## 3. 代码 / 配置变更后如何部署
 
@@ -113,12 +119,14 @@ Compose 会按变更重建镜像、重建容器并启动。已有层缓存会复
 | `pnpm-lock.yaml` / `frontend/package.json`          | 是（frontend）         | 同上；依赖没装上见第 5 节                                  |
 | `deploy/.env` 里的 `NEXT_PUBLIC_API_BASE_URL`         | 是（frontend，构建期写入包内） | `docker compose up -d --build frontend`         |
 | `deploy/.env.backend`（微信、SMTP、`CORS_ORIGINS`、轮询间隔等） | 否                   | `docker compose up -d --force-recreate backend` |
-| `deploy/.env` 里的 `HTTP_PORT` / `SQLITE_DATA_DIR`    | 否                   | `docker compose up -d`                          |
+| `deploy/.env` 里的 `HTTP_PORT` / `SQLITE_DATA_DIR` / `LOG_DIR` | 否                   | `docker compose up -d`                          |
 | `deploy/nginx.conf`                                 | 否（已只读挂载进容器）         | `docker compose exec nginx nginx -s reload`     |
+| `deploy/logging.backend.json` / `deploy/logrotate.conf` | 否              | `docker compose up -d --force-recreate backend logrotate` |
+| `deploy/cloudflared/config.yml` / `credentials.json` | 否                 | `docker compose restart cloudflared` |
 | `deploy/Dockerfile.*` / `docker-compose.yml`        | 视变更                 | `docker compose up -d --build`                  |
 
 
-不要用 `docker compose restart` 加载新环境变量：`restart` 只重启现有容器，不会重新读 `.env.backend` 或端口映射。改配置用 `up -d`（必要时加 `--force-recreate`）。
+不要用 `docker compose restart` 加载新环境变量：`restart` 只重启现有容器，不会重新读 `.env.backend` 或端口映射。改配置用 `up -d`（必要时加 `--force-recreate`）。`docker compose up -d` 会一并启动 `cloudflared`；凭证未填时该容器会自行重启失败，不影响 nginx / frontend / backend。对外域名见下文「Cloudflare Tunnel」。
 
 ### 只改后端运行时配置
 
@@ -157,7 +165,7 @@ docker compose ps
 curl -sS http://localhost/api/health    # 若改了 HTTP_PORT，换成对应端口
 ```
 
-三个服务应为 `healthy`。有问题看日志：`docker compose logs -f backend`（或 `frontend` / `nginx`）。
+三个服务应为 `healthy`。有问题看日志：`docker compose logs -f backend`（或 `frontend` / `nginx`），或直接读宿主机 `deploy/log/`。
 
 依赖改了但镜像行为仍像旧的、或 `--build` 后依赖没装上，再做第 5 节的无缓存重建。
 
@@ -169,9 +177,11 @@ curl -sS http://localhost/api/health    # 若改了 HTTP_PORT，换成对应端�
 docker compose ps
 docker compose logs -f
 docker compose logs -f backend
+docker compose logs -f cloudflared
+ls -l log/                   # 宿主机外盘：backend / frontend / nginx / cloudflared
 docker compose restart backend   # 只重启进程，不重新读 env / 不重建镜像
-docker compose down              # 停止并删除容器，保留宿主机 SQLite 目录
-docker compose down -v           # 同样不会删除 SQLITE_DATA_DIR（已不再使用 named volume）
+docker compose down              # 停止并删除容器，保留宿主机 SQLite 与 log 目录
+docker compose down -v           # 同样不会删除 SQLITE_DATA_DIR / LOG_DIR（已不再使用 named volume）
 ```
 
 
@@ -180,7 +190,7 @@ docker compose down -v           # 同样不会删除 SQLITE_DATA_DIR（已不�
 
 `--build` 会复用 Docker 层缓存。依赖没装上、Dockerfile / lock 改了但镜像还是旧的、或怀疑缓存脏了时，需要先删镜像再无缓存重建。
 
-**不会丢掉数据：** SQLite 在宿主机 `SQLITE_DATA_DIR`（默认 `deploy/data`），删镜像、删容器都不会动这份文件。
+**不会丢掉数据：** SQLite 在宿主机 `SQLITE_DATA_DIR`（默认 `deploy/data`），日志在 `LOG_DIR`（默认 `deploy/log`）；删镜像、删容器都不会动这些文件。
 
 在 `deploy/` 下执行。
 
@@ -274,6 +284,33 @@ mkdir -p data
 docker run --rm -v amtsm_amtsm-data:/from -v "$(pwd)/data:/to" alpine cp -a /from/. /to/
 ```
 
+## 日志持久化
+
+容器 stdout/stderr 仍走 Docker `json-file`（`10m × 3`），`docker compose logs` 照常用。另外把应用日志 bind mount 到宿主机 `LOG_DIR`（默认 `deploy/log`，相对本目录即 `./log`），重建镜像或 `down` 都不会删。
+
+| 位置 | 路径 |
+| --- | --- |
+| 宿主机（可改） | `LOG_DIR`，默认 `deploy/log` |
+| backend | `log/backend/backend.log` |
+| frontend | `log/frontend/frontend.log` |
+| nginx | `log/nginx/access.log`、`error.log`（同时仍写镜像 stdout/stderr） |
+| cloudflared | `log/cloudflared/cloudflared.log`（lumberjack 历史文件同目录） |
+
+滚动：
+
+- backend / frontend / nginx：sidecar `logrotate`，`10M × 3`，`copytruncate`，压缩旧文件
+- cloudflared：`--log-directory` 自带 lumberjack，**1MB × 保留 5 个备份**（官方写死，改不了）
+
+`deploy/log/` 已 gitignore。不要把外盘挂到 nginx 镜像的 `/var/log/nginx`（那是指向 stdout/stderr 的符号链接）。
+
+配置方式：复制 `.env.example` 为 `.env` 后设置，例如：
+
+```bash
+LOG_DIR=./log
+# 或绝对路径：
+# LOG_DIR=/var/log/amtsm
+```
+
 
 
 ## 本目录文件
@@ -281,16 +318,21 @@ docker run --rm -v amtsm_amtsm-data:/from -v "$(pwd)/data:/to" alpine cp -a /fro
 
 | 文件                     | 说明                                   |
 | ---------------------- | ------------------------------------ |
-| `docker-compose.yml`   | 三服务编排、健康检查、SQLite 宿主机目录挂载            |
+| `docker-compose.yml`   | 编排 + 健康检查 + SQLite / log 宿主机目录挂载 |
 | `Dockerfile.backend`   | Python 3.12-slim + uv                |
 | `Dockerfile.frontend`  | Node 22 + pnpm standalone            |
-| `nginx.conf`           | 反代；`/api/` 关闭缓冲以支持 SSE               |
-| `.env.example`         | `HTTP_PORT`、`SQLITE_DATA_DIR` 模板     |
+| `Dockerfile.logrotate` | alpine 3.20 + logrotate              |
+| `nginx.conf`           | 反代；`/api/` 关闭缓冲以支持 SSE；透传 `X-Forwarded-Proto`；双写 access/error 到宿主机 |
+| `logging.backend.json` | uvicorn 同时写 stdout 与 `/var/log/amtsm/backend.log` |
+| `logrotate.conf`       | backend / frontend / nginx 宿主机日志滚动（不含 cloudflared） |
+| `.env.example`         | `HTTP_PORT`、`SQLITE_DATA_DIR`、`LOG_DIR` 模板     |
 | `.env.backend.example` | Docker 后端运行时模板                       |
+| `cloudflared/`         | 隧道 `config.yml` / `credentials.json`（仓库只留 `*.example`） |
 | `data/`                | 默认 SQLite 宿主机目录（启动后自动出现，已 gitignore） |
+| `log/`                 | 默认日志宿主机目录（启动后自动出现，已 gitignore） |
 
 
-时区均为 `Asia/Shanghai`（与 A 股交易时段、调度任务一致）。当前不包含 HTTPS；需要证书时再在 nginx 前加一层或自行扩展配置。
+时区均为 `Asia/Shanghai`（与 A 股交易时段、调度任务一致）。本机入口仍是 HTTP；公网 HTTPS 用可选的 Cloudflare Tunnel（见下文），不必在 nginx 上配证书。
 
 ## 排障：运行一天后 CPU 飙高
 
@@ -340,7 +382,7 @@ Docker Compose 跑一段时间（常见过夜）后 CPU 明显升高。nginx acc
 - SSE 生成器每轮检测 `request.is_disconnected()`，断开即退出
 - activity 轮询放宽；调度器视图不再每个 tick 都 `get_jobs()`
 - nginx：`location = /api/health` 关闭 access_log；`/api/` 读超时约 90s
-- compose：健康检查 30s；各服务 json-file 日志轮转（`10m × 3`）
+- compose：健康检查 30s；各服务 json-file 日志轮转（`10m × 3`）；宿主机 `deploy/log` 另有文件滚动
 - 回测 idle 仅 DEBUG，避免空转刷面板
 
 
@@ -359,9 +401,63 @@ docker compose exec backend sh -c "ss -tn state established '( sport = :8800 )' 
 
 ### 使用建议
 
-- ngrok-free **不适合**长期挂 SSE；对外尽量用固定域名，或至少不要让标签页过夜挂着隧道地址。
+- 公网入口用 **Cloudflare Tunnel**（固定域名、HTTPS），不要用 ngrok-free 长期挂 SSE。
 - 若 `docker stats` 高 CPU 在 frontend 而非 backend，再单独排查 Next.js 过夜内存 / GC，与上述 SSE 路径无关。
 
-## ngrok使用
+## Cloudflare Tunnel（内网对外）
+
+`cloudflared` 只把 Compose 网络里的 **nginx:80** 送到 Cloudflare，不额外映射宿主机端口。凭证以配置文件提供，**不要**写进 Compose `.env`。`docker compose up -d` 会启动该服务；凭证未填时容器会重启失败，其它服务不受影响。
+
+```bash
+cd deploy
+cp cloudflared/config.yml.example cloudflared/config.yml
+cp cloudflared/credentials.json.example cloudflared/credentials.json
+# 编辑 config.yml：tunnel UUID、ingress hostname
+# 把 Cloudflare 下载的隧道凭证写入 credentials.json（AccountTag / TunnelSecret / TunnelID）
+docker compose up -d
+```
+
+显式重启隧道：
+
+```bash
+docker compose restart cloudflared
+```
+
+Cloudflare 侧（locally managed named tunnel）：
+
+1. Zero Trust → Networks → Tunnels → Create a tunnel。优先下载凭证 **JSON 文件** 覆盖 `cloudflared/credentials.json`
+2. 若 Dashboard 只给了一段 `eyJ...` **Token**，不要把它整段填进 `TunnelSecret`。解码后写入三个字段：
+
+```bash
+python3 -c 'import json,base64,sys; t=sys.argv[1]; pad="="*((4-len(t)%4)%4); d=json.loads(base64.urlsafe_b64decode(t+pad)); print(json.dumps({"AccountTag":d["a"],"TunnelSecret":d["s"],"TunnelID":d["t"]}, indent=2))' '粘贴Token'
+```
+
+`AccountTag` 必须是 32 位 Cloudflare 账号 ID（`a`），不是隧道显示名。
+3. `config.yml` 的 `tunnel` 填同一 UUID（`t`）；`hostname` 填对外域名（与 `nginx.conf` 的 `server_name` 一致，默认 `market-signal.haojianli.me`）
+4. 把该域名 CNAME 到 `<TUNNEL_UUID>.cfargotunnel.com`（或在 Dashboard 绑定 hostname）
+5. **Dashboard 创建的隧道是远程配置**：连上后会 `Updated to new configuration` 并**覆盖**本地 `config.yml` 的 ingress。Zero Trust → Networks → Tunnels → 该隧道 → Public Hostname，把源站改成 `http://nginx:80`。不要用 `http://localhost:80`（那是宿主机直连地址；在 cloudflared 容器里 localhost 是它自己，日志会变成 `dial tcp [::1]:80: connection refused`，浏览器 502）。
+
+`config.yml` 与 `credentials.json` 已 gitignore，仓库只保留 `*.example`。
+
+同源 `/api` 经 nginx，前端不必改 `NEXT_PUBLIC_API_BASE_URL`。若浏览器从 `https://market-signal.haojianli.me` 打开，把该 origin 加入 `.env.backend` 的 `CORS_ORIGINS` 后 `docker compose up -d --force-recreate backend`。
+
+### 排错
+
+```bash
+docker compose ps
+docker compose logs -f cloudflared
+curl -sS http://localhost/api/health
+curl -sSI https://market-signal.haojianli.me/api/health
+```
+
+- 隧道连不上：确认已复制并填写 `cloudflared/config.yml` 与 `credentials.json`，hostname 已 CNAME 到 `<uuid>.cfargotunnel.com`。
+- 日志 `Failed to get tunnel` / `control stream encountered a failure`：网络预检全 PASS 时几乎一定是凭证错。常见误填是把 Dashboard Token（`eyJ...`）整段放进 `TunnelSecret`，或把隧道名当成 `AccountTag`。按上一节解码 Token。日志里的 UDP buffer / QUIC 警告可忽略，不是根因。
+- 凭证已对但仍频繁切到 `http2`：在 `config.yml` 加 `protocol: http2` 后 `docker compose restart cloudflared`。
+- 本机 `http://localhost/api/health` 通、隧道域名 502：看 cloudflared 日志是否 `originService=http://localhost:80` 和 `dial tcp [::1]:80: connection refused`。这是远程配置把源站写成了 localhost。到 Dashboard 把 Public Hostname 源站改成 `http://nginx:80`（改完会再打一条 `Updated to new configuration`，不必重建容器）。
+- 隧道已 200 但 curl 被 302 到 `*.cloudflareaccess.com`：hostname 开了 Cloudflare Access；浏览器可登录，直连 API / 健康检查需 Bypass。
+
+## ngrok（不推荐）
+
+长期对外请用上一节的 Cloudflare Tunnel。ngrok-free 对 SSE 不稳定，容易造成重连堆积。仅临时调试时：
 
 [https://dashboard.ngrok.com/get-started/setup/mac-os](https://dashboard.ngrok.com/get-started/setup/mac-os)

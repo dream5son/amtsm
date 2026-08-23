@@ -1,0 +1,22 @@
+# Cloudflare Tunnel 本地配置。复制为 config.yml 后填写隧道 UUID 与对外域名：
+#   cp config.yml.example config.yml
+# 凭证 JSON 放到同目录 credentials.json（见 credentials.json.example）。
+# 一条 hostname 覆盖整站：页面 / 、同源 /api（含 SSE）、/api/health。
+#
+# Cloudflare Dashboard：Zero Trust → Networks → Tunnels
+# - 若隧道是 Dashboard 创建的（远程配置），本文件的 ingress 会被忽略。
+#   必须在 Public Hostname 把源站改成 http://nginx:80（不要用 localhost）。
+# - 仅 CLI 创建的 locally managed 隧道才会用下面的 ingress。
+# 下载凭证 JSON（AccountTag 是 32 位账号 ID，不是隧道名）。
+# Dashboard 给的 eyJ... Token 须解码成三字段，不要整段塞进 TunnelSecret。
+# 把域名 CNAME 到 <TUNNEL_UUID>.cfargotunnel.com。
+# 若 QUIC 连上后立刻被拒、或国内 UDP 不稳，可取消下一行注释强制 HTTP/2：
+# protocol: http2
+
+tunnel: YOUR_TUNNEL_UUID
+credentials-file: /etc/cloudflared/credentials.json
+
+ingress:
+  - hostname: market-signal.haojianli.me
+    service: http://nginx:80
+  - service: http_status:404

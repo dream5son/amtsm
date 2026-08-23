@@ -50,7 +50,7 @@ A 股交易信号监控与提醒系统。
 3. 如需改端口或 SQLite 宿主机目录，将 `deploy/.env.example` 复制为 `deploy/.env` 并设置 `HTTP_PORT` / `SQLITE_DATA_DIR`。Docker 构建时使用空的 `NEXT_PUBLIC_API_BASE_URL`，浏览器通过 nginx 同源访问 `/api`。
 4. 在 `deploy/` 目录执行：
    - `docker compose up -d --build`
-5. 打开 http://localhost（或 `http://localhost:$HTTP_PORT`）。
+5. 打开 http://localhost（或 `http://localhost:$HTTP_PORT`）。`docker compose up -d` 会同时启动 `cloudflared`；请先复制 `deploy/cloudflared/*.example` 并填写隧道凭证。详见 [deploy/README.md](deploy/README.md)。
 
 对外只暴露 nginx。`/` 反代到 Next.js，`/api/`（含 SSE）反代到 FastAPI。SQLite 从宿主机目录（默认 `deploy/data`，可用 `SQLITE_DATA_DIR` 覆盖）挂载到容器内 `/data/amtsm.db`，重建镜像或容器不会覆盖数据库。
 

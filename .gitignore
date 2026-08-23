@@ -21,6 +21,7 @@ out/
 *.db-shm
 *.db-wal
 deploy/data/
+deploy/log/
 .env
 .env.*
 !.env.example

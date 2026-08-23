@@ -1,0 +1,6 @@
+# 真实隧道配置与凭证由本机填写，不要提交。
+config.yml
+credentials.json
+*.json
+!*.example
+!credentials.json.example

@@ -7,10 +7,50 @@ x-logging: &default-logging
     max-file: "3"
 
 services:
+  # Create host log subdirs and make them writable (frontend node uid, sticky bit
+  # so logrotate still accepts the world-writable parents).
+  log-init:
+    image: busybox:1.37
+    command:
+      [
+        "sh",
+        "-c",
+        "mkdir -p /log/backend /log/frontend /log/nginx /log/cloudflared && chmod 0755 /log && chmod 1777 /log/backend /log/frontend /log/nginx /log/cloudflared",
+      ]
+    volumes:
+      - ${LOG_DIR:-./log}:/log
+    restart: "no"
+
+  logrotate:
+    build:
+      context: .
+      dockerfile: Dockerfile.logrotate
+    environment:
+      TZ: Asia/Shanghai
+    volumes:
+      - ${LOG_DIR:-./log}:/var/log/amtsm
+      - ./logrotate.conf:/etc/logrotate.conf:ro
+    depends_on:
+      log-init:
+        condition: service_completed_successfully
+    logging: *default-logging
+    restart: unless-stopped
+
   backend:
     build:
       context: ..
       dockerfile: deploy/Dockerfile.backend
+    command:
+      [
+        "uvicorn",
+        "app.main:app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8800",
+        "--log-config",
+        "/app/logging.backend.json",
+      ]
     env_file:
       - path: ./.env.backend.example
         required: true
@@ -19,6 +59,11 @@ services:
     volumes:
       # Host dir is independent of the image. Rebuild / recreate / `down` never overwrite it.
       - ${SQLITE_DATA_DIR:-./data}:/data
+      - ${LOG_DIR:-./log}/backend:/var/log/amtsm
+      - ./logging.backend.json:/app/logging.backend.json:ro
+    depends_on:
+      log-init:
+        condition: service_completed_successfully
     logging: *default-logging
     healthcheck:
       test:
@@ -46,7 +91,18 @@ services:
       TZ: Asia/Shanghai
       PORT: 3800
       HOSTNAME: 0.0.0.0
+    init: true
+    command:
+      [
+        "/bin/sh",
+        "-c",
+        "node frontend/server.js 2>&1 | tee -a /var/log/amtsm/frontend.log",
+      ]
+    volumes:
+      - ${LOG_DIR:-./log}/frontend:/var/log/amtsm
     depends_on:
+      log-init:
+        condition: service_completed_successfully
       backend:
         condition: service_healthy
     logging: *default-logging
@@ -70,7 +126,11 @@ services:
       - "${HTTP_PORT:-80}:80"
     volumes:
       - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      # Do not mount over /var/log/nginx (image symlinks those to stdout/stderr).
+      - ${LOG_DIR:-./log}/nginx:/var/log/amtsm
     depends_on:
+      log-init:
+        condition: service_completed_successfully
       backend:
         condition: service_healthy
       frontend:
@@ -82,4 +142,33 @@ services:
       timeout: 5s
       retries: 3
       start_period: 10s
+    restart: unless-stopped
+
+  # Cloudflare Tunnel: public HTTPS hostname → nginx, no extra host ports.
+  # Copy cloudflared/*.example to config.yml / credentials.json and fill them in first.
+  # Dashboard-created tunnels use remote config: Public Hostname origin must be
+  # http://nginx:80, not localhost (that is the cloudflared container and yields 502).
+  # Starts with `docker compose up -d`. Without credentials the container restarts
+  # on failure and does not take down nginx / frontend / backend.
+  cloudflared:
+    image: cloudflare/cloudflared:2026.8.2
+    command:
+      [
+        "tunnel",
+        "--no-autoupdate",
+        "--config",
+        "/etc/cloudflared/config.yml",
+        "--log-directory",
+        "/var/log/amtsm",
+        "run",
+      ]
+    volumes:
+      - ./cloudflared:/etc/cloudflared:ro
+      - ${LOG_DIR:-./log}/cloudflared:/var/log/amtsm
+    depends_on:
+      log-init:
+        condition: service_completed_successfully
+      nginx:
+        condition: service_healthy
+    logging: *default-logging
     restart: unless-stopped

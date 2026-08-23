@@ -50,7 +50,7 @@ Local `uv` / `pnpm dev` and Docker use **separate** env files:
 3. Optionally copy `deploy/.env.example` to `deploy/.env` to change `HTTP_PORT` or `SQLITE_DATA_DIR`. Docker builds with an empty `NEXT_PUBLIC_API_BASE_URL` so the browser calls same-origin `/api` through nginx.
 4. From `deploy/`:
    - `docker compose up -d --build`
-5. Open http://localhost (or `http://localhost:$HTTP_PORT`).
+5. Open http://localhost (or `http://localhost:$HTTP_PORT`). `docker compose up -d` also starts `cloudflared`; copy `deploy/cloudflared/*.example` and fill tunnel credentials first. See [deploy/README.md](deploy/README.md).
 
 nginx is the only published port. It proxies `/` to Next.js and `/api/` (including SSE) to FastAPI. SQLite is bind-mounted from the host (`deploy/data` by default, overridable via `SQLITE_DATA_DIR`) to `/data/amtsm.db` in the backend container, so rebuilds do not overwrite it.
 
