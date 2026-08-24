@@ -15,6 +15,14 @@ Help experienced A-share investors who cannot watch the market all day:
 
 This project does **not** place orders or sync broker positions.
 
+**Watchlist workspace.** Monitor a personal watchlist: latest price, position P&L, stop-loss reference, and strategy signals in one place. Register positions by hand; alerts go out over WeChat and/or email.
+
+![Watchlist workspace](docs/images/homepage.png)
+
+**Backtest detail.** Evaluate a parameter set against history—win rate, P/L ratio, drawdown, and marked entries/exits on the K-line—so settings are evidence-based rather than guesswork.
+
+![Backtest detail](docs/images/backtest-detail.png)
+
 ## Stack
 - Backend: Python 3.12, FastAPI, APScheduler, SQLite
 - Frontend: Next.js, TypeScript, pnpm
