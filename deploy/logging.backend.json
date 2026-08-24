@@ -13,9 +13,11 @@
       "stream": "ext://sys.stdout"
     },
     "file": {
-      "class": "logging.FileHandler",
+      "class": "logging.handlers.RotatingFileHandler",
       "formatter": "default",
-      "filename": "/var/log/amtsm/backend.log"
+      "filename": "/var/log/amtsm/backend.log",
+      "maxBytes": 10485760,
+      "backupCount": 3
     }
   },
   "root": {

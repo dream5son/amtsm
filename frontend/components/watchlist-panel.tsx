@@ -8,6 +8,7 @@ import BacktestRing from "@/components/backtest-ring";
 import PositionLedgerDrawer from "@/components/position-ledger-drawer";
 import RegisterBuyDialog from "@/components/register-buy-dialog";
 import RegisterSellDialog from "@/components/register-sell-dialog";
+import SignalHistoryDrawer from "@/components/signal-history-drawer";
 import StatusBadge from "@/components/status-badge";
 import {
   createWatchlist,
@@ -15,10 +16,10 @@ import {
   getSystemStatusSSEUrl,
   removeWatchlist,
   searchStocks,
-  SignalType,
   StockSearchItem,
   WatchlistItem,
 } from "@/lib/api";
+import { renderSignal, SIGNAL_LIMIT_BOARD_TIP, SIGNAL_T1_TIP } from "@/lib/signal";
 
 function formatPrice(value: number | null): string {
   if (value === null) {
@@ -50,33 +51,6 @@ function positionStatusLabel(status: WatchlistItem["position_status"]): string {
   return "空仓监控";
 }
 
-function renderSignal(
-  signal: SignalType | null,
-): { dot: string; label: string; cls: string } {
-  if (signal === "BUY") {
-    return { dot: "🟢", label: "买入", cls: "text-emerald-700" };
-  }
-  if (signal === "SELL") {
-    return { dot: "🔴", label: "卖出", cls: "text-rose-700" };
-  }
-  if (signal === "STOP_LOSS") {
-    return { dot: "🛑", label: "止损", cls: "text-rose-700" };
-  }
-  if (signal === "TAKE_PROFIT") {
-    return { dot: "💰", label: "止盈", cls: "text-emerald-700" };
-  }
-  if (signal === "PARTIAL_TP") {
-    return { dot: "🟡", label: "分批止盈", cls: "text-amber-700" };
-  }
-  if (signal === "ADDON") {
-    return { dot: "🔵", label: "加仓", cls: "text-sky-700" };
-  }
-  return { dot: "⚪", label: "无信号", cls: "text-slate-500" };
-}
-
-const SIGNAL_T1_TIP = "当日买入部分暂受T+1限制，无法当日卖出";
-const SIGNAL_LIMIT_BOARD_TIP = "该股当前可能处于涨跌停状态，请注意流动性风险";
-
 type WatchlistPanelProps = {
   onOpenStrategy?: (item: WatchlistItem) => void;
 };
@@ -95,6 +69,7 @@ export default function WatchlistPanel({ onOpenStrategy }: WatchlistPanelProps) 
   const [buyTarget, setBuyTarget] = useState<WatchlistItem | null>(null);
   const [sellTarget, setSellTarget] = useState<WatchlistItem | null>(null);
   const [ledgerTarget, setLedgerTarget] = useState<WatchlistItem | null>(null);
+  const [signalHistoryTarget, setSignalHistoryTarget] = useState<WatchlistItem | null>(null);
   const [backtestTarget, setBacktestTarget] = useState<WatchlistItem | null>(null);
   const [detailTarget, setDetailTarget] = useState<WatchlistItem | null>(null);
 
@@ -343,7 +318,7 @@ export default function WatchlistPanel({ onOpenStrategy }: WatchlistPanelProps) 
 
       <div className="min-w-0 overflow-x-auto">
         {watchlist.length > 0 ? (
-          <table className="w-full min-w-[1280px] border-collapse text-sm">
+          <table className="w-full min-w-[1360px] border-collapse text-sm">
             <thead>
               <tr className="border-b border-slate-200 text-slate-500">
                 <th
@@ -364,7 +339,7 @@ export default function WatchlistPanel({ onOpenStrategy }: WatchlistPanelProps) 
                 <th className="whitespace-nowrap py-2 pr-2 text-left font-medium">距止损</th>
                 <th className="whitespace-nowrap py-2 pr-2 text-left font-medium">状态</th>
                 <th className="whitespace-nowrap py-2 pr-2 text-left font-medium">信号</th>
-                <th className="w-[320px] min-w-[320px] whitespace-nowrap py-2 text-left font-medium">操作</th>
+                <th className="w-[400px] min-w-[400px] whitespace-nowrap py-2 text-left font-medium">操作</th>
               </tr>
             </thead>
             <tbody>
@@ -444,7 +419,7 @@ export default function WatchlistPanel({ onOpenStrategy }: WatchlistPanelProps) 
                         ) : null}
                       </span>
                     </td>
-                    <td className="w-[320px] min-w-[320px] py-2">
+                    <td className="w-[400px] min-w-[400px] py-2">
                       <div className="flex flex-wrap gap-1">
                         <button
                           type="button"
@@ -468,6 +443,13 @@ export default function WatchlistPanel({ onOpenStrategy }: WatchlistPanelProps) 
                           className="rounded-md border border-slate-300 px-2 py-1 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-100"
                         >
                           流水
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setSignalHistoryTarget(item)}
+                          className="rounded-md border border-slate-300 px-2 py-1 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-100"
+                        >
+                          历史信号
                         </button>
                         <button
                           type="button"
@@ -546,6 +528,11 @@ export default function WatchlistPanel({ onOpenStrategy }: WatchlistPanelProps) 
         open={ledgerTarget != null}
         item={ledgerTarget}
         onClose={() => setLedgerTarget(null)}
+      />
+      <SignalHistoryDrawer
+        open={signalHistoryTarget != null}
+        item={signalHistoryTarget}
+        onClose={() => setSignalHistoryTarget(null)}
       />
       <BacktestConfigDialog
         open={backtestTarget != null}

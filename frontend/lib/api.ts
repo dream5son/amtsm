@@ -83,6 +83,29 @@ export type LedgerItem = {
   created_at: string | null;
 };
 
+export type AlertSentStatus = "PENDING" | "SUCCESS" | "FAILED" | string;
+
+export type AlertHistoryItem = {
+  id: number;
+  stock_code: string;
+  trade_date: string;
+  signal_type: SignalType;
+  trigger_price: number;
+  baseline_price: number;
+  used_coeff: number;
+  sent_status: AlertSentStatus;
+  error_code: string | null;
+  error_message: string | null;
+  sent_time: string | null;
+};
+
+export type AlertHistoryPage = {
+  items: AlertHistoryItem[];
+  total: number;
+  limit: number;
+  offset: number;
+};
+
 export type PositionTradePayload = {
   qty: number;
   price: number;
@@ -489,6 +512,24 @@ export async function fetchLedgers(stock_code: string): Promise<LedgerItem[]> {
     throw new Error("failed to fetch ledgers");
   }
   return (await res.json()) as LedgerItem[];
+}
+
+export async function fetchAlertHistory(
+  stock_code: string,
+  options: { limit?: number; offset?: number } = {},
+): Promise<AlertHistoryPage> {
+  const params = new URLSearchParams();
+  if (options.limit != null) params.set("limit", String(options.limit));
+  if (options.offset != null) params.set("offset", String(options.offset));
+  const query = params.toString();
+  const res = await fetch(
+    `${API_BASE}/api/alerts/${encodeURIComponent(stock_code)}${query ? `?${query}` : ""}`,
+    { cache: "no-store" },
+  );
+  if (!res.ok) {
+    throw new Error("failed to fetch alert history");
+  }
+  return (await res.json()) as AlertHistoryPage;
 }
 
 // ---------------------------------------------------------------------------

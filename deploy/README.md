@@ -22,7 +22,6 @@
 | 前端  | Node 22 + pnpm 11.20.0 | `pnpm-lock.yaml`（`--frozen-lockfile`）          |
 | 网关  | nginx 1.27-alpine      | 官方镜像                                           |
 | 隧道  | cloudflared 2026.8.2   | 官方镜像 `cloudflare/cloudflared` |
-| 日志滚动 | alpine 3.20 + logrotate | `deploy/Dockerfile.logrotate` |
 
 
 不要改成 `python:latest` / `node:latest`，也不要在镜像里做无 lock 的 `pip` / `npm` 安装。
@@ -121,7 +120,7 @@ Compose 会按变更重建镜像、重建容器并启动。已有层缓存会复
 | `deploy/.env.backend`（微信、SMTP、`CORS_ORIGINS`、轮询间隔等） | 否                   | `docker compose up -d --force-recreate backend` |
 | `deploy/.env` 里的 `HTTP_PORT` / `SQLITE_DATA_DIR` / `LOG_DIR` | 否                   | `docker compose up -d`                          |
 | `deploy/nginx.conf`                                 | 否（已只读挂载进容器）         | `docker compose exec nginx nginx -s reload`     |
-| `deploy/logging.backend.json` / `deploy/logrotate.conf` | 否              | `docker compose up -d --force-recreate backend logrotate` |
+| `deploy/logging.backend.json` | 否 | `docker compose up -d --force-recreate backend` |
 | `deploy/cloudflared/config.yml` / `credentials.json` | 否                 | `docker compose restart cloudflared` |
 | `deploy/Dockerfile.*` / `docker-compose.yml`        | 视变更                 | `docker compose up -d --build`                  |
 
@@ -298,8 +297,10 @@ docker run --rm -v amtsm_amtsm-data:/from -v "$(pwd)/data:/to" alpine cp -a /fro
 
 滚动：
 
-- backend / frontend / nginx：sidecar `logrotate`，`10M × 3`，`copytruncate`，压缩旧文件
-- cloudflared：`--log-directory` 自带 lumberjack，**1MB × 保留 5 个备份**（官方写死，改不了）
+- 各服务 stdout：Docker `json-file`，`10m × 3`
+- backend 宿主机文件：`RotatingFileHandler`，`10MB × 3`
+- cloudflared 宿主机文件：`--log-directory` lumberjack，**1MB × 保留 5 个备份**（官方写死）
+- frontend / nginx 宿主机文件：只追加，暂不滚动
 
 `deploy/log/` 已 gitignore。不要把外盘挂到 nginx 镜像的 `/var/log/nginx`（那是指向 stdout/stderr 的符号链接）。
 
@@ -321,10 +322,8 @@ LOG_DIR=./log
 | `docker-compose.yml`   | 编排 + 健康检查 + SQLite / log 宿主机目录挂载 |
 | `Dockerfile.backend`   | Python 3.12-slim + uv                |
 | `Dockerfile.frontend`  | Node 22 + pnpm standalone            |
-| `Dockerfile.logrotate` | alpine 3.20 + logrotate              |
 | `nginx.conf`           | 反代；`/api/` 关闭缓冲以支持 SSE；透传 `X-Forwarded-Proto`；双写 access/error 到宿主机 |
-| `logging.backend.json` | uvicorn 同时写 stdout 与 `/var/log/amtsm/backend.log` |
-| `logrotate.conf`       | backend / frontend / nginx 宿主机日志滚动（不含 cloudflared） |
+| `logging.backend.json` | uvicorn 同时写 stdout 与 `/var/log/amtsm/backend.log`（`10MB × 3` 滚动） |
 | `.env.example`         | `HTTP_PORT`、`SQLITE_DATA_DIR`、`LOG_DIR` 模板     |
 | `.env.backend.example` | Docker 后端运行时模板                       |
 | `cloudflared/`         | 隧道 `config.yml` / `credentials.json`（仓库只留 `*.example`） |
@@ -382,7 +381,7 @@ Docker Compose 跑一段时间（常见过夜）后 CPU 明显升高。nginx acc
 - SSE 生成器每轮检测 `request.is_disconnected()`，断开即退出
 - activity 轮询放宽；调度器视图不再每个 tick 都 `get_jobs()`
 - nginx：`location = /api/health` 关闭 access_log；`/api/` 读超时约 90s
-- compose：健康检查 30s；各服务 json-file 日志轮转（`10m × 3`）；宿主机 `deploy/log` 另有文件滚动
+- compose：健康检查 30s；各服务 json-file 日志轮转（`10m × 3`）；backend / cloudflared 宿主机文件各自滚动
 - 回测 idle 仅 DEBUG，避免空转刷面板
 
 

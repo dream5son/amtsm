@@ -7,35 +7,6 @@ x-logging: &default-logging
     max-file: "3"
 
 services:
-  # Create host log subdirs and make them writable (frontend node uid, sticky bit
-  # so logrotate still accepts the world-writable parents).
-  log-init:
-    image: busybox:1.37
-    command:
-      [
-        "sh",
-        "-c",
-        "mkdir -p /log/backend /log/frontend /log/nginx /log/cloudflared && chmod 0755 /log && chmod 1777 /log/backend /log/frontend /log/nginx /log/cloudflared",
-      ]
-    volumes:
-      - ${LOG_DIR:-./log}:/log
-    restart: "no"
-
-  logrotate:
-    build:
-      context: .
-      dockerfile: Dockerfile.logrotate
-    environment:
-      TZ: Asia/Shanghai
-    volumes:
-      - ${LOG_DIR:-./log}:/var/log/amtsm
-      - ./logrotate.conf:/etc/logrotate.conf:ro
-    depends_on:
-      log-init:
-        condition: service_completed_successfully
-    logging: *default-logging
-    restart: unless-stopped
-
   backend:
     build:
       context: ..
@@ -61,9 +32,6 @@ services:
       - ${SQLITE_DATA_DIR:-./data}:/data
       - ${LOG_DIR:-./log}/backend:/var/log/amtsm
       - ./logging.backend.json:/app/logging.backend.json:ro
-    depends_on:
-      log-init:
-        condition: service_completed_successfully
     logging: *default-logging
     healthcheck:
       test:
@@ -101,8 +69,6 @@ services:
     volumes:
       - ${LOG_DIR:-./log}/frontend:/var/log/amtsm
     depends_on:
-      log-init:
-        condition: service_completed_successfully
       backend:
         condition: service_healthy
     logging: *default-logging
@@ -129,8 +95,6 @@ services:
       # Do not mount over /var/log/nginx (image symlinks those to stdout/stderr).
       - ${LOG_DIR:-./log}/nginx:/var/log/amtsm
     depends_on:
-      log-init:
-        condition: service_completed_successfully
       backend:
         condition: service_healthy
       frontend:
@@ -166,8 +130,6 @@ services:
       - ./cloudflared:/etc/cloudflared:ro
       - ${LOG_DIR:-./log}/cloudflared:/var/log/amtsm
     depends_on:
-      log-init:
-        condition: service_completed_successfully
       nginx:
         condition: service_healthy
     logging: *default-logging

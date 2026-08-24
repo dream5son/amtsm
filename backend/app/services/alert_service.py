@@ -20,12 +20,13 @@ from sqlalchemy.exc import IntegrityError
 
 from app.config import settings
 from app.db.connection import get_db
-from app.db.models import AlertLog
+from app.db.models import AlertLog, Watchlist
 from app.engine.market_hours import is_alert_window_open
 from app.engine.state import runtime_state
 from app.services.market_data.numbers import coerce_optional_float
 from app.services.notifier.base import ErrorCategory, SendResult, TextNotifier
 from app.services.notifier.registry import resolve_alert_channels
+from app.services.stock_search_service import normalize_stock_code
 from app.services.wechat_notifier import (
     wechat_notifier,  # noqa: F401 — tests patch this singleton
 )
@@ -66,6 +67,52 @@ def _alert_to_dict(row: AlertLog) -> dict:
         "error_message": row.error_message,
         "sent_time": row.sent_time,
     }
+
+
+def _alert_to_api_dict(row: AlertLog) -> dict:
+    data = _alert_to_dict(row)
+    sent = data.get("sent_time")
+    data["sent_time"] = sent.isoformat() if sent is not None else None
+    return data
+
+
+def list_alerts_by_stock(
+    stock_code: str, limit: int = 20, offset: int = 0
+) -> dict:
+    """Return a page of alert_logs for one watchlist stock (newest first)."""
+    if limit < 1 or limit > 200:
+        raise ValueError("limit out of range")
+    if offset < 0:
+        raise ValueError("offset must be >= 0")
+
+    normalized = normalize_stock_code(stock_code)
+
+    with get_db() as session:
+        exists = session.scalars(
+            select(Watchlist.stock_code).where(Watchlist.stock_code == normalized)
+        ).first()
+        if not exists:
+            raise ValueError("stock not found in watchlist")
+
+        total = session.scalar(
+            select(func.count())
+            .select_from(AlertLog)
+            .where(AlertLog.stock_code == normalized)
+        )
+        rows = session.scalars(
+            select(AlertLog)
+            .where(AlertLog.stock_code == normalized)
+            .order_by(AlertLog.trade_date.desc(), AlertLog.id.desc())
+            .limit(limit)
+            .offset(offset)
+        ).all()
+
+        return {
+            "items": [_alert_to_api_dict(row) for row in rows],
+            "total": int(total or 0),
+            "limit": limit,
+            "offset": offset,
+        }
 
 
 def get_alert(stock_code: str, trade_date: str, signal_type: str) -> dict | None:
