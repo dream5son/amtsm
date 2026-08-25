@@ -14,7 +14,7 @@ from app.engine.activity_log import (
     track_job,
 )
 from app.engine.backtest_tasks import backtest_worker_task
-from app.engine.market_hours import SH_TZ
+from app.engine.market_hours import SH_TZ, to_api_iso
 from app.engine.tasks import (
     baseline_precompute_task,
     bootstrap_watchlist_snapshot,
@@ -97,11 +97,7 @@ def get_scheduler() -> BackgroundScheduler | None:
 
 
 def _iso_sh(dt: datetime | None) -> str | None:
-    if dt is None:
-        return None
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=SH_TZ)
-    return dt.astimezone(SH_TZ).isoformat(timespec="seconds")
+    return to_api_iso(dt, naive_as=SH_TZ)
 
 
 def list_activity_jobs() -> list[dict[str, Any]]:

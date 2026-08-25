@@ -7,6 +7,7 @@ import {
   createBacktest,
   WatchlistItem,
 } from "@/lib/api";
+import { todayISO } from "@/lib/datetime";
 
 interface ParamGroupForm {
   key: string;
@@ -28,14 +29,6 @@ function emptyGroup(key: string): ParamGroupForm {
     break_even_trigger_pct: "",
     break_even_buffer_pct: "",
   };
-}
-
-function todayISO(): string {
-  const d = new Date();
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
-  return `${y}-${m}-${day}`;
 }
 
 function toOverride(g: ParamGroupForm): BacktestParamsOverride {

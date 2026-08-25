@@ -20,7 +20,7 @@ from app.config import settings
 from app.db.connection import get_db
 from app.db.init_db import get_price_adjust_migrated_at
 from app.db.models import BacktestJob, BacktestTrade, DailyMarketSnapshot, Watchlist
-from app.engine.market_hours import AFTERNOON_END, SH_TZ, is_trading_day
+from app.engine.market_hours import AFTERNOON_END, SH_TZ, is_trading_day, to_api_iso
 from app.market_signal import RiskParams
 from app.schemas.strategy import (
     StockStrategyOverride as StockStrategyOverrideSchema,
@@ -168,8 +168,8 @@ def _job_to_dict(job: BacktestJob) -> dict:
         "annual_return": job.annual_return,
         "sample_insufficient": bool(job.sample_insufficient),
         "error_message": job.error_message,
-        "created_at": job.created_at.isoformat() if job.created_at else None,
-        "finished_at": job.finished_at.isoformat() if job.finished_at else None,
+        "created_at": to_api_iso(job.created_at),
+        "finished_at": to_api_iso(job.finished_at, naive_as=SH_TZ),
     }
 
 

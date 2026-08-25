@@ -11,7 +11,7 @@ from contextvars import ContextVar
 from datetime import datetime
 from typing import Any
 
-from app.engine.market_hours import SH_TZ
+from app.engine.market_hours import SH_TZ, to_api_iso
 
 JOB_IDS: tuple[str, ...] = (
     "market_polling",
@@ -119,7 +119,7 @@ def emit(level: str, message: str, *, job: str | None = None) -> dict[str, Any] 
     with _LOCK:
         entry = {
             "id": _NEXT_ID,
-            "ts": datetime.now(SH_TZ).isoformat(timespec="seconds"),
+            "ts": to_api_iso(datetime.now(SH_TZ)),
             "level": level,
             "job": resolved,
             "message": message,

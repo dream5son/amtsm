@@ -114,6 +114,20 @@ def test_list_alerts_requires_watchlist(tmp_path, monkeypatch) -> None:
         list_alerts_by_stock("600519")
 
 
+def test_list_alerts_sent_time_is_shanghai_iso(tmp_path, monkeypatch) -> None:
+    _setup(tmp_path, monkeypatch)
+    _insert(trade_date="2026-08-25")
+
+    page = list_alerts_by_stock("600519")
+    sent = page["items"][0]["sent_time"]
+    assert isinstance(sent, str)
+    assert sent.endswith("+08:00")
+    # Offset-aware parse must succeed
+    parsed = datetime.fromisoformat(sent)
+    assert parsed.tzinfo is not None
+    assert parsed.utcoffset().total_seconds() == 8 * 3600
+
+
 def test_get_alerts_api_empty_and_not_found(tmp_path, monkeypatch) -> None:
     _setup(tmp_path, monkeypatch)
     client = TestClient(app)
