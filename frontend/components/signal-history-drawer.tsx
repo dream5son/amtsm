@@ -8,6 +8,7 @@ import {
   fetchAlertHistory,
   WatchlistItem,
 } from "@/lib/api";
+import { formatDateTime } from "@/lib/datetime";
 import { renderSignal } from "@/lib/signal";
 
 const PAGE_SIZE = 20;
@@ -30,11 +31,7 @@ function formatSentTime(value: string | null): string {
   if (!value) {
     return "--";
   }
-  const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime())) {
-    return value;
-  }
-  return parsed.toLocaleString("zh-CN", { hour12: false });
+  return formatDateTime(value);
 }
 
 function sentStatusLabel(status: AlertSentStatus): { label: string; cls: string } {

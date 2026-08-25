@@ -12,6 +12,7 @@ import {
   SchedulerJobView,
   fetchSchedulerActivity,
 } from "@/lib/api";
+import { formatDateTimeCompact, formatTime } from "@/lib/datetime";
 
 const DISPLAY_LIMIT = 20;
 const RECURRING_JOBS = SCHEDULER_JOBS.filter((job) => job.group === "recurring");
@@ -43,14 +44,6 @@ function isSchedulerJobId(value: string): value is SchedulerJobId {
   return SCHEDULER_JOBS.some((job) => job.id === value);
 }
 
-function formatTime(ts: string): string {
-  const date = new Date(ts);
-  if (Number.isNaN(date.getTime())) {
-    return ts;
-  }
-  return date.toLocaleTimeString("zh-CN", { hour12: false });
-}
-
 function pad2(value: number): string {
   return String(value).padStart(2, "0");
 }
@@ -63,20 +56,6 @@ function formatInterval(seconds: number): string {
     return `每 ${seconds / 60} 分钟`;
   }
   return `每 ${seconds} 秒`;
-}
-
-function formatDateTime(ts: string): string {
-  const date = new Date(ts);
-  if (Number.isNaN(date.getTime())) {
-    return ts;
-  }
-  const time = date.toLocaleTimeString("zh-CN", { hour12: false });
-  const today = new Date();
-  if (date.toDateString() === today.toDateString()) {
-    return time;
-  }
-  const day = date.toLocaleDateString("zh-CN", { month: "numeric", day: "numeric" });
-  return `${day} ${time}`;
 }
 
 function mergeSchedulerViews(incoming?: SchedulerJobView[]): SchedulerViews {
@@ -126,7 +105,7 @@ function formatJobMeta(view: SchedulerJobView): string {
     parts.push(`每天 ${pad2(view.hour)}:${pad2(view.minute)}`);
   } else if (view.kind === "date") {
     parts.push("启动时执行一次");
-    parts.push(view.next_run_time ? `下次 ${formatDateTime(view.next_run_time)}` : "已完成");
+    parts.push(view.next_run_time ? `下次 ${formatDateTimeCompact(view.next_run_time)}` : "已完成");
   } else if (view.kind === "on_demand") {
     parts.push("新增自选时触发");
     const pending = view.pending ?? [];
@@ -138,7 +117,7 @@ function formatJobMeta(view: SchedulerJobView): string {
     parts.push(view.note);
   }
   if (view.kind === "cron" && view.next_run_time) {
-    parts.push(`下次 ${formatDateTime(view.next_run_time)}`);
+    parts.push(`下次 ${formatDateTimeCompact(view.next_run_time)}`);
   }
   return parts.join(" · ");
 }

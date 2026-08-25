@@ -21,7 +21,7 @@ from sqlalchemy.exc import IntegrityError
 from app.config import settings
 from app.db.connection import get_db
 from app.db.models import AlertLog, Watchlist
-from app.engine.market_hours import is_alert_window_open
+from app.engine.market_hours import is_alert_window_open, to_api_iso
 from app.engine.state import runtime_state
 from app.services.market_data.numbers import coerce_optional_float
 from app.services.notifier.base import ErrorCategory, SendResult, TextNotifier
@@ -71,8 +71,7 @@ def _alert_to_dict(row: AlertLog) -> dict:
 
 def _alert_to_api_dict(row: AlertLog) -> dict:
     data = _alert_to_dict(row)
-    sent = data.get("sent_time")
-    data["sent_time"] = sent.isoformat() if sent is not None else None
+    data["sent_time"] = to_api_iso(data.get("sent_time"))
     return data
 
 

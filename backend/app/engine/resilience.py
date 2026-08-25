@@ -6,6 +6,7 @@ import logging
 from datetime import UTC, datetime
 
 from app.config import settings
+from app.engine.market_hours import to_api_iso
 from app.engine.state import runtime_state
 from app.services.alert_service import get_alert, insert_alert
 
@@ -45,7 +46,7 @@ def record_poll_round_failure(*, trade_date: str, reason: str) -> None:
     newly_marked = not runtime_state.quote_delay
     runtime_state.quote_delay = True
     if newly_marked:
-        runtime_state.quote_delay_since = datetime.now(UTC).isoformat()
+        runtime_state.quote_delay_since = to_api_iso(datetime.now(UTC))
         logger.error(
             "quote_delay_activated consecutive=%d trade_date=%s reason=%s",
             failures,

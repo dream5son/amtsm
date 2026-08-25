@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 
 from app.db.connection import get_db
 from app.db.models import Position, PositionLedger, Watchlist
+from app.engine.market_hours import to_api_iso
 from app.schemas.position import PositionTradeRequest
 from app.services.position_math import (
     realized_pnl,
@@ -76,7 +77,7 @@ def _position_dict(pos: Position) -> dict:
         "highest_since_hold": pos.highest_since_hold,
         "stop_price": pos.stop_price,
         "position_status": pos.position_status,
-        "opened_at": pos.opened_at.isoformat() if pos.opened_at else None,
+        "opened_at": to_api_iso(pos.opened_at),
     }
 
 
@@ -249,7 +250,7 @@ def list_ledgers(stock_code: str) -> list[dict]:
                 "trade_date": row.trade_date,
                 "realized_pnl": row.realized_pnl,
                 "note": row.note,
-                "created_at": row.created_at.isoformat() if row.created_at else None,
+                "created_at": to_api_iso(row.created_at),
             }
             for row in rows
         ]
