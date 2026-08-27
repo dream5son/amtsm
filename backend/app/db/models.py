@@ -22,6 +22,30 @@ class Base(DeclarativeBase):
     pass
 
 
+class SignalStrategy(Base):
+    __tablename__ = "signal_strategies"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(100), nullable=False, unique=True)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    builtin_key: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, unique=True
+    )
+    recipe_json: Mapped[str] = mapped_column(Text, nullable=False)
+    recipe_schema_version: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1
+    )
+    recipe_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    recipe_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    is_archived: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime | None] = mapped_column(
+        DateTime, server_default=func.current_timestamp()
+    )
+    updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime, server_default=func.current_timestamp()
+    )
+
+
 class Watchlist(Base):
     __tablename__ = "watchlist"
 
@@ -32,6 +56,9 @@ class Watchlist(Base):
     custom_n: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)
     custom_x: Mapped[float | None] = mapped_column(Float, nullable=True, default=None)
     custom_y: Mapped[float | None] = mapped_column(Float, nullable=True, default=None)
+    signal_strategy_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("signal_strategies.id"), nullable=True, default=None
+    )
     created_at: Mapped[datetime | None] = mapped_column(
         DateTime, server_default=func.current_timestamp()
     )
@@ -53,6 +80,9 @@ class StrategyConfig(Base):
     enable_partial_take_profit: Mapped[int] = mapped_column(Integer, default=0)
     enable_addon_alert: Mapped[int] = mapped_column(Integer, default=0)
     enable_tech_sell_while_holding: Mapped[int] = mapped_column(Integer, default=0)
+    default_signal_strategy_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("signal_strategies.id"), nullable=True, default=None
+    )
     updated_at: Mapped[datetime | None] = mapped_column(
         DateTime, server_default=func.current_timestamp()
     )
