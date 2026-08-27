@@ -335,6 +335,26 @@ def test_failover_universe_on_unavailable() -> None:
     assert fallback.universe_calls == 1
 
 
+def test_query_retries_once_after_oserror(monkeypatch) -> None:
+    client = _FakeBaostock()
+    client.k_result = _daily_result()
+    provider = BaostockMarketDataProvider(client=client)
+    calls = {"n": 0}
+    original = client.query_history_k_data_plus
+
+    def flaky(code, fields, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise TimeoutError("timed out")
+        return original(code, fields, **kwargs)
+
+    client.query_history_k_data_plus = flaky
+    bars = provider.fetch_daily_ohlcv("sh600519", date(2024, 1, 1), date(2024, 1, 1))
+    assert len(bars) == 1
+    assert client.login_calls == 2
+    assert calls["n"] == 2
+
+
 def test_failover_raises_when_all_fail() -> None:
     primary = _FakeDailyProvider(error=MarketDataUnavailableError("down"))
     secondary = _FakeDailyProvider(error=NotImplementedError("nope"))

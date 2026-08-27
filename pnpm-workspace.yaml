@@ -2,3 +2,5 @@ packages:
   - frontend
 allowBuilds:
   sharp: true
+  # Optional native resolver for eslint; JS fallback is enough for `next build`.
+  unrs-resolver: false

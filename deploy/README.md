@@ -335,73 +335,48 @@ LOG_DIR=./log
 
 ## 排障：运行一天后 CPU 飙高
 
-
-
 ### 现象
 
-Docker Compose 跑一段时间（常见过夜）后 CPU 明显升高。nginx access log 里大量出现：
+`amtsm-backend` 跑大约一天后 CPU 卡在 100% 以上，`/api/health` 仍 200，但股票搜索会 504。`docker compose logs` 可能报：
 
 ```text
-127.0.0.1 ... "GET /api/health HTTP/1.1" 200 34 "-" "Wget" "-"
+error from daemon in stream: Error grabbing logs: invalid character '\x00' looking for beginning of value
 ```
 
-间隔约 10～30 秒，看起来像健康检查把机器打满。
+健康检查和首页 SSE **不是**这次的根因。容器里往往只有一个 Python 线程在跑，HTTP 连接数很少，对端 `public-api.baostock.com:10030` 处于 `CLOSE_WAIT`。
 
-### 结论：健康检查不是根因
+### 根因
 
-这些请求来自 **Docker HEALTHCHECK**（nginx 容器内 `wget` 打本机 `/api/health`），不是公网流量：
+baostock 登录后把 TCP 长连接挂在进程里。库函数 `send_msg` 是：
 
-- `User-Agent: Wget`、来源 `127.0.0.1`
-- 当前 compose 探活间隔为 **30s**（历史上曾为 10s）
-- 每次立刻 `200`，体量约 34 字节，**撑不起 CPU 飙高**
+```python
+while True:
+    recv = sock.recv(8192)
+    receive += recv
+    if receive.endswith(b"<![CDATA[]]>\n"):
+        break
+```
 
-市场收盘后日志里几乎只剩探活行，所以容易误判。真正需要怀疑的是：浏览器经 **ngrok**（或其它隧道）长时间挂着首页时，**SSE 长连接泄漏 / 重连堆积**。
+服务端闲置断开后 `recv()` 立刻返回 `b""`，循环不退出。日快照默认 15:30 会打这条连接，所以经常是收盘后开始飙 CPU。卡住的线程还握着 provider 锁，后续日线 / 搜索全部卡住。
 
-### 更可能的根因
+`\x00` 来自 Docker Desktop 的 `json-file` 日志被写坏（常见于进程卡死或轮转），不是应用自己往 stdout 打空字节。
 
-首页会立刻打开两条永不结束的 `EventSource`：
+### 已做的修复
 
-
-| 流    | 路径                          | 服务端行为                                    |
-| ---- | --------------------------- | ---------------------------------------- |
-| 系统状态 | `/api/system/status/stream` | 轮询内存状态 + 心跳                              |
-| 调度活动 | `/api/jobs/activity/stream` | 轮询 activity buffer；调度器元数据定期 `get_jobs()` |
-
-
-叠加因素：
-
-1. **ngrok / 浏览器重连**：免费隧道对长连接不稳定；`EventSource` 默认约 3s 自动重连。上游到 backend 的旧连接不一定立刻关掉，`while True` 生成器会继续空转。
-2. **nginx 长超时**：`/api/` 曾设 `proxy_read_timeout 3600s`，死连接可挂很久；现已降到约 **90s**（仍大于约 30s 的 SSE 心跳）。
-3. **回测 worker 空闲刷日志**：历史上每 3s 打一条 INFO idle，会进 activity 面板再经 SSE 推前端；现已改为 DEBUG，空闲间隔默认 **10s**。
-
-堆积后 CPU 大致随残留 SSE 连接数线性上升，因此往往「跑了一天才明显」。
-
-### 已做的缓解（代码 / 配置）
-
-- SSE 生成器每轮检测 `request.is_disconnected()`，断开即退出
-- activity 轮询放宽；调度器视图不再每个 tick 都 `get_jobs()`
-- nginx：`location = /api/health` 关闭 access_log；`/api/` 读超时约 90s
-- compose：健康检查 30s；各服务 json-file 日志轮转（`10m × 3`）；backend / cloudflared 宿主机文件各自滚动
-- 回测 idle 仅 DEBUG，避免空转刷面板
-
-
+- 替换 baostock 的 `connect` / `send_msg`：空 `recv` 视为断线、30s 超时、响应大小封顶、出错关 socket
+- 查询遇到 `OSError` 时丢掉会话再登录一次
+- 进程退出时关闭 baostock socket
+- Compose 日志驱动改为 `local`；APScheduler 执行器日志降到 WARNING
 
 ### 如何确认
 
-服务起来后：
-
 ```bash
-docker stats
-# backend 容器内看 8800 上 ESTABLISHED 数量（页面开着时大约几条 SSE，不应随时间涨到成百上千）
-docker compose exec backend sh -c "ss -tn state established '( sport = :8800 )' | wc -l"
+docker stats amtsm-backend-1
+docker compose exec backend sh -c "cat /proc/net/tcp"
+# 10030 端口不应长期停在 CLOSE_WAIT；若 CPU 已飙高，重启才能结束当前空转线程
 ```
 
-正常：少量 ESTABLISHED（探活瞬时 + 页面约 2 条 SSE）。若连接数随 ngrok 标签页过夜持续上涨，仍可能是泄漏，需再查。
-
-### 使用建议
-
-- 公网入口用 **Cloudflare Tunnel**（固定域名、HTTPS），不要用 ngrok-free 长期挂 SSE。
-- 若 `docker stats` 高 CPU 在 frontend 而非 backend，再单独排查 Next.js 过夜内存 / GC，与上述 SSE 路径无关。
+卡住时只能重启进程把空转线程杀掉，补丁只阻止下一次再发生。
 
 ## Cloudflare Tunnel（内网对外）
 

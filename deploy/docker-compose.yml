@@ -1,7 +1,9 @@
 name: amtsm
 
 x-logging: &default-logging
-  driver: json-file
+  # `local` avoids json-file files that Docker Desktop zero-pads with '\x00',
+  # which then breaks `docker compose logs` with "invalid character '\x00'".
+  driver: local
   options:
     max-size: "10m"
     max-file: "3"

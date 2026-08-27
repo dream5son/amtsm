@@ -10,7 +10,11 @@ RUN corepack enable && corepack prepare pnpm@11.20.0 --activate
 
 COPY .npmrc pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY frontend/package.json ./frontend/package.json
-RUN pnpm install --frozen-lockfile --filter amtsm-frontend...
+# pnpm 11 defaults to 24h minimumReleaseAge in pnpm-workspace.yaml (not .npmrc).
+# Frozen lockfile is already the pin; a fresh transitive like js-yaml must not
+# block image builds.
+RUN printf '\nminimumReleaseAge: 0\n' >> pnpm-workspace.yaml \
+    && pnpm install --frozen-lockfile --filter amtsm-frontend...
 
 COPY frontend ./frontend
 RUN pnpm --filter amtsm-frontend build

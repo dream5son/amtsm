@@ -11,6 +11,10 @@ from typing import Any, Protocol
 
 from pypinyin import Style, lazy_pinyin
 
+from app.services.market_data.baostock_socket import (
+    drop_baostock_socket,
+    install_baostock_socket_patch,
+)
 from app.services.market_data.base import (
     QFQ,
     UNADJUSTED,
@@ -22,6 +26,8 @@ from app.services.market_data.base import (
     build_daily_bar,
     normalize_stock_code,
 )
+
+install_baostock_socket_patch()
 
 logger = logging.getLogger(__name__)
 
@@ -156,6 +162,10 @@ class BaostockMarketDataProvider(MarketDataProvider):
             self._client = bs
         return self._client
 
+    def _drop_session(self) -> None:
+        self._logged_in = False
+        drop_baostock_socket()
+
     def _ensure_login(self) -> None:
         if self._logged_in:
             return
@@ -164,22 +174,33 @@ class BaostockMarketDataProvider(MarketDataProvider):
             with redirect_stdout(sink), redirect_stderr(sink):
                 result = self._bs().login()
         except Exception as exc:
+            self._drop_session()
             raise MarketDataUnavailableError(f"baostock login failed: {exc}") from exc
         if result.error_code != "0":
+            self._drop_session()
             raise MarketDataUnavailableError(
                 f"baostock login failed: {result.error_code} {result.error_msg}"
             )
         self._logged_in = True
 
+    def _call_method(self, method_name: str, *args: Any, **kwargs: Any) -> _QueryResult:
+        method = getattr(self._bs(), method_name)
+        try:
+            return method(*args, **kwargs)
+        except OSError:
+            self._drop_session()
+            self._ensure_login()
+            method = getattr(self._bs(), method_name)
+            return method(*args, **kwargs)
+
     def _query(self, method_name: str, *args: Any, **kwargs: Any) -> _QueryResult:
         with self._lock:
             self._ensure_login()
-            method = getattr(self._bs(), method_name)
-            result = method(*args, **kwargs)
+            result = self._call_method(method_name, *args, **kwargs)
             if result.error_code != "0":
-                self._logged_in = False
+                self._drop_session()
                 self._ensure_login()
-                result = method(*args, **kwargs)
+                result = self._call_method(method_name, *args, **kwargs)
             return result
 
     def fetch_daily_ohlcv(

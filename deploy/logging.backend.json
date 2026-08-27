@@ -39,6 +39,14 @@
       "handlers": ["console", "file"],
       "level": "INFO",
       "propagate": false
+    },
+    "apscheduler.executors.default": {
+      "level": "WARNING",
+      "propagate": true
+    },
+    "apscheduler.scheduler": {
+      "level": "WARNING",
+      "propagate": true
     }
   }
 }

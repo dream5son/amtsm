@@ -20,6 +20,7 @@ from app.api.watchlist import router as watchlist_router
 from app.config import settings
 from app.db.init_db import init_db
 from app.engine.scheduler import create_scheduler, get_scheduler
+from app.services.market_data.baostock_socket import drop_baostock_socket
 from app.services.errors import AppError
 from app.services.notifier.registry import (
     get_enabled_notifiers,
@@ -58,6 +59,7 @@ async def lifespan(_: FastAPI):
         yield
     finally:
         active.shutdown(wait=False)
+        drop_baostock_socket()
 
 
 app = FastAPI(title="AMTSM API", lifespan=lifespan)
