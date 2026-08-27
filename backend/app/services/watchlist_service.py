@@ -59,6 +59,12 @@ def list_watchlist(limit: int = 50, offset: int = 0) -> list[dict]:
                     w.stock_name,
                     w.status,
                     w.created_at,
+                    w.signal_strategy_id,
+                    COALESCE(
+                        w.signal_strategy_id,
+                        sc.default_signal_strategy_id
+                    ) AS effective_signal_strategy_id,
+                    effective_strategy.name AS effective_signal_strategy_name,
                     ls.close_price AS latest_price,
                     CASE
                         WHEN ls.open_price > 0
@@ -100,6 +106,11 @@ def list_watchlist(limit: int = 50, offset: int = 0) -> list[dict]:
                 LEFT JOIN latest_snapshots ls ON ls.stock_code = w.stock_code
                 LEFT JOIN latest_baselines lb ON lb.stock_code = w.stock_code
                 LEFT JOIN positions p ON p.stock_code = w.stock_code
+                LEFT JOIN signal_strategies effective_strategy
+                    ON effective_strategy.id = COALESCE(
+                        w.signal_strategy_id,
+                        sc.default_signal_strategy_id
+                    )
                 ORDER BY w.created_at DESC
                 LIMIT :limit OFFSET :offset
                 """

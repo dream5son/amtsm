@@ -14,6 +14,9 @@ class WatchlistItem(BaseModel):
     stock_name: str
     status: str
     created_at: datetime
+    signal_strategy_id: int | None = None
+    effective_signal_strategy_id: int
+    effective_signal_strategy_name: str
     latest_price: float | None = None
     change_pct: float | None = None
     actual_n: int | None = None

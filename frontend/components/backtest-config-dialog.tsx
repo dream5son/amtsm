@@ -5,26 +5,24 @@ import { FormEvent, useEffect, useState } from "react";
 import {
   BacktestParamsOverride,
   createBacktest,
+  fetchSignalStrategies,
+  SignalStrategy,
   WatchlistItem,
 } from "@/lib/api";
 import { todayISO } from "@/lib/datetime";
 
 interface ParamGroupForm {
   key: string;
-  n: string;
-  x: string;
-  y: string;
+  signal_strategy_id: string;
   stop_loss_pct: string;
   break_even_trigger_pct: string;
   break_even_buffer_pct: string;
 }
 
-function emptyGroup(key: string): ParamGroupForm {
+function emptyGroup(key: string, strategyId = ""): ParamGroupForm {
   return {
     key,
-    n: "",
-    x: "",
-    y: "",
+    signal_strategy_id: strategyId,
     stop_loss_pct: "",
     break_even_trigger_pct: "",
     break_even_buffer_pct: "",
@@ -34,9 +32,7 @@ function emptyGroup(key: string): ParamGroupForm {
 function toOverride(g: ParamGroupForm): BacktestParamsOverride {
   const num = (s: string): number | undefined => (s.trim() === "" ? undefined : Number(s));
   return {
-    n: num(g.n),
-    x: num(g.x),
-    y: num(g.y),
+    signal_strategy_id: Number(g.signal_strategy_id),
     stop_loss_pct: num(g.stop_loss_pct),
     break_even_trigger_pct: num(g.break_even_trigger_pct),
     break_even_buffer_pct: num(g.break_even_buffer_pct),
@@ -44,13 +40,10 @@ function toOverride(g: ParamGroupForm): BacktestParamsOverride {
 }
 
 const NUMERIC_FIELDS: {
-  key: keyof Omit<ParamGroupForm, "key">;
+  key: "stop_loss_pct" | "break_even_trigger_pct" | "break_even_buffer_pct";
   label: string;
   step: number;
 }[] = [
-  { key: "n", label: "N（基准日数）", step: 1 },
-  { key: "x", label: "X（买入系数）", step: 0.01 },
-  { key: "y", label: "Y（卖出系数）", step: 0.01 },
   { key: "stop_loss_pct", label: "初始止损比例", step: 0.01 },
   { key: "break_even_trigger_pct", label: "保本触发比例", step: 0.01 },
   { key: "break_even_buffer_pct", label: "保本缓冲比例", step: 0.001 },
@@ -73,16 +66,41 @@ export default function BacktestConfigDialog({
   const [startDate, setStartDate] = useState("");
   const [endDate, setEndDate] = useState(todayISO());
   const [groups, setGroups] = useState<ParamGroupForm[]>([emptyGroup("g0")]);
+  const [strategies, setStrategies] = useState<SignalStrategy[]>([]);
+  const [loadingStrategies, setLoadingStrategies] = useState(false);
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
     if (!open) return;
+    let cancelled = false;
     setSinceListing(true);
     setStartDate("");
     setEndDate(todayISO());
-    setGroups([emptyGroup("g0")]);
+    setGroups([emptyGroup("g0", item ? String(item.effective_signal_strategy_id) : "")]);
     setError("");
+    setLoadingStrategies(true);
+    void fetchSignalStrategies()
+      .then((available) => {
+        if (cancelled) return;
+        setStrategies(available);
+        const effectiveId = item?.effective_signal_strategy_id;
+        const selectedId =
+          effectiveId && available.some((strategy) => strategy.id === effectiveId)
+            ? effectiveId
+            : available[0]?.id;
+        setGroups([emptyGroup("g0", selectedId ? String(selectedId) : "")]);
+        if (available.length === 0) setError("暂无可用于回测的信号策略");
+      })
+      .catch(() => {
+        if (!cancelled) setError("信号策略加载失败，请关闭后重试");
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingStrategies(false);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [open, item]);
 
   if (!open || !item) return null;
@@ -96,7 +114,18 @@ export default function BacktestConfigDialog({
   }
 
   function addGroup() {
-    setGroups((prev) => [...prev, emptyGroup(`g${prev.length}-${Date.now()}`)]);
+    setGroups((prev) => {
+      const selectedIds = new Set(prev.map((group) => group.signal_strategy_id));
+      const nextStrategy =
+        strategies.find((strategy) => !selectedIds.has(String(strategy.id))) ?? strategies[0];
+      return [
+        ...prev,
+        emptyGroup(
+          `g${prev.length}-${Date.now()}`,
+          nextStrategy ? String(nextStrategy.id) : "",
+        ),
+      ];
+    });
   }
 
   function removeGroup(key: string) {
@@ -109,6 +138,28 @@ export default function BacktestConfigDialog({
 
     if (!sinceListing && startDate && endDate && startDate >= endDate) {
       setError("开始日期必须早于结束日期");
+      return;
+    }
+    if (
+      groups.some(
+        (group) =>
+          !Number.isInteger(Number(group.signal_strategy_id)) ||
+          Number(group.signal_strategy_id) <= 0,
+      )
+    ) {
+      setError("请为每个对比组选择一个信号策略");
+      return;
+    }
+    const invalidRiskValue = groups.some((group) =>
+      NUMERIC_FIELDS.some((field) => {
+        const raw = group[field.key].trim();
+        if (raw === "") return false;
+        const value = Number(raw);
+        return !Number.isFinite(value) || value < 0 || value >= 1;
+      }),
+    );
+    if (invalidRiskValue) {
+      setError("风控比例必须是 0 到 1 之间的数字（不含 1）");
       return;
     }
 
@@ -135,13 +186,13 @@ export default function BacktestConfigDialog({
       onClick={onClose}
     >
       <div
-        className="max-h-[85vh] w-full max-w-lg overflow-y-auto rounded-2xl bg-white p-6 shadow-xl"
+        className="max-h-[85vh] w-full max-w-2xl overflow-y-auto rounded-2xl bg-white p-6 shadow-xl"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="mb-4 flex items-center justify-between">
           <h2 className="text-lg font-semibold text-slate-900">发起回测</h2>
           <button type="button" onClick={onClose} className="text-slate-500 hover:text-slate-700">
-            ✕
+            关闭
           </button>
         </div>
         <p className="mb-4 text-sm text-slate-600">
@@ -180,20 +231,26 @@ export default function BacktestConfigDialog({
 
           <div>
             <div className="mb-2 flex items-center justify-between">
-              <span className="text-sm text-slate-600">参数组合（留空 = 跟随当前生效参数）</span>
+              <div>
+                <span className="text-sm text-slate-600">信号策略对比组</span>
+                <p className="mt-0.5 text-xs text-slate-500">
+                  每组选择一个保存的信号策略，风控比例留空时跟随该股票当前配置
+                </p>
+              </div>
               <button
                 type="button"
                 onClick={addGroup}
+                disabled={loadingStrategies || strategies.length === 0}
                 className="rounded-md border border-slate-300 px-2 py-1 text-xs font-medium text-slate-700 hover:bg-slate-50"
               >
-                + 添加参数组合
+                添加策略组
               </button>
             </div>
             <div className="space-y-3">
               {groups.map((g, idx) => (
                 <div key={g.key} className="rounded-xl border border-slate-200 bg-slate-50 p-3">
                   <div className="mb-2 flex items-center justify-between">
-                    <span className="text-xs font-medium text-slate-500">组合 {idx + 1}</span>
+                    <span className="text-xs font-medium text-slate-500">对比组 {idx + 1}</span>
                     {groups.length > 1 ? (
                       <button
                         type="button"
@@ -204,6 +261,28 @@ export default function BacktestConfigDialog({
                       </button>
                     ) : null}
                   </div>
+                  <label className="mb-3 block text-xs">
+                    <span className="text-slate-500">信号策略</span>
+                    <select
+                      required
+                      value={g.signal_strategy_id}
+                      disabled={loadingStrategies}
+                      onChange={(e) =>
+                        updateGroup(g.key, "signal_strategy_id", e.target.value)
+                      }
+                      className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-900 outline-none ring-sky-200 focus:ring disabled:bg-slate-100"
+                    >
+                      <option value="">
+                        {loadingStrategies ? "正在加载策略..." : "请选择信号策略"}
+                      </option>
+                      {strategies.map((strategy) => (
+                        <option key={strategy.id} value={strategy.id}>
+                          {strategy.name}
+                          {strategy.builtin_key ? "（内置）" : ""}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
                   <div className="grid grid-cols-3 gap-2 text-xs">
                     {NUMERIC_FIELDS.map((field) => (
                       <label key={field.key} className="block">
@@ -211,9 +290,11 @@ export default function BacktestConfigDialog({
                         <input
                           type="number"
                           step={field.step}
+                          min={0}
+                          max="0.999"
                           value={g[field.key]}
                           onChange={(e) => updateGroup(g.key, field.key, e.target.value)}
-                          placeholder="当前值"
+                          placeholder="跟随当前"
                           className="mt-1 w-full rounded-md border border-slate-300 px-2 py-1 text-slate-900 outline-none ring-sky-200 focus:ring"
                         />
                       </label>

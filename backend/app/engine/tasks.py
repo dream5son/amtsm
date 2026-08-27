@@ -35,15 +35,17 @@ from app.market_signal import (
     SIGNAL_STOP_LOSS,
     SIGNAL_TAKE_PROFIT,
     BaselineWindow,
+    EvaluationPolicy,
     InsufficientDataError,
     SignalRequest,
     StaticBaselineFeed,
     StrategyParams,
     VolumeWindow,
+    analyze_recipe,
+    compile_recipe,
     compute_baseline,
     compute_volume_window,
     evaluate,
-    get_market_signal_strategy,
     risk_params_from_resolved,
 )
 from app.services.alert_service import (
@@ -58,10 +60,10 @@ from app.services.market_data_service import (
     MissingTradeDayBarError,
     StockDataFetchError,
     fetch_daily_bars,
-    fetch_qfq_bars_range,
     fetch_realtime_quotes_batch,
     fetch_trade_day_bar,
 )
+from app.services.signal_strategy_service import resolve_signal_strategies
 from app.services.strategy_service import resolve_params
 from app.services.watchlist_service import (
     restore_halted_to_normal,
@@ -269,7 +271,9 @@ def upsert_qfq_bars(stock_code: str, bars: list[dict]) -> int:
             close_price=float(close_price),
             volume=float(volume),
             turnover_rate=(
-                float(bar["turnover_rate"]) if bar.get("turnover_rate") is not None else None
+                float(bar["turnover_rate"])
+                if bar.get("turnover_rate") is not None
+                else None
             ),
         )
         written += 1
@@ -538,24 +542,21 @@ def baseline_precompute_task() -> None:
 
     # Load NORMAL + HALT (exclude DELISTED). HALT may resume after pre-market.
     with get_db() as session:
-        rows = session.execute(
-            text(
-                """
-                SELECT w.stock_code, w.stock_name, w.status,
-                       COALESCE(
-                           w.custom_n,
-                           CASE
-                               WHEN sc.global_buy_n >= sc.global_sell_n THEN sc.global_buy_n
-                               ELSE sc.global_sell_n
-                           END
-                       ) AS effective_n
+        rows = (
+            session.execute(
+                text(
+                    """
+                SELECT w.stock_code, w.stock_name, w.status
                 FROM watchlist w
-                JOIN strategy_config sc ON sc.id = 1
                 WHERE w.status IN ('NORMAL', 'HALT')
                 """
+                )
             )
-        ).mappings().all()
+            .mappings()
+            .all()
+        )
     stocks = [dict(r) for r in rows]
+    bindings = resolve_signal_strategies([stock["stock_code"] for stock in stocks])
 
     total = len(stocks)
     success_count = 0
@@ -566,11 +567,14 @@ def baseline_precompute_task() -> None:
     for stock in stocks:
         code = stock["stock_code"]
         name = stock["stock_name"]
-        n = stock["effective_n"]
+        binding = bindings[code]
+        requirements = analyze_recipe(binding["recipe"])
+        n = requirements.price_lookback_days
+        volume_lookback = requirements.volume_lookback_days or DEFAULT_VOLUME_LOOKBACK
         prior_status = stock["status"]
 
         try:
-            bars = fetch_daily_bars(code, n)
+            bars = fetch_daily_bars(code, max(n, volume_lookback))
             low_min, high_max, actual_n = compute_baseline(bars, n)
             upsert_baseline(code, today, low_min, high_max, actual_n)
             try:
@@ -581,7 +585,7 @@ def baseline_precompute_task() -> None:
                     code,
                     cache_exc,
                 )
-            vol = compute_volume_window(bars, DEFAULT_VOLUME_LOOKBACK)
+            vol = compute_volume_window(bars, volume_lookback)
 
             # Update in-memory cache
             runtime_state.baseline_cache[code] = {
@@ -589,8 +593,13 @@ def baseline_precompute_task() -> None:
                 "high_max": high_max,
                 "actual_n": actual_n,
                 "trade_date": today,
+                "avg_volume": vol.avg_volume,
                 "avg_volume_7d": vol.avg_volume,
                 "volume_lookback_n": vol.actual_n,
+                "price_lookback": n,
+                "volume_lookback": volume_lookback,
+                "recipe_hash": binding["hash"],
+                "strategy_id": binding["id"],
             }
 
             if prior_status == "HALT":
@@ -639,9 +648,7 @@ def baseline_precompute_task() -> None:
             break
 
         except (StockDataFetchError, InsufficientDataError) as exc:
-            logger.warning(
-                "baseline_stock_failed stock=%s error=%s", code, exc
-            )
+            logger.warning("baseline_stock_failed stock=%s error=%s", code, exc)
             failed_count += 1
             errors.append(f"{code}: {exc}")
             try:
@@ -654,9 +661,7 @@ def baseline_precompute_task() -> None:
                 )
 
         except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "baseline_unexpected_error stock=%s error=%s", code, exc
-            )
+            logger.warning("baseline_unexpected_error stock=%s error=%s", code, exc)
             failed_count += 1
             errors.append(f"{code}: {exc}")
             try:
@@ -710,16 +715,19 @@ def market_polling_task() -> None:
     _sync_signal_trade_date(trade_date)
     if not _ensure_baseline_cache_for_trade_date(trade_date):
         if runtime_state.no_baseline_warned_date != trade_date:
-            logger.warning("market_polling_task skipped: no baselines for %s", trade_date)
+            logger.warning(
+                "market_polling_task skipped: no baselines for %s", trade_date
+            )
             runtime_state.no_baseline_warned_date = trade_date
         return
 
     _load_position_cache()
 
     with get_db() as session:
-        rows = session.execute(
-            text(
-                """
+        rows = (
+            session.execute(
+                text(
+                    """
                 SELECT
                     w.stock_code,
                     w.stock_name,
@@ -729,8 +737,11 @@ def market_polling_task() -> None:
                 JOIN strategy_config sc ON sc.id = 1
                 WHERE w.status = 'NORMAL'
                 """
+                )
             )
-        ).mappings().all()
+            .mappings()
+            .all()
+        )
 
     stocks = [dict(row) for row in rows]
     if not stocks:
@@ -753,7 +764,17 @@ def market_polling_task() -> None:
         )
         return
 
-    strategy = get_market_signal_strategy()
+    strategy_bindings = resolve_signal_strategies(
+        [stock["stock_code"] for stock in valid_stocks]
+    )
+    compiled_strategies = {}
+    for binding in strategy_bindings.values():
+        recipe_hash = binding["hash"]
+        if recipe_hash not in compiled_strategies:
+            compiled_strategies[recipe_hash] = compile_recipe(
+                binding["recipe"],
+                policy=EvaluationPolicy(require_full_buy_window=False),
+            )
     batch_size = max(1, min(50, settings.polling_batch_size))
     total_batches = (len(valid_stocks) + batch_size - 1) // batch_size
 
@@ -839,16 +860,21 @@ def market_polling_task() -> None:
             baseline = runtime_state.baseline_cache[code]
             low_min = float(baseline["low_min"])
             high_max = float(baseline["high_max"])
-            effective_x = float(stock["effective_x"])
-            effective_y = float(stock["effective_y"])
             prev_close = quote.get("prev_close")
             pos = runtime_state.position_cache.get(code) or {}
             qty = int(pos.get("qty") or 0)
             holding = qty > 0
             quote_volume = quote.get("volume")
             volume = float(quote_volume) if quote_volume is not None else None
-            avg_volume = float(baseline.get("avg_volume_7d") or 0.0)
+            avg_volume = float(
+                baseline.get("avg_volume", baseline.get("avg_volume_7d")) or 0.0
+            )
             volume_n = int(baseline.get("volume_lookback_n") or 0)
+            volume_lookback = int(
+                baseline.get("volume_lookback") or DEFAULT_VOLUME_LOOKBACK
+            )
+            binding = strategy_bindings[code]
+            strategy = compiled_strategies[binding["hash"]]
             decision = strategy.evaluate(
                 SignalRequest(
                     price=float(price),
@@ -862,10 +888,10 @@ def market_polling_task() -> None:
                         VolumeWindow(
                             avg_volume=avg_volume,
                             actual_n=volume_n,
-                            lookback=DEFAULT_VOLUME_LOOKBACK,
+                            lookback=volume_lookback,
                         ),
                     ),
-                    params=StrategyParams(x=effective_x, y=effective_y),
+                    params=StrategyParams(),
                 )
             )
 
@@ -1031,9 +1057,7 @@ def market_polling_task() -> None:
                         else None,
                         stock_name=str(stock["stock_name"] or ""),
                     )
-                    runtime_state.set_signal(
-                        code, signal_type, is_limit_up=limit_flag
-                    )
+                    runtime_state.set_signal(code, signal_type, is_limit_up=limit_flag)
                 candidate: dict = {
                     "stock_code": code,
                     "stock_name": stock["stock_name"],
@@ -1115,16 +1139,58 @@ def _ensure_baseline_cache_for_trade_date(trade_date: str) -> bool:
     runtime_state.baseline_cache.clear()
     baselines = get_baselines_by_date(trade_date)
     codes = [row["stock_code"] for row in baselines]
-    avg_map = _avg_volumes_before(codes, trade_date)
+    with get_db() as session:
+        watchlist_codes = set(
+            session.scalars(
+                select(Watchlist.stock_code).where(Watchlist.stock_code.in_(codes))
+            ).all()
+        )
+    bindings = resolve_signal_strategies(
+        [code for code in codes if code in watchlist_codes]
+    )
+    metadata = {}
+    grouped_codes: dict[int, list[str]] = {}
+    for code, binding in bindings.items():
+        requirements = analyze_recipe(binding["recipe"])
+        volume_lookback = requirements.volume_lookback_days or DEFAULT_VOLUME_LOOKBACK
+        metadata[code] = {
+            "price_lookback": requirements.price_lookback_days,
+            "volume_lookback": volume_lookback,
+            "recipe_hash": binding["hash"],
+            "strategy_id": binding["id"],
+        }
+        grouped_codes.setdefault(volume_lookback, []).append(code)
+    avg_map = {}
+    for volume_lookback, grouped in grouped_codes.items():
+        avg_map.update(
+            _avg_volumes_before(
+                grouped,
+                trade_date,
+                lookback=volume_lookback,
+            )
+        )
+    orphan_codes = [code for code in codes if code not in metadata]
+    avg_map.update(_avg_volumes_before(orphan_codes, trade_date))
     for row in baselines:
+        cache_metadata = metadata.get(
+            row["stock_code"],
+            {
+                "price_lookback": row["actual_n"],
+                "volume_lookback": DEFAULT_VOLUME_LOOKBACK,
+                "recipe_hash": None,
+                "strategy_id": None,
+            },
+        )
         avg_volume, volume_n = avg_map.get(row["stock_code"], (0.0, 0))
         runtime_state.baseline_cache[row["stock_code"]] = {
             "low_min": row["low_min"],
             "high_max": row["high_max"],
             "actual_n": row["actual_n"],
             "trade_date": row["trade_date"],
+            "avg_volume": avg_volume,
             "avg_volume_7d": avg_volume,
             "volume_lookback_n": volume_n,
+            **cache_metadata,
         }
     return bool(runtime_state.baseline_cache)
 
@@ -1234,9 +1300,7 @@ def daily_snapshot_task() -> None:
     logger.info("daily_snapshot_task triggered trade_date=%s", trade_date)
 
     if not is_trading_day(today):
-        logger.info(
-            "daily_snapshot_task skipped: not trading day (%s)", trade_date
-        )
+        logger.info("daily_snapshot_task skipped: not trading day (%s)", trade_date)
         return
 
     with get_db() as session:
@@ -1245,7 +1309,9 @@ def daily_snapshot_task() -> None:
             .where(Watchlist.status == "NORMAL")
             .order_by(Watchlist.stock_code)
         ).all()
-        stocks = [{"stock_code": r.stock_code, "stock_name": r.stock_name} for r in rows]
+        stocks = [
+            {"stock_code": r.stock_code, "stock_name": r.stock_name} for r in rows
+        ]
 
     total = len(stocks)
     if total == 0:
@@ -1292,9 +1358,7 @@ def daily_snapshot_task() -> None:
             )
         except MissingTradeDayBarError as exc:
             skipped_count += 1
-            logger.warning(
-                "daily_snapshot_task skipped %s (%s): %s", code, name, exc
-            )
+            logger.warning("daily_snapshot_task skipped %s (%s): %s", code, name, exc)
         except MarketDataUnavailableError as exc:
             remaining = total - success_count - failed_count - skipped_count
             failed_count += remaining
@@ -1310,9 +1374,7 @@ def daily_snapshot_task() -> None:
             break
         except (StockDataFetchError, Exception) as exc:  # noqa: BLE001
             failed_count += 1
-            logger.warning(
-                "daily_snapshot_task failed %s (%s): %s", code, name, exc
-            )
+            logger.warning("daily_snapshot_task failed %s (%s): %s", code, name, exc)
 
     logger.info(
         "daily_snapshot_task finished trade_date=%s total=%d success=%d failed=%d skipped=%d",

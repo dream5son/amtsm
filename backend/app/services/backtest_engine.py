@@ -13,11 +13,13 @@ from dataclasses import dataclass, replace
 from datetime import date as date_cls
 
 from app.market_signal import (
-    RiskParams,
     SIGNAL_PERIOD_END,
     SIGNAL_STOP_LOSS,
     SIGNAL_TAKE_PROFIT,
     BarWindowFeed,
+    FeedRequirements,
+    MarketSignalStrategy,
+    RiskParams,
     SignalRequest,
     StrategyParams,
     evaluate,
@@ -63,7 +65,9 @@ def is_comparable_bar(bar: dict) -> bool:
     return has_valid_ohlc(bar["open"], bar["high"], bar["low"], bar["close"])
 
 
-def has_valid_ohlc(open_price: float, high_price: float, low_price: float, close_price: float) -> bool:
+def has_valid_ohlc(
+    open_price: float, high_price: float, low_price: float, close_price: float
+) -> bool:
     """True when a bar looks like a tradable daily candle.
 
     Rejects:
@@ -134,10 +138,7 @@ def detect_unadjusted_corporate_actions(bars: list[dict]) -> list[str]:
                 date_cls.fromisoformat(str(bar["date"]))
                 - date_cls.fromisoformat(str(prev["date"]))
             ).days
-            if (
-                prev_close > 0
-                and calendar_gap <= _MAX_UNADJUSTED_GAP_CALENDAR_DAYS
-            ):
+            if prev_close > 0 and calendar_gap <= _MAX_UNADJUSTED_GAP_CALENDAR_DAYS:
                 overnight_gap = (prev_close - curr_open) / prev_close
                 intraday_range = (float(bar["high"]) - float(bar["low"])) / close
                 if (
@@ -218,7 +219,9 @@ def _make_trade(
     exit_price: float,
     exit_reason: str,
 ) -> BacktestTradeResult:
-    hold_days = (date_cls.fromisoformat(exit_date) - date_cls.fromisoformat(entry_date)).days
+    hold_days = (
+        date_cls.fromisoformat(exit_date) - date_cls.fromisoformat(entry_date)
+    ).days
     pnl_pct = (exit_price - entry_price) / entry_price
     pnl_amount = (exit_price - entry_price) * LOT_SIZE
     return BacktestTradeResult(
@@ -304,9 +307,11 @@ def run_backtest(
     bars: list[dict],
     *,
     start_date: str,
-    n: int,
-    x: float,
     risk: RiskParams,
+    n: int | None = None,
+    x: float | None = None,
+    strategy: MarketSignalStrategy | None = None,
+    requirements: FeedRequirements | None = None,
     min_trade_count: int = 5,
 ) -> BacktestResult:
     """Replay the buy rule + three-tier stop day by day over ``bars``.
@@ -320,8 +325,11 @@ def run_backtest(
             strategy; missing/non-positive volume blocks entries).
         start_date: first trade date (ISO) that is in-scope for entries/exits;
             bars strictly before it are warm-up only and never traded.
-        n: rolling window size (trading days) for the buy baseline (low_min).
-        x: buy coefficient — enters when ``close <= low_min * x``.
+        n: legacy rolling window size used when ``strategy`` is omitted.
+        x: legacy buy coefficient used when ``strategy`` is omitted.
+        strategy: compiled recipe strategy. Its feed requirements determine the
+            price and volume warm-up windows.
+        requirements: feed requirements for ``strategy``.
         risk: three-tier stop params, shared with the live engine. Partial
             take-profit is forced off regardless of the caller's value — the
             backtest never simulates "分批止盈"/"持仓中加仓" (design.md 7.3).
@@ -332,15 +340,25 @@ def run_backtest(
         BacktestResult with the trade list (at most one trailing PERIOD_END
         record) and summary metrics.
     """
-    if n <= 0:
-        raise ValueError("n must be positive")
-    if x <= 0:
-        raise ValueError("x must be positive")
-
     risk = replace(risk, enable_partial_take_profit=False)
-    strategy = get_market_signal_strategy(require_full_n=True)
-    params = StrategyParams(x=x)
-    feed_n = max(n, int(params.volume_lookback))
+    if strategy is None:
+        if n is None or n <= 0:
+            raise ValueError("n must be positive")
+        if x is None or x <= 0:
+            raise ValueError("x must be positive")
+        strategy = get_market_signal_strategy(require_full_n=True)
+        params = StrategyParams(x=x)
+        feed_n = max(n, int(params.volume_lookback))
+    else:
+        if requirements is None:
+            requirements = getattr(strategy, "requirements", None)
+        if requirements is None:
+            raise ValueError("requirements are required with strategy")
+        n = int(requirements.price_lookback_days)
+        if n <= 0:
+            raise ValueError("price lookback must be positive")
+        params = StrategyParams()
+        feed_n = max(n, int(requirements.volume_lookback_days or 0))
 
     # Keep every row. Non-positive / extreme-range qfq is incomparable — skip
     # trading that day (and void an open position) instead of deleting the bar
@@ -355,7 +373,9 @@ def run_backtest(
         )
 
     first_comparable_idx = next((i for i, ok in enumerate(comparable) if ok), None)
-    prefix_skipped = first_comparable_idx if first_comparable_idx is not None else len(bars)
+    prefix_skipped = (
+        first_comparable_idx if first_comparable_idx is not None else len(bars)
+    )
     first_comparable_date = (
         bars[first_comparable_idx]["date"] if first_comparable_idx is not None else None
     )
@@ -373,10 +393,19 @@ def run_backtest(
     entry_price = 0.0
     last_bar_date: str | None = None
 
-    in_scope_indices = [i for i, bar in enumerate(bars) if bar["date"] >= effective_start]
+    in_scope_indices = [
+        i for i, bar in enumerate(bars) if bar["date"] >= effective_start
+    ]
 
     def _clear_position() -> None:
-        nonlocal qty, avg_cost, highest, stop_price, entry_date, entry_price, last_bar_date
+        nonlocal \
+            qty, \
+            avg_cost, \
+            highest, \
+            stop_price, \
+            entry_date, \
+            entry_price, \
+            last_bar_date
         qty = 0
         avg_cost = 0.0
         highest = None
@@ -406,7 +435,8 @@ def run_backtest(
                 and last_bar_date is not None
             )
             hold_gap = (
-                date_cls.fromisoformat(bar["date"]) - date_cls.fromisoformat(last_bar_date)
+                date_cls.fromisoformat(bar["date"])
+                - date_cls.fromisoformat(last_bar_date)
             ).days
             if hold_gap > _MAX_BAR_GAP_CALENDAR_DAYS:
                 # True halt / missing rows: cannot manage risk across the gap.

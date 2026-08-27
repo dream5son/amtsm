@@ -15,6 +15,9 @@ export type WatchlistItem = {
   stock_name: string;
   status: string;
   created_at: string;
+  signal_strategy_id: number | null;
+  effective_signal_strategy_id: number;
+  effective_signal_strategy_name: string;
   latest_price: number | null;
   change_pct: number | null;
   actual_n: number | null;
@@ -178,6 +181,260 @@ export const DEFAULT_STRATEGY: StrategyConfig = {
   enable_addon_alert: false,
   enable_tech_sell_while_holding: false,
 };
+
+export type SignalOperatorName =
+  | "price_near_low"
+  | "price_near_high"
+  | "volume_increase"
+  | "volume_abs_change";
+
+export type PriceSignalGate = {
+  op: "price_near_low" | "price_near_high";
+  version: 1;
+  params: {
+    lookback_days: number;
+    factor: number;
+  };
+};
+
+export type VolumeIncreaseSignalGate = {
+  op: "volume_increase";
+  version: 1;
+  params: {
+    lookback_days: number;
+    min_change_pct: number;
+  };
+};
+
+export type VolumeAbsChangeSignalGate = {
+  op: "volume_abs_change";
+  version: 1;
+  params: {
+    lookback_days: number;
+    min_abs_change_pct: number;
+  };
+};
+
+export type SignalGate =
+  | PriceSignalGate
+  | VolumeIncreaseSignalGate
+  | VolumeAbsChangeSignalGate;
+
+export type SignalRecipeChannel = {
+  all: SignalGate[];
+};
+
+export type SignalStrategyRecipe = {
+  schema_version: 1;
+  channels: {
+    buy: SignalRecipeChannel;
+    sell: SignalRecipeChannel;
+    addon: SignalRecipeChannel | null;
+  };
+};
+
+export type SignalOperatorDefinition = {
+  op: SignalOperatorName;
+  version: number;
+  channels: Array<"buy" | "sell" | "addon">;
+  params_schema: Record<string, unknown>;
+};
+
+export type SignalStrategy = {
+  id: number;
+  name: string;
+  description: string | null;
+  builtin_key: string | null;
+  recipe: SignalStrategyRecipe;
+  recipe_schema_version: number;
+  recipe_version: number;
+  recipe_hash: string;
+  is_archived: boolean;
+  is_default?: boolean;
+  created_at: string;
+  updated_at: string;
+};
+
+export type SignalStrategyCreatePayload = {
+  name: string;
+  description?: string | null;
+  recipe: SignalStrategyRecipe;
+};
+
+export type SignalStrategyUpdatePayload = {
+  expected_version: number;
+  name?: string;
+  description?: string | null;
+  recipe?: SignalStrategyRecipe;
+};
+
+export type SignalStrategySnapshot = {
+  id: number;
+  name: string;
+  version: number;
+  hash: string;
+  builtin_key: string | null;
+};
+
+export type SignalStrategyGateTrace = {
+  channel: "buy" | "sell" | "addon";
+  index: number;
+  op: SignalOperatorName;
+  version: number;
+  params: Record<string, number>;
+  passed: boolean;
+  details: Record<string, unknown>;
+};
+
+export type SignalStrategyChannelTrace = {
+  present: boolean;
+  passed: boolean;
+  gates_passed: boolean;
+  policy_passed: boolean;
+  gates: SignalStrategyGateTrace[];
+};
+
+export type SignalStrategyDryRunResult = {
+  stock_code: string;
+  as_of: string;
+  strategy: SignalStrategySnapshot | null;
+  recipe_hash: string;
+  decision: {
+    buy: boolean;
+    sell: boolean;
+    addon: boolean;
+    buy_reference: {
+      baseline_price: number;
+      used_coeff: number;
+    } | null;
+    sell_reference: {
+      baseline_price: number;
+      used_coeff: number;
+    } | null;
+  };
+  traces: Record<"buy" | "sell" | "addon", SignalStrategyChannelTrace>;
+  requirements: {
+    price_lookback_days: number;
+    volume_lookback_days: number | null;
+    requires_current_volume: boolean;
+  };
+};
+
+type SignalStrategyDryRunBase = {
+  stock_code: string;
+  as_of?: string;
+  policy: "live";
+};
+
+export type SignalStrategyDryRunPayload =
+  | (SignalStrategyDryRunBase & {
+      strategy_id: number;
+      recipe?: never;
+    })
+  | (SignalStrategyDryRunBase & {
+      recipe: SignalStrategyRecipe;
+      strategy_id?: never;
+    });
+
+async function signalStrategyRequest<T>(path: string, init?: RequestInit): Promise<T> {
+  const res = await fetch(`${API_BASE}/api/signal-strategies${path}`, {
+    cache: "no-store",
+    ...init,
+  });
+  if (!res.ok) {
+    let message = "信号策略请求失败";
+    try {
+      const body = (await res.json()) as { detail?: string };
+      if (body.detail) message = body.detail;
+    } catch {
+      // Ignore non-JSON error responses.
+    }
+    throw new Error(message);
+  }
+  return (await res.json()) as T;
+}
+
+export function fetchSignalOperators(): Promise<SignalOperatorDefinition[]> {
+  return signalStrategyRequest<SignalOperatorDefinition[]>("/operators");
+}
+
+export function fetchSignalStrategies(includeArchived = false): Promise<SignalStrategy[]> {
+  const query = includeArchived ? "?include_archived=true" : "";
+  return signalStrategyRequest<SignalStrategy[]>(query);
+}
+
+export function fetchSignalStrategy(strategyId: number): Promise<SignalStrategy> {
+  return signalStrategyRequest<SignalStrategy>(`/${strategyId}`);
+}
+
+export function createSignalStrategy(
+  payload: SignalStrategyCreatePayload,
+): Promise<SignalStrategy> {
+  return signalStrategyRequest<SignalStrategy>("", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export function updateSignalStrategy(
+  strategyId: number,
+  payload: SignalStrategyUpdatePayload,
+): Promise<SignalStrategy> {
+  return signalStrategyRequest<SignalStrategy>(`/${strategyId}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export function archiveSignalStrategy(strategyId: number): Promise<SignalStrategy> {
+  return signalStrategyRequest<SignalStrategy>(`/${strategyId}`, {
+    method: "DELETE",
+  });
+}
+
+export function cloneSignalStrategy(strategyId: number, name: string): Promise<SignalStrategy> {
+  return signalStrategyRequest<SignalStrategy>(`/${strategyId}/clone`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name }),
+  });
+}
+
+export function dryRunSignalStrategy(
+  payload: SignalStrategyDryRunPayload,
+): Promise<SignalStrategyDryRunResult> {
+  return signalStrategyRequest<SignalStrategyDryRunResult>("/dry-run", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export function setDefaultSignalStrategy(
+  strategyId: number,
+): Promise<SignalStrategySnapshot> {
+  return signalStrategyRequest<SignalStrategySnapshot>("/default", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ strategy_id: strategyId }),
+  });
+}
+
+export function assignWatchlistStrategy(
+  stockCode: string,
+  strategyId: number | null,
+): Promise<SignalStrategySnapshot> {
+  return signalStrategyRequest<SignalStrategySnapshot>(
+    `/watchlist/${encodeURIComponent(stockCode)}`,
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ strategy_id: strategyId }),
+    },
+  );
+}
 
 export async function fetchWatchlist(): Promise<WatchlistItem[]> {
   const res = await fetch(`${API_BASE}/api/watchlist`, { cache: "no-store" });
@@ -537,6 +794,7 @@ export async function fetchAlertHistory(
 // ---------------------------------------------------------------------------
 
 export type BacktestParamsOverride = {
+  signal_strategy_id?: number;
   n?: number;
   x?: number;
   y?: number;
@@ -562,6 +820,10 @@ export type BacktestJob = {
   params_json: string;
   params_hash: string;
   compare_group_id: string;
+  signal_strategy_id?: number | null;
+  strategy_name_snapshot?: string | null;
+  strategy_version?: number | null;
+  strategy_recipe_hash?: string | null;
   win_rate: number | null;
   avg_win_loss_ratio: number | null;
   max_drawdown: number | null;

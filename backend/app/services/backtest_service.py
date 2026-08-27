@@ -21,10 +21,24 @@ from app.db.connection import get_db
 from app.db.init_db import get_price_adjust_migrated_at
 from app.db.models import BacktestJob, BacktestTrade, DailyMarketSnapshot, Watchlist
 from app.engine.market_hours import AFTERNOON_END, SH_TZ, is_trading_day, to_api_iso
-from app.market_signal import RiskParams
+from app.market_signal import (
+    PEAK_VALUE_WITH_VOLUME_RECIPE,
+    EvaluationPolicy,
+    RiskParams,
+    analyze_recipe,
+    compile_recipe,
+    extract_price_params,
+    hash_recipe,
+    normalize,
+    rewrite_recipe_params,
+)
 from app.schemas.strategy import (
     StockStrategyOverride as StockStrategyOverrideSchema,
+)
+from app.schemas.strategy import (
     StrategyConfig as StrategyConfigSchema,
+)
+from app.schemas.strategy import (
     TrailingLadderLevel,
     parse_trailing_ladder,
 )
@@ -38,6 +52,12 @@ from app.services.market_data_service import (
     MarketDataUnavailableError,
     StockDataFetchError,
     fetch_qfq_bars_range,
+)
+from app.services.signal_strategy_service import (
+    get_strategy as get_signal_strategy,
+)
+from app.services.signal_strategy_service import (
+    resolve_signal_strategy,
 )
 from app.services.stock_search_service import normalize_stock_code
 from app.services.strategy_service import (
@@ -90,6 +110,7 @@ _BACKTEST_PARAM_KEYS = (
     "break_even_buffer_pct",
     "trailing_ladder",
 )
+_PRICE_PARAM_KEYS = ("n", "x", "y")
 
 
 class StockNotFoundError(ValueError):
@@ -110,7 +131,9 @@ class BacktestApplyError(ValueError):
 
 def _require_watchlist(session, stock_code: str) -> None:
     exists = (
-        session.query(Watchlist.stock_code).filter(Watchlist.stock_code == stock_code).first()
+        session.query(Watchlist.stock_code)
+        .filter(Watchlist.stock_code == stock_code)
+        .first()
     )
     if not exists:
         raise StockNotFoundError(f"stock not found in watchlist: {stock_code}")
@@ -133,6 +156,76 @@ def _resolve_backtest_params(stock_code: str, overrides: dict) -> dict:
     merged["break_even_trigger_pct"] = float(merged["break_even_trigger_pct"])
     merged["break_even_buffer_pct"] = float(merged["break_even_buffer_pct"])
     return merged
+
+
+def _signal_snapshot_from_row(strategy: dict) -> dict:
+    return {
+        "id": strategy["id"],
+        "name": strategy["name"],
+        "version": strategy["recipe_version"],
+        "hash": strategy["recipe_hash"],
+        "recipe": normalize(strategy["recipe"]),
+        "builtin_key": strategy["builtin_key"],
+    }
+
+
+def _snapshot_with_recipe(snapshot: dict, recipe) -> dict:
+    normalized = normalize(recipe)
+    return {
+        **snapshot,
+        "hash": hash_recipe(normalized),
+        "recipe": normalized,
+    }
+
+
+def _build_v2_params(stock_code: str, overrides: dict) -> dict:
+    resolved = _resolve_backtest_params(stock_code, overrides)
+    strategy_id = overrides.get("signal_strategy_id")
+    has_price_overrides = any(
+        overrides.get(key) is not None for key in _PRICE_PARAM_KEYS
+    )
+
+    if strategy_id is not None:
+        snapshot = _signal_snapshot_from_row(get_signal_strategy(int(strategy_id)))
+        if has_price_overrides:
+            recipe = rewrite_recipe_params(
+                snapshot["recipe"],
+                lookback_days=overrides.get("n"),
+                x=overrides.get("x"),
+                y=overrides.get("y"),
+            )
+            snapshot = _snapshot_with_recipe(snapshot, recipe)
+    elif has_price_overrides:
+        recipe = rewrite_recipe_params(
+            PEAK_VALUE_WITH_VOLUME_RECIPE,
+            lookback_days=int(resolved["n"]),
+            x=float(resolved["x"]),
+            y=float(resolved["y"]),
+        )
+        snapshot = {
+            "id": None,
+            "name": "临时 · 峰谷量价策略",
+            "version": 1,
+            "hash": hash_recipe(recipe),
+            "recipe": normalize(recipe),
+            "builtin_key": "peak_value_with_volume",
+        }
+    else:
+        snapshot = resolve_signal_strategy(stock_code)
+        snapshot = _snapshot_with_recipe(snapshot, snapshot["recipe"])
+
+    n, x, y = extract_price_params(snapshot["recipe"])
+    return {
+        "schema_version": 2,
+        "signal_strategy": snapshot,
+        "n": n,
+        "x": x,
+        "y": y,
+        "stop_loss_pct": resolved["stop_loss_pct"],
+        "break_even_trigger_pct": resolved["break_even_trigger_pct"],
+        "break_even_buffer_pct": resolved["break_even_buffer_pct"],
+        "trailing_ladder": resolved["trailing_ladder"],
+    }
 
 
 def _hash_params(resolved: dict) -> str:
@@ -160,6 +253,10 @@ def _job_to_dict(job: BacktestJob) -> dict:
         "params_json": job.params_json,
         "params_hash": job.params_hash,
         "compare_group_id": job.compare_group_id,
+        "signal_strategy_id": job.signal_strategy_id,
+        "strategy_name_snapshot": job.strategy_name_snapshot,
+        "strategy_version": job.strategy_version,
+        "strategy_recipe_hash": job.strategy_recipe_hash,
         "win_rate": job.win_rate,
         "avg_win_loss_ratio": job.avg_win_loss_ratio,
         "max_drawdown": job.max_drawdown,
@@ -236,7 +333,9 @@ def apply_job_params(job_id: int, *, update_global: bool = False) -> dict:
     except ValueError as exc:
         raise StockNotFoundError(str(exc)) from exc
 
-    override_payload = _params_snapshot_to_override_payload(params, existing_override=existing)
+    override_payload = _params_snapshot_to_override_payload(
+        params, existing_override=existing
+    )
     override = update_override(stock_code, override_payload)
 
     global_strategy = None
@@ -296,8 +395,9 @@ def create_jobs(
     jobs: list[dict] = []
 
     for raw_overrides in groups:
-        resolved = _resolve_backtest_params(normalized, raw_overrides)
+        resolved = _build_v2_params(normalized, raw_overrides)
         params_hash = _hash_params(resolved)
+        signal_snapshot = resolved["signal_strategy"]
 
         with get_db() as session:
             existing = (
@@ -324,6 +424,10 @@ def create_jobs(
                 params_json=json.dumps(resolved, separators=(",", ":")),
                 params_hash=params_hash,
                 compare_group_id=compare_group_id,
+                signal_strategy_id=signal_snapshot["id"],
+                strategy_name_snapshot=signal_snapshot["name"],
+                strategy_version=signal_snapshot["version"],
+                strategy_recipe_hash=signal_snapshot["hash"],
                 sample_insufficient=0,
             )
             session.add(job)
@@ -426,7 +530,9 @@ def _kline_fetch_window(
     return max(win_s, job_s), min(win_e, job_e)
 
 
-def _backfill_kline_window(stock_code: str, start: date, end: date, job_id: int) -> None:
+def _backfill_kline_window(
+    stock_code: str, start: date, end: date, job_id: int
+) -> None:
     if start > end:
         return
     try:
@@ -507,10 +613,14 @@ def get_kline_data(
         if limit is not None:
             fetch_n = limit + _KLINE_LIMIT_OVERFETCH
             if take_head:
-                stmt = stmt.order_by(DailyMarketSnapshot.trade_date.asc()).limit(fetch_n)
+                stmt = stmt.order_by(DailyMarketSnapshot.trade_date.asc()).limit(
+                    fetch_n
+                )
                 bar_rows = list(session.execute(stmt).scalars().all())
             else:
-                stmt = stmt.order_by(DailyMarketSnapshot.trade_date.desc()).limit(fetch_n)
+                stmt = stmt.order_by(DailyMarketSnapshot.trade_date.desc()).limit(
+                    fetch_n
+                )
                 bar_rows = list(reversed(session.execute(stmt).scalars().all()))
         else:
             stmt = stmt.order_by(DailyMarketSnapshot.trade_date.asc())
@@ -578,7 +688,9 @@ def get_kline_data(
                     "high_price": bar["high"],
                     "low_price": bar["low"],
                     "close_price": bar["close"],
-                    "volume": bar.get("volume") if bar.get("volume") is not None else 0.0,
+                    "volume": bar.get("volume")
+                    if bar.get("volume") is not None
+                    else 0.0,
                 }
                 for bar in cleaned
             ],
@@ -607,15 +719,21 @@ def _warmup_start(start: date, n: int) -> date:
     return start - timedelta(days=n * 3 + 30)
 
 
-def _snapshot_trade_dates(session, stock_code: str, start: date, end: date) -> list[str]:
+def _snapshot_trade_dates(
+    session, stock_code: str, start: date, end: date
+) -> list[str]:
     return list(
         session.execute(
-            select(DailyMarketSnapshot.trade_date).where(
+            select(DailyMarketSnapshot.trade_date)
+            .where(
                 DailyMarketSnapshot.stock_code == stock_code,
                 DailyMarketSnapshot.trade_date >= start.isoformat(),
                 DailyMarketSnapshot.trade_date <= end.isoformat(),
-            ).order_by(DailyMarketSnapshot.trade_date)
-        ).scalars().all()
+            )
+            .order_by(DailyMarketSnapshot.trade_date)
+        )
+        .scalars()
+        .all()
     )
 
 
@@ -647,7 +765,9 @@ def _coverage_holes(
     return holes
 
 
-def _has_sufficient_snapshot_coverage(session, stock_code: str, start: date, end: date) -> bool:
+def _has_sufficient_snapshot_coverage(
+    session, stock_code: str, start: date, end: date
+) -> bool:
     trade_dates = _snapshot_trade_dates(session, stock_code, start, end)
     calendar_days = (end - start).days + 1
     expected_min = max(1, int(calendar_days * 0.5))
@@ -764,15 +884,19 @@ def _ensure_snapshot_range(
 
 def _load_bars(stock_code: str, start: date, end: date) -> list[dict]:
     with get_db() as session:
-        rows = session.execute(
-            select(DailyMarketSnapshot)
-            .where(
-                DailyMarketSnapshot.stock_code == stock_code,
-                DailyMarketSnapshot.trade_date >= start.isoformat(),
-                DailyMarketSnapshot.trade_date <= end.isoformat(),
+        rows = (
+            session.execute(
+                select(DailyMarketSnapshot)
+                .where(
+                    DailyMarketSnapshot.stock_code == stock_code,
+                    DailyMarketSnapshot.trade_date >= start.isoformat(),
+                    DailyMarketSnapshot.trade_date <= end.isoformat(),
+                )
+                .order_by(DailyMarketSnapshot.trade_date)
             )
-            .order_by(DailyMarketSnapshot.trade_date)
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
     return [
         {
             "date": row.trade_date,
@@ -895,8 +1019,26 @@ def run_job(job_id: int) -> None:
         params.get("x"),
     )
     try:
-        n = int(params["n"])
-        x = float(params["x"])
+        if params.get("schema_version") == 2:
+            signal_snapshot = params.get("signal_strategy")
+            if not isinstance(signal_snapshot, dict):
+                raise ValueError("params_json missing signal_strategy")
+            recipe = signal_snapshot.get("recipe")
+            if hash_recipe(recipe) != signal_snapshot.get("hash"):
+                raise ValueError("signal strategy recipe hash mismatch")
+        else:
+            recipe = rewrite_recipe_params(
+                PEAK_VALUE_WITH_VOLUME_RECIPE,
+                lookback_days=int(params["n"]),
+                x=float(params["x"]),
+                y=float(params["y"]),
+            )
+        requirements = analyze_recipe(recipe)
+        strategy = compile_recipe(
+            recipe,
+            policy=EvaluationPolicy(require_full_buy_window=True),
+        )
+        n, x, _ = extract_price_params(recipe)
         risk = _risk_params_from_resolved(params)
 
         start = date.fromisoformat(start_date_str)
@@ -905,7 +1047,8 @@ def run_job(job_id: int) -> None:
             raise BacktestDataError(
                 f"no closed trading session in [{start_date_str}, {end_date_str}]"
             )
-        warmup_start = _warmup_start(start, n)
+        feed_n = max(n, int(requirements.volume_lookback_days or 0))
+        warmup_start = _warmup_start(start, feed_n)
 
         bars = _load_and_validate_bars(stock_code, warmup_start, end)
         logger.info(
@@ -923,6 +1066,8 @@ def run_job(job_id: int) -> None:
             n=n,
             x=x,
             risk=risk,
+            strategy=strategy,
+            requirements=requirements,
             min_trade_count=settings.backtest_min_trade_count,
         )
         _persist_result(job_id, result)
@@ -972,11 +1117,15 @@ def get_watchlist_backtest_summary(stock_codes: list[str]) -> dict[str, dict]:
         return {}
 
     with get_db() as session:
-        rows = session.execute(
-            select(BacktestJob)
-            .where(BacktestJob.stock_code.in_(stock_codes))
-            .order_by(BacktestJob.created_at.desc())
-        ).scalars().all()
+        rows = (
+            session.execute(
+                select(BacktestJob)
+                .where(BacktestJob.stock_code.in_(stock_codes))
+                .order_by(BacktestJob.created_at.desc())
+            )
+            .scalars()
+            .all()
+        )
 
     by_stock: dict[str, list[BacktestJob]] = {}
     for row in rows:
@@ -990,14 +1139,18 @@ def get_watchlist_backtest_summary(stock_codes: list[str]) -> dict[str, dict]:
             continue
 
         try:
-            current_hash = _hash_params(_resolve_backtest_params(code, {}))
+            current_hash = _hash_params(_build_v2_params(code, {}))
         except Exception:  # noqa: BLE001 - never break the whole list over one stock
             current_hash = None
 
         latest = jobs[0]
         in_flight = latest if latest.status in _INFLIGHT_STATUSES else None
         success_matching = next(
-            (j for j in jobs if j.status == "SUCCESS" and j.params_hash == current_hash),
+            (
+                j
+                for j in jobs
+                if j.status == "SUCCESS" and j.params_hash == current_hash
+            ),
             None,
         )
         success_any = next((j for j in jobs if j.status == "SUCCESS"), None)
@@ -1021,14 +1174,18 @@ def get_watchlist_backtest_summary(stock_codes: list[str]) -> dict[str, dict]:
             "backtest_status": status,
             "backtest_job_id": job_id,
             "backtest_win_rate": chosen_success.win_rate if chosen_success else None,
-            "backtest_trade_count": chosen_success.trade_count if chosen_success else None,
+            "backtest_trade_count": chosen_success.trade_count
+            if chosen_success
+            else None,
             "backtest_sample_insufficient": (
                 bool(chosen_success.sample_insufficient) if chosen_success else False
             ),
             "backtest_stale": _is_backtest_stale(
                 chosen_success, success_matching, get_price_adjust_migrated_at()
             ),
-            "backtest_error_message": latest_failed.error_message if latest_failed else None,
+            "backtest_error_message": latest_failed.error_message
+            if latest_failed
+            else None,
         }
 
     return result

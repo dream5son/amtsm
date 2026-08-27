@@ -1,10 +1,30 @@
 """Shared signal domain: baseline, entry strategy, three-tier risk, day-bar replay."""
 
 from app.market_signal.baseline import InsufficientDataError, compute_baseline
+from app.market_signal.builtin_recipes import (
+    BUILTIN_RECIPES,
+    PEAK_VALLEY_RECIPE,
+    PEAK_VALUE_WITH_VOLUME_RECIPE,
+    extract_price_params,
+    peak_valley,
+    peak_value_with_volume,
+    rewrite_recipe_params,
+)
+from app.market_signal.compiler import (
+    ChannelTrace,
+    CompiledRecipeStrategy,
+    DryRunResult,
+    EvaluationPolicy,
+    FeedRequirements,
+    GateTrace,
+    analyze_recipe,
+    compile_recipe,
+    dry_run_recipe,
+)
 from app.market_signal.feed import (
+    DEFAULT_VOLUME_LOOKBACK,
     BarWindowFeed,
     BaselineWindow,
-    DEFAULT_VOLUME_LOOKBACK,
     MarketFeed,
     StaticBaselineFeed,
     VolumeWindow,
@@ -12,6 +32,17 @@ from app.market_signal.feed import (
 )
 from app.market_signal.peak_valley import PeakValleyStrategy
 from app.market_signal.peak_value_with_volume import PeakValueWithVolumeStrategy
+from app.market_signal.recipe_schema import (
+    ChannelRecipeV1,
+    OperatorCall,
+    RecipeChannelsV1,
+    RecipeChannelV1,
+    StrategyRecipeV1,
+    hash_recipe,
+    normalize,
+    normalize_recipe,
+    validate_recipe,
+)
 from app.market_signal.replay import BarHoldingResult, evaluate_bar_holding
 from app.market_signal.risk import (
     PartialTpSignal,
@@ -43,6 +74,10 @@ from app.market_signal.types import (
 )
 
 __all__ = [
+    "BUILTIN_RECIPES",
+    "DEFAULT_VOLUME_LOOKBACK",
+    "PEAK_VALLEY_RECIPE",
+    "PEAK_VALUE_WITH_VOLUME_RECIPE",
     "SIGNAL_ADDON",
     "SIGNAL_BUY",
     "SIGNAL_PARTIAL_TP",
@@ -55,14 +90,22 @@ __all__ = [
     "BarHoldingResult",
     "BarWindowFeed",
     "BaselineWindow",
-    "DEFAULT_VOLUME_LOOKBACK",
+    "ChannelRecipeV1",
+    "ChannelTrace",
+    "CompiledRecipeStrategy",
+    "DryRunResult",
+    "EvaluationPolicy",
+    "FeedRequirements",
+    "GateTrace",
     "InsufficientDataError",
     "MarketFeed",
     "MarketSignalStrategy",
+    "OperatorCall",
     "PartialTpSignal",
     "PeakValleyStrategy",
     "PeakValueWithVolumeStrategy",
-    "VolumeWindow",
+    "RecipeChannelV1",
+    "RecipeChannelsV1",
     "RiskEvaluation",
     "RiskParams",
     "SignalDecision",
@@ -70,12 +113,25 @@ __all__ = [
     "SignalRequest",
     "StaticBaselineFeed",
     "StrategyParams",
+    "StrategyRecipeV1",
+    "VolumeWindow",
+    "analyze_recipe",
+    "compile_recipe",
     "compute_baseline",
     "compute_volume_window",
+    "dry_run_recipe",
     "evaluate",
     "evaluate_bar_holding",
+    "extract_price_params",
     "get_market_signal_strategy",
+    "hash_recipe",
     "match_ladder_idx",
+    "normalize",
+    "normalize_recipe",
+    "peak_valley",
+    "peak_value_with_volume",
     "risk_params_from_resolved",
+    "rewrite_recipe_params",
     "suggest_sell_pct_for_ladder",
+    "validate_recipe",
 ]

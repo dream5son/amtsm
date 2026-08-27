@@ -20,6 +20,8 @@
     "@types/node": "22.17.1",
     "@types/react": "19.1.9",
     "@types/react-dom": "19.1.7",
+    "eslint": "^9.39.4",
+    "eslint-config-next": "15.5.22",
     "postcss": "^8.5.25",
     "tailwindcss": "^4.3.3",
     "typescript": "5.9.2"

@@ -11,11 +11,14 @@ import RegisterSellDialog from "@/components/register-sell-dialog";
 import SignalHistoryDrawer from "@/components/signal-history-drawer";
 import StatusBadge from "@/components/status-badge";
 import {
+  assignWatchlistStrategy,
   createWatchlist,
+  fetchSignalStrategies,
   fetchWatchlist,
   getSystemStatusSSEUrl,
   removeWatchlist,
   searchStocks,
+  SignalStrategy,
   StockSearchItem,
   WatchlistItem,
 } from "@/lib/api";
@@ -57,6 +60,7 @@ type WatchlistPanelProps = {
 
 export default function WatchlistPanel({ onOpenStrategy }: WatchlistPanelProps) {
   const [watchlist, setWatchlist] = useState<WatchlistItem[]>([]);
+  const [signalStrategies, setSignalStrategies] = useState<SignalStrategy[]>([]);
   const [watchlistLoading, setWatchlistLoading] = useState(true);
   const [query, setQuery] = useState("");
   const [searchResults, setSearchResults] = useState<StockSearchItem[]>([]);
@@ -64,6 +68,7 @@ export default function WatchlistPanel({ onOpenStrategy }: WatchlistPanelProps) 
   const [showAddPanel, setShowAddPanel] = useState(false);
   const [addingCode, setAddingCode] = useState<string | null>(null);
   const [removingCode, setRemovingCode] = useState<string | null>(null);
+  const [assigningStrategyCode, setAssigningStrategyCode] = useState<string | null>(null);
   const [message, setMessage] = useState("");
   const [quoteDelay, setQuoteDelay] = useState(false);
   const [buyTarget, setBuyTarget] = useState<WatchlistItem | null>(null);
@@ -75,6 +80,11 @@ export default function WatchlistPanel({ onOpenStrategy }: WatchlistPanelProps) 
 
   useEffect(() => {
     void loadWatchlist();
+    void fetchSignalStrategies()
+      .then(setSignalStrategies)
+      .catch(() => {
+        setMessage("信号策略列表加载失败，暂时无法调整股票策略");
+      });
   }, []);
 
   useEffect(() => {
@@ -225,6 +235,25 @@ export default function WatchlistPanel({ onOpenStrategy }: WatchlistPanelProps) 
     }
   }
 
+  async function onAssignSignalStrategy(item: WatchlistItem, rawStrategyId: string) {
+    const strategyId = rawStrategyId === "" ? null : Number(rawStrategyId);
+    setAssigningStrategyCode(item.stock_code);
+    setMessage("");
+    try {
+      const effective = await assignWatchlistStrategy(item.stock_code, strategyId);
+      setMessage(
+        strategyId == null
+          ? `${item.stock_name} 已改为跟随默认信号策略「${effective.name}」`
+          : `${item.stock_name} 已使用信号策略「${effective.name}」`,
+      );
+      await loadWatchlist();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "信号策略分配失败，请稍后重试");
+    } finally {
+      setAssigningStrategyCode(null);
+    }
+  }
+
   const watchlistCodes = useMemo(
     () => new Set(watchlist.map((item) => item.stock_code)),
     [watchlist],
@@ -318,7 +347,7 @@ export default function WatchlistPanel({ onOpenStrategy }: WatchlistPanelProps) 
 
       <div className="min-w-0 overflow-x-auto">
         {watchlist.length > 0 ? (
-          <table className="w-full min-w-[1360px] border-collapse text-sm">
+          <table className="w-full min-w-[1540px] border-collapse text-sm">
             <thead>
               <tr className="border-b border-slate-200 text-slate-500">
                 <th
@@ -337,6 +366,7 @@ export default function WatchlistPanel({ onOpenStrategy }: WatchlistPanelProps) 
                 <th className="whitespace-nowrap py-2 pr-2 text-left font-medium">浮动盈亏</th>
                 <th className="whitespace-nowrap py-2 pr-2 text-left font-medium">止损参考价</th>
                 <th className="whitespace-nowrap py-2 pr-2 text-left font-medium">距止损</th>
+                <th className="min-w-[190px] whitespace-nowrap py-2 pr-2 text-left font-medium">信号策略</th>
                 <th className="whitespace-nowrap py-2 pr-2 text-left font-medium">状态</th>
                 <th className="whitespace-nowrap py-2 pr-2 text-left font-medium">信号</th>
                 <th className="w-[400px] min-w-[400px] whitespace-nowrap py-2 text-left font-medium">操作</th>
@@ -391,6 +421,34 @@ export default function WatchlistPanel({ onOpenStrategy }: WatchlistPanelProps) 
                     </td>
                     <td className={riskCls}>
                       {holding ? formatPctRatio(item.stop_distance_pct) : "-"}
+                    </td>
+                    <td className="min-w-[190px] py-2 pr-2">
+                      <div className="mb-1 flex items-center gap-1.5">
+                        <span className="max-w-[140px] truncate text-xs font-medium text-slate-700">
+                          {item.effective_signal_strategy_name}
+                        </span>
+                        {item.signal_strategy_id == null ? (
+                          <span className="rounded border border-sky-200 bg-sky-50 px-1 py-0.5 text-[10px] text-sky-700">
+                            继承
+                          </span>
+                        ) : null}
+                      </div>
+                      <select
+                        aria-label={`设置 ${item.stock_name} 的信号策略`}
+                        value={item.signal_strategy_id ?? ""}
+                        disabled={assigningStrategyCode === item.stock_code}
+                        onChange={(event) =>
+                          void onAssignSignalStrategy(item, event.target.value)
+                        }
+                        className="w-full rounded-md border border-slate-300 bg-white px-2 py-1 text-xs text-slate-700 outline-none ring-sky-200 focus:ring disabled:cursor-not-allowed disabled:bg-slate-100"
+                      >
+                        <option value="">跟随默认</option>
+                        {signalStrategies.map((strategy) => (
+                          <option key={strategy.id} value={strategy.id}>
+                            {strategy.name}
+                          </option>
+                        ))}
+                      </select>
                     </td>
                     <td className="py-2 pr-2">
                       <StatusBadge status={item.status} />
@@ -454,9 +512,9 @@ export default function WatchlistPanel({ onOpenStrategy }: WatchlistPanelProps) 
                         <button
                           type="button"
                           onClick={() => onOpenStrategy?.(item)}
-                          className="rounded-md border border-violet-300 px-2 py-1 text-xs font-medium text-violet-700 transition-colors hover:bg-violet-50"
+                          className="rounded-md border border-slate-300 px-2 py-1 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-100"
                         >
-                          策略
+                          风控
                         </button>
                         <button
                           type="button"

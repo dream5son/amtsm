@@ -12,6 +12,7 @@ from app.api.health import router as health_router
 from app.api.jobs import router as jobs_router
 from app.api.notify import router as notify_router
 from app.api.positions import router as positions_router
+from app.api.signal_strategies import router as signal_strategies_router
 from app.api.stocks import router as stocks_router
 from app.api.strategy import router as strategy_router
 from app.api.watchlist import router as watchlist_router
@@ -74,6 +75,7 @@ app.include_router(health_router)
 app.include_router(jobs_router)
 app.include_router(notify_router)
 app.include_router(positions_router)
+app.include_router(signal_strategies_router)
 app.include_router(stocks_router)
 app.include_router(watchlist_router)
 app.include_router(strategy_router)
