@@ -116,3 +116,30 @@ Local: copy `.env.example` to `.env` in both `backend/` and `frontend/` and fill
 - Pydantic models in `backend/app/schemas/`; keep request/response schemas separate from DB models.
 - API routes are registered in `backend/app/main.py`; add new routers there.
 - New frontend pages go under `frontend/app/` following Next.js App Router conventions.
+
+### API error handling
+
+- Service layer raises typed domain errors from `app.services.errors` (`AppError` / `NotFoundError` / `ConflictError`).
+- `main.py` registers one `AppError` exception handler that maps `status_code` to the HTTP response.
+- Route handlers stay thin: call the service and return its result. Do not wrap every endpoint in `try` / `except`.
+
+**Anti-pattern (do not repeat):**
+
+```python
+# BAD: duplicated try/except in every route, often with message sniffing
+@router.get("/{id}")
+def read_item(id: int) -> dict:
+    try:
+        return get_item(id)
+    except ValueError as exc:
+        if "not found" in str(exc):
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+```
+
+```python
+# GOOD: typed error in the service + one global handler; route is a passthrough
+@router.get("/{id}")
+def read_item(id: int) -> dict:
+    return get_item(id)
+```

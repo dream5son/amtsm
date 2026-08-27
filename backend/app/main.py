@@ -2,8 +2,9 @@ import logging
 from contextlib import asynccontextmanager
 
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from app.api.activity import router as activity_router
 from app.api.alerts import router as alerts_router
@@ -19,6 +20,7 @@ from app.api.watchlist import router as watchlist_router
 from app.config import settings
 from app.db.init_db import init_db
 from app.engine.scheduler import create_scheduler, get_scheduler
+from app.services.errors import AppError
 from app.services.notifier.registry import (
     get_enabled_notifiers,
     get_unknown_channel_ids,
@@ -59,6 +61,12 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="AMTSM API", lifespan=lifespan)
+
+
+@app.exception_handler(AppError)
+async def app_error_handler(_: Request, exc: AppError) -> JSONResponse:
+    return JSONResponse(status_code=exc.status_code, content={"detail": str(exc)})
+
 
 app.add_middleware(
     CORSMiddleware,

@@ -24,6 +24,7 @@ from app.market_signal.recipe_schema import (
     validate_recipe,
 )
 from app.market_signal.strategy import SignalRequest
+from app.services.errors import AppError, ConflictError, NotFoundError
 from app.services.market_data import bar_date_str
 from app.services.market_data_service import fetch_daily_bars
 from app.services.stock_search_service import normalize_stock_code
@@ -74,10 +75,17 @@ def _snapshot(row: SignalStrategy) -> dict[str, Any]:
 def _validated_name(name: str) -> str:
     normalized = name.strip()
     if not normalized:
-        raise ValueError("name is required")
+        raise AppError("name is required")
     if len(normalized) > 100:
-        raise ValueError("name must be at most 100 characters")
+        raise AppError("name must be at most 100 characters")
     return normalized
+
+
+def _validated_recipe(recipe: RecipeInput) -> StrategyRecipeV1:
+    try:
+        return validate_recipe(recipe)
+    except ValueError as exc:
+        raise AppError(str(exc)) from exc
 
 
 def list_operators() -> list[dict[str, Any]]:
@@ -95,16 +103,15 @@ def list_operators() -> list[dict[str, Any]]:
 def list_strategies(include_archived: bool = False) -> list[dict[str, Any]]:
     with get_db() as session:
         config = session.get(StrategyConfig, 1)
-        default_id = (
-            config.default_signal_strategy_id if config is not None else None
-        )
+        default_id = config.default_signal_strategy_id if config is not None else None
         query = session.query(SignalStrategy)
         if not include_archived:
             query = query.filter(SignalStrategy.is_archived == 0)
-        rows = query.order_by(SignalStrategy.builtin_key.desc(), SignalStrategy.id).all()
+        rows = query.order_by(
+            SignalStrategy.builtin_key.desc(), SignalStrategy.id
+        ).all()
         return [
-            {**_strategy_dict(row), "is_default": row.id == default_id}
-            for row in rows
+            {**_strategy_dict(row), "is_default": row.id == default_id} for row in rows
         ]
 
 
@@ -112,7 +119,7 @@ def get_strategy(strategy_id: int) -> dict[str, Any]:
     with get_db() as session:
         row = session.get(SignalStrategy, strategy_id)
         if row is None:
-            raise ValueError("signal strategy not found")
+            raise NotFoundError("signal strategy not found")
         return _strategy_dict(row)
 
 
@@ -121,7 +128,7 @@ def create_strategy(
     description: str | None,
     recipe: RecipeInput,
 ) -> dict[str, Any]:
-    validated = validate_recipe(recipe)
+    validated = _validated_recipe(recipe)
     row = SignalStrategy(
         name=_validated_name(name),
         description=description,
@@ -137,7 +144,7 @@ def create_strategy(
             session.commit()
         except IntegrityError as exc:
             session.rollback()
-            raise ValueError("signal strategy name already exists") from exc
+            raise ConflictError("signal strategy name already exists") from exc
         return _strategy_dict(row)
 
 
@@ -152,19 +159,19 @@ def update_strategy(
     with get_db() as session:
         row = session.get(SignalStrategy, strategy_id)
         if row is None:
-            raise ValueError("signal strategy not found")
+            raise NotFoundError("signal strategy not found")
         if row.builtin_key is not None:
-            raise ValueError("builtin signal strategies are immutable")
+            raise ConflictError("builtin signal strategies are immutable")
         if row.recipe_version != expected_version:
-            raise ValueError("signal strategy version conflict")
+            raise ConflictError("signal strategy version conflict")
         if name is not _UNSET:
             if not isinstance(name, str):
-                raise ValueError("name is required")
+                raise AppError("name is required")
             row.name = _validated_name(name)
         if description is not _UNSET:
             row.description = description
         if recipe is not _UNSET:
-            validated = validate_recipe(recipe)
+            validated = _validated_recipe(recipe)
             row.recipe_json = _recipe_json(validated)
             row.recipe_schema_version = validated.schema_version
             row.recipe_hash = hash_recipe(validated)
@@ -174,7 +181,7 @@ def update_strategy(
             session.commit()
         except IntegrityError as exc:
             session.rollback()
-            raise ValueError("signal strategy name already exists") from exc
+            raise ConflictError("signal strategy name already exists") from exc
         return _strategy_dict(row)
 
 
@@ -182,19 +189,19 @@ def archive_strategy(strategy_id: int) -> dict[str, Any]:
     with get_db() as session:
         row = session.get(SignalStrategy, strategy_id)
         if row is None:
-            raise ValueError("signal strategy not found")
+            raise NotFoundError("signal strategy not found")
         if row.builtin_key is not None:
-            raise ValueError("builtin signal strategies cannot be archived")
+            raise ConflictError("builtin signal strategies cannot be archived")
         if (
             session.query(Watchlist)
             .filter(Watchlist.signal_strategy_id == strategy_id)
             .first()
             is not None
         ):
-            raise ValueError("assigned signal strategies cannot be archived")
+            raise ConflictError("assigned signal strategies cannot be archived")
         config = session.get(StrategyConfig, 1)
         if config is not None and config.default_signal_strategy_id == strategy_id:
-            raise ValueError("default signal strategy cannot be archived")
+            raise ConflictError("default signal strategy cannot be archived")
         row.is_archived = 1
         row.updated_at = _utcnow()
         session.commit()
@@ -205,7 +212,7 @@ def clone_strategy(strategy_id: int, name: str) -> dict[str, Any]:
     with get_db() as session:
         row = session.get(SignalStrategy, strategy_id)
         if row is None:
-            raise ValueError("signal strategy not found")
+            raise NotFoundError("signal strategy not found")
         description = row.description
         recipe = row.recipe_json
     return create_strategy(name, description, recipe)
@@ -215,10 +222,10 @@ def set_default_strategy(strategy_id: int) -> dict[str, Any]:
     with get_db() as session:
         strategy = session.get(SignalStrategy, strategy_id)
         if strategy is None or strategy.is_archived:
-            raise ValueError("active signal strategy not found")
+            raise NotFoundError("active signal strategy not found")
         config = session.get(StrategyConfig, 1)
         if config is None:
-            raise ValueError("strategy config not found")
+            raise NotFoundError("strategy config not found")
         config.default_signal_strategy_id = strategy_id
         config.updated_at = _utcnow()
         session.commit()
@@ -237,11 +244,11 @@ def assign_watchlist_strategy(
             .one_or_none()
         )
         if watchlist is None:
-            raise ValueError("stock not found in watchlist")
+            raise NotFoundError("stock not found in watchlist")
         if strategy_id is not None:
             strategy = session.get(SignalStrategy, strategy_id)
             if strategy is None or strategy.is_archived:
-                raise ValueError("active signal strategy not found")
+                raise NotFoundError("active signal strategy not found")
         watchlist.signal_strategy_id = strategy_id
         session.commit()
     return resolve_signal_strategy(normalized)
@@ -256,7 +263,7 @@ def resolve_signal_strategy(stock_code: str) -> dict[str, Any]:
             .one_or_none()
         )
         if watchlist is None:
-            raise ValueError("stock not found in watchlist")
+            raise NotFoundError("stock not found in watchlist")
         config = session.get(StrategyConfig, 1)
         strategy_id = watchlist.signal_strategy_id or (
             config.default_signal_strategy_id if config is not None else None
@@ -267,7 +274,7 @@ def resolve_signal_strategy(stock_code: str) -> dict[str, Any]:
             else None
         )
         if strategy is None:
-            raise ValueError("default signal strategy is not configured")
+            raise NotFoundError("default signal strategy is not configured")
         return _snapshot(strategy)
 
 
@@ -286,7 +293,7 @@ def resolve_signal_strategies(
         by_code = {row.stock_code: row for row in watchlists}
         missing = [code for code in normalized_codes if code not in by_code]
         if missing:
-            raise ValueError(f"stock not found in watchlist: {missing[0]}")
+            raise NotFoundError(f"stock not found in watchlist: {missing[0]}")
         config = session.get(StrategyConfig, 1)
         default_id = config.default_signal_strategy_id if config is not None else None
         strategy_ids = {
@@ -305,7 +312,7 @@ def resolve_signal_strategies(
             strategy_id = by_code[code].signal_strategy_id or default_id
             strategy = strategies.get(strategy_id)
             if strategy is None:
-                raise ValueError("default signal strategy is not configured")
+                raise NotFoundError("default signal strategy is not configured")
             resolved[code] = _snapshot(strategy)
         return resolved
 
@@ -357,7 +364,7 @@ def _load_bars(
 
     ordered = [bars_by_date[day] for day in sorted(bars_by_date)]
     if not ordered:
-        raise ValueError("no market snapshots available for dry run")
+        raise AppError("no market snapshots available for dry run")
     current = ordered[-1]
     history = ordered[:-1][-history_count:]
     return current, history
@@ -393,20 +400,20 @@ def dry_run(
     policy: str | EvaluationPolicy = "live",
 ) -> dict[str, Any]:
     if (recipe is None) == (strategy_id is None):
-        raise ValueError("provide exactly one of recipe or strategy_id")
+        raise AppError("provide exactly one of recipe or strategy_id")
     normalized = normalize_stock_code(stock_code)
     strategy_snapshot = None
     if strategy_id is not None:
         strategy_snapshot = get_strategy(strategy_id)
         if strategy_snapshot["is_archived"]:
-            raise ValueError("active signal strategy not found")
-        validated: StrategyRecipeV1 = validate_recipe(strategy_snapshot["recipe"])
+            raise NotFoundError("active signal strategy not found")
+        validated: StrategyRecipeV1 = _validated_recipe(strategy_snapshot["recipe"])
     else:
-        validated = validate_recipe(recipe)
+        validated = _validated_recipe(recipe)
 
     if isinstance(policy, str):
         if policy != "live":
-            raise ValueError("unsupported evaluation policy")
+            raise AppError("unsupported evaluation policy")
         evaluation_policy = EvaluationPolicy(require_full_buy_window=False)
     else:
         evaluation_policy = policy
@@ -423,9 +430,7 @@ def dry_run(
     )
     request = SignalRequest(
         price=float(current["close"]),
-        volume=(
-            None if current.get("volume") is None else float(current["volume"])
-        ),
+        volume=(None if current.get("volume") is None else float(current["volume"])),
         feed=BarWindowFeed(
             history,
             requested_n=requirements.price_lookback_days,
@@ -449,8 +454,7 @@ def dry_run(
         "recipe_hash": hash_recipe(validated),
         "decision": asdict(result.decision),
         "traces": {
-            channel: _trace_dict(trace)
-            for channel, trace in result.traces.items()
+            channel: _trace_dict(trace) for channel, trace in result.traces.items()
         },
         "requirements": asdict(requirements),
     }
