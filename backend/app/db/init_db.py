@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime
+from datetime import UTC, datetime
 
 from sqlalchemy import inspect, text
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
@@ -475,7 +475,7 @@ def _migrate_snapshots_to_qfq() -> None:
             conn.execute(text("DELETE FROM daily_market_snapshots"))
         if "daily_baselines" in tables:
             conn.execute(text("DELETE FROM daily_baselines"))
-        migrated_at = datetime.now().replace(microsecond=0).isoformat()
+        migrated_at = datetime.now(UTC).replace(microsecond=0).isoformat()
         conn.execute(
             text(
                 "INSERT INTO schema_meta(key, value) VALUES (:key, :value) "

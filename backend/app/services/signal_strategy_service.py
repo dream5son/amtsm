@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 from sqlalchemy.exc import IntegrityError
@@ -32,7 +32,7 @@ _UNSET = object()
 
 
 def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _recipe_json(recipe: RecipeInput) -> str:
@@ -336,7 +336,7 @@ def _load_bars(
     bars_by_date = {bar["date"]: bar for bar in cached}
 
     if len(cached) < history_count + 1:
-        fetch_end = (as_of or date.today()) + timedelta(days=1)
+        fetch_end = (as_of or datetime.now(UTC).date()) + timedelta(days=1)
         try:
             fetched = fetch_daily_bars(stock_code, history_count + 1, fetch_end)
         except Exception:
