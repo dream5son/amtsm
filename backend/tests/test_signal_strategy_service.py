@@ -18,6 +18,7 @@ from app.db.models import (
 )
 from app.market_signal.builtin_recipes import PEAK_VALLEY_RECIPE
 from app.market_signal.recipe_schema import normalize
+from app.services.errors import ConflictError
 from app.services.signal_strategy_service import (
     archive_strategy,
     assign_watchlist_strategy,
@@ -74,7 +75,7 @@ def test_create_update_clone_and_archive_rules(signal_db) -> None:
     assert updated["recipe_version"] == 2
     assert updated["description"] is None
     assert updated["recipe_hash"] != created["recipe_hash"]
-    with pytest.raises(ValueError, match="version conflict"):
+    with pytest.raises(ConflictError, match="version conflict"):
         update_strategy(created["id"], expected_version=1, name="stale")
 
     cloned = clone_strategy(created["id"], "克隆策略")
@@ -83,14 +84,12 @@ def test_create_update_clone_and_archive_rules(signal_db) -> None:
     archived = archive_strategy(cloned["id"])
     assert archived["is_archived"] is True
     assert cloned["id"] not in {row["id"] for row in list_strategies()}
-    assert cloned["id"] in {
-        row["id"] for row in list_strategies(include_archived=True)
-    }
+    assert cloned["id"] in {row["id"] for row in list_strategies(include_archived=True)}
 
     builtin = next(row for row in list_strategies() if row["builtin_key"])
-    with pytest.raises(ValueError, match="immutable"):
+    with pytest.raises(ConflictError, match="immutable"):
         update_strategy(builtin["id"], expected_version=1, name="nope")
-    with pytest.raises(ValueError, match="cannot be archived"):
+    with pytest.raises(ConflictError, match="cannot be archived"):
         archive_strategy(builtin["id"])
 
 
@@ -105,14 +104,14 @@ def test_assignment_inherits_default_and_overrides(signal_db) -> None:
     custom = create_strategy("个股策略", None, normalize(PEAK_VALLEY_RECIPE))
     assigned = assign_watchlist_strategy("600519", custom["id"])
     assert assigned["id"] == custom["id"]
-    with pytest.raises(ValueError, match="assigned"):
+    with pytest.raises(ConflictError, match="assigned"):
         archive_strategy(custom["id"])
 
     inherited_again = assign_watchlist_strategy("600519", None)
     assert inherited_again["id"] == inherited["id"]
     set_default_strategy(custom["id"])
     assert resolve_signal_strategy("600519")["id"] == custom["id"]
-    with pytest.raises(ValueError, match="default"):
+    with pytest.raises(ConflictError, match="default"):
         archive_strategy(custom["id"])
 
 
