@@ -330,9 +330,7 @@ def test_positive_volume_gate_fails_closed(
     volume: float | None, volume_n: int, expected: bool
 ) -> None:
     strategy = compile_recipe(_volume_increase_recipe())
-    decision = strategy.evaluate(
-        _request(110.0, volume=volume, volume_n=volume_n)
-    )
+    decision = strategy.evaluate(_request(110.0, volume=volume, volume_n=volume_n))
 
     assert decision.buy is expected
     assert decision.addon is expected

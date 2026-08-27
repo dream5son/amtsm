@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import Any
 
 from pydantic import BaseModel
 
@@ -70,10 +71,7 @@ class DryRunResult:
 
     @property
     def gate_traces(self) -> Mapping[str, tuple[GateTrace, ...]]:
-        return {
-            channel: trace.gates
-            for channel, trace in self.channels.items()
-        }
+        return {channel: trace.gates for channel, trace in self.channels.items()}
 
 
 @dataclass(frozen=True)
@@ -102,10 +100,7 @@ def analyze_recipe(recipe: RecipeInput) -> FeedRequirements:
     active_volume_calls = [
         call
         for call in calls
-        if (
-            call.op == "volume_increase"
-            and float(call.params["min_change_pct"]) > 0
-        )
+        if (call.op == "volume_increase" and float(call.params["min_change_pct"]) > 0)
         or (
             call.op == "volume_abs_change"
             and float(call.params["min_abs_change_pct"]) > 0

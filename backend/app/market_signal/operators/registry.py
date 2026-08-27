@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from types import MappingProxyType
-from typing import Mapping
 
 from app.market_signal.operators.base import OperatorSpec
 from app.market_signal.operators.price import (

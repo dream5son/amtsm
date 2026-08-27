@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import Any, Mapping, TypeAlias
+from collections.abc import Mapping
+from typing import Any
 
 from pydantic import (
     BaseModel,
@@ -55,7 +56,7 @@ class StrategyRecipeV1(BaseModel):
 
 
 ChannelRecipeV1 = RecipeChannelV1
-RecipeInput: TypeAlias = StrategyRecipeV1 | Mapping[str, Any] | str | bytes
+type RecipeInput = StrategyRecipeV1 | Mapping[str, Any] | str | bytes
 
 
 def _parse_recipe(recipe: RecipeInput) -> StrategyRecipeV1:
@@ -89,14 +90,9 @@ def _require_leading_price(
 ) -> None:
     expected_key = f"{expected_op}@1"
     first_key = f"{calls[0].op}@{calls[0].version}"
-    count = sum(
-        call.op == expected_op and call.version == 1
-        for call in calls
-    )
+    count = sum(call.op == expected_op and call.version == 1 for call in calls)
     if first_key != expected_key or count != 1:
-        raise ValueError(
-            f"{channel} must start with exactly one {expected_key}"
-        )
+        raise ValueError(f"{channel} must start with exactly one {expected_key}")
 
 
 def _validate_recipe_shape(recipe: StrategyRecipeV1) -> None:
@@ -134,12 +130,8 @@ def validate_recipe(recipe: RecipeInput) -> StrategyRecipeV1:
     parsed = _parse_recipe(recipe)
     addon = parsed.channels.addon
     channels = RecipeChannelsV1(
-        buy=RecipeChannelV1(
-            all=_normalize_calls("buy", parsed.channels.buy.all)
-        ),
-        sell=RecipeChannelV1(
-            all=_normalize_calls("sell", parsed.channels.sell.all)
-        ),
+        buy=RecipeChannelV1(all=_normalize_calls("buy", parsed.channels.buy.all)),
+        sell=RecipeChannelV1(all=_normalize_calls("sell", parsed.channels.sell.all)),
         addon=(
             RecipeChannelV1(all=_normalize_calls("addon", addon.all))
             if addon is not None

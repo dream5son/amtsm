@@ -11,7 +11,9 @@ _EPS = 1e-12
 
 
 class PriceParams(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True, strict=True, allow_inf_nan=False)
+    model_config = ConfigDict(
+        extra="forbid", frozen=True, strict=True, allow_inf_nan=False
+    )
 
     lookback_days: int = Field(gt=0)
     factor: float = Field(gt=0)
@@ -32,11 +34,7 @@ def price_near_low(req: SignalRequest, params: BaseModel) -> OperatorVerdict:
     baseline = float(window.low_min)
     factor = float(parsed.factor)
     threshold = baseline * factor
-    passed = (
-        price > 0
-        and baseline > 0
-        and price <= threshold + _EPS
-    )
+    passed = price > 0 and baseline > 0 and price <= threshold + _EPS
     return OperatorVerdict(
         passed=passed,
         reference=SignalReference(baseline, factor),
@@ -57,11 +55,7 @@ def price_near_high(req: SignalRequest, params: BaseModel) -> OperatorVerdict:
     baseline = float(window.high_max)
     factor = float(parsed.factor)
     threshold = baseline * factor
-    passed = (
-        price > 0
-        and baseline > 0
-        and price >= threshold - _EPS
-    )
+    passed = price > 0 and baseline > 0 and price >= threshold - _EPS
     return OperatorVerdict(
         passed=passed,
         reference=SignalReference(baseline, factor),

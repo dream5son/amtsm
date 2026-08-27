@@ -13,14 +13,18 @@ _EPS = 1e-12
 
 
 class VolumeIncreaseParams(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True, strict=True, allow_inf_nan=False)
+    model_config = ConfigDict(
+        extra="forbid", frozen=True, strict=True, allow_inf_nan=False
+    )
 
     lookback_days: int = Field(gt=0)
     min_change_pct: float = Field(ge=0)
 
 
 class VolumeAbsChangeParams(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True, strict=True, allow_inf_nan=False)
+    model_config = ConfigDict(
+        extra="forbid", frozen=True, strict=True, allow_inf_nan=False
+    )
 
     lookback_days: int = Field(gt=0)
     min_abs_change_pct: float = Field(ge=0)
