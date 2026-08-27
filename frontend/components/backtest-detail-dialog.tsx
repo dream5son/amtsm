@@ -73,6 +73,14 @@ function summarizeParams(paramsJson: string): string {
   }
 }
 
+function strategySnapshotLabel(job: BacktestJob): string {
+  if (job.strategy_name_snapshot) {
+    return `${job.strategy_name_snapshot}${job.strategy_version ? ` · v${job.strategy_version}` : ""}`;
+  }
+  if (job.signal_strategy_id) return `信号策略 #${job.signal_strategy_id}`;
+  return "未记录策略快照";
+}
+
 export default function BacktestDetailDialog({
   open,
   item,
@@ -242,7 +250,7 @@ export default function BacktestDetailDialog({
             </p>
           </div>
           <button type="button" onClick={onClose} className="text-slate-500 hover:text-slate-700">
-            ✕
+            关闭
           </button>
         </div>
 
@@ -298,9 +306,17 @@ export default function BacktestDetailDialog({
               </div>
 
               <div className="mb-4 flex flex-wrap items-center gap-3">
-                <p className="text-sm text-slate-600" title={selectedJob.params_json}>
-                  当前参数：{summarizeParams(selectedJob.params_json)}
-                </p>
+                <div className="text-sm text-slate-600">
+                  <p>
+                    信号策略：
+                    <span className="font-medium text-slate-800">
+                      {strategySnapshotLabel(selectedJob)}
+                    </span>
+                  </p>
+                  <p title={selectedJob.params_json}>
+                    当前参数：{summarizeParams(selectedJob.params_json)}
+                  </p>
+                </div>
                 <button
                   type="button"
                   onClick={() => openApplyConfirm(selectedJob)}
@@ -408,7 +424,7 @@ export default function BacktestDetailDialog({
                     <table className="w-full min-w-[720px] border-collapse text-sm">
                       <thead>
                         <tr className="border-b border-slate-200 text-slate-500">
-                          <th className="py-2 pr-2 text-left font-medium">参数组合</th>
+                          <th className="py-2 pr-2 text-left font-medium">信号策略 / 参数</th>
                           <th
                             className="cursor-pointer py-2 pr-2 text-left font-medium hover:text-slate-700"
                             onClick={() => toggleSort("win_rate")}
@@ -442,7 +458,12 @@ export default function BacktestDetailDialog({
                             }
                           >
                             <td className="py-2 pr-2 text-slate-700" title={job.params_json}>
-                              {summarizeParams(job.params_json)}
+                              <span className="block font-medium text-slate-800">
+                                {strategySnapshotLabel(job)}
+                              </span>
+                              <span className="block text-xs text-slate-500">
+                                {summarizeParams(job.params_json)}
+                              </span>
                             </td>
                             <td className="py-2 pr-2 text-slate-900">{formatPct(job.win_rate, 0)}</td>
                             <td className="py-2 pr-2 text-slate-900">{formatRatio(job.avg_win_loss_ratio)}</td>

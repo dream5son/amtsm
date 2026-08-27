@@ -3,6 +3,7 @@
 import { useState } from "react";
 
 import SchedulerActivityPanel from "@/components/scheduler-activity-panel";
+import SignalStrategyPanel from "@/components/signal-strategy-panel";
 import StrategySettingsPanel, {
   StrategyDialogTarget,
 } from "@/components/strategy-settings-panel";
@@ -22,6 +23,7 @@ export default function HomePage() {
           }
         />
         <SchedulerActivityPanel />
+        <SignalStrategyPanel onChanged={() => setWatchlistKey((k) => k + 1)} />
         <StrategySettingsPanel
           stockTarget={strategyTarget}
           onStockTargetClose={() => setStrategyTarget(null)}
