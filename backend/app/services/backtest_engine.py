@@ -13,13 +13,13 @@ from dataclasses import dataclass, replace
 from datetime import date as date_cls
 
 from app.market_signal import (
-    FeedRequirements,
-    MarketSignalStrategy,
-    RiskParams,
     SIGNAL_PERIOD_END,
     SIGNAL_STOP_LOSS,
     SIGNAL_TAKE_PROFIT,
     BarWindowFeed,
+    FeedRequirements,
+    MarketSignalStrategy,
+    RiskParams,
     SignalRequest,
     StrategyParams,
     evaluate,

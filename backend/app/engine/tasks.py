@@ -60,12 +60,11 @@ from app.services.market_data_service import (
     MissingTradeDayBarError,
     StockDataFetchError,
     fetch_daily_bars,
-    fetch_qfq_bars_range,
     fetch_realtime_quotes_batch,
     fetch_trade_day_bar,
 )
-from app.services.strategy_service import resolve_params
 from app.services.signal_strategy_service import resolve_signal_strategies
+from app.services.strategy_service import resolve_params
 from app.services.watchlist_service import (
     restore_halted_to_normal,
     update_watchlist_status,
