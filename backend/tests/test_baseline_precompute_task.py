@@ -1,11 +1,29 @@
 from unittest.mock import MagicMock, patch
 
 from app.engine.tasks import baseline_precompute_task
+from app.market_signal.builtin_recipes import PEAK_VALUE_WITH_VOLUME_RECIPE
+from app.market_signal.recipe_schema import hash_recipe, normalize
 
 
+def _bindings(codes):
+    recipe = normalize(PEAK_VALUE_WITH_VOLUME_RECIPE)
+    return {
+        code: {
+            "id": 1,
+            "name": "峰谷量价策略",
+            "version": 1,
+            "hash": hash_recipe(recipe),
+            "recipe": recipe,
+            "builtin_key": "peak_value_with_volume",
+        }
+        for code in codes
+    }
+
+
+@patch("app.engine.tasks.resolve_signal_strategies", side_effect=_bindings)
 @patch("app.engine.tasks.fetch_daily_bars")
 @patch("app.engine.tasks.get_db")
-def test_baseline_precompute_task_success(mock_get_db, mock_fetch):
+def test_baseline_precompute_task_success(mock_get_db, mock_fetch, _mock_resolve):
     """Test successful execution with mocked data."""
     mock_session = MagicMock()
     mock_session.__enter__ = MagicMock(return_value=mock_session)
@@ -49,9 +67,12 @@ def test_baseline_precompute_task_success(mock_get_db, mock_fetch):
         mock_upsert_bars.assert_called_once_with("600519", bars)
 
 
+@patch("app.engine.tasks.resolve_signal_strategies", side_effect=_bindings)
 @patch("app.engine.tasks.fetch_daily_bars")
 @patch("app.engine.tasks.get_db")
-def test_baseline_precompute_task_individual_failure(mock_get_db, mock_fetch):
+def test_baseline_precompute_task_individual_failure(
+    mock_get_db, mock_fetch, _mock_resolve
+):
     """Test that individual stock failure doesn't stop others."""
     from app.services.market_data_service import StockDataFetchError
 
@@ -109,10 +130,11 @@ def test_baseline_precompute_task_individual_failure(mock_get_db, mock_fetch):
         assert args[4] == 1  # failed_count
 
 
+@patch("app.engine.tasks.resolve_signal_strategies", side_effect=_bindings)
 @patch("app.engine.tasks.fetch_daily_bars")
 @patch("app.engine.tasks.get_db")
 def test_baseline_precompute_keeps_success_when_snapshot_cache_fails(
-    mock_get_db, mock_fetch
+    mock_get_db, mock_fetch, _mock_resolve
 ):
     mock_session = MagicMock()
     mock_session.__enter__ = MagicMock(return_value=mock_session)
@@ -142,7 +164,9 @@ def test_baseline_precompute_keeps_success_when_snapshot_cache_fails(
         patch("app.engine.tasks._finish_job_log") as mock_finish,
         patch("app.engine.tasks._insert_log_item"),
         patch("app.engine.tasks.upsert_baseline"),
-        patch("app.engine.tasks.upsert_qfq_bars", side_effect=RuntimeError("db locked")),
+        patch(
+            "app.engine.tasks.upsert_qfq_bars", side_effect=RuntimeError("db locked")
+        ),
     ):
         baseline_precompute_task()
         args = mock_finish.call_args[0]

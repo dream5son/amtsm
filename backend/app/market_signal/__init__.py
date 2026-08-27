@@ -5,8 +5,10 @@ from app.market_signal.builtin_recipes import (
     BUILTIN_RECIPES,
     PEAK_VALLEY_RECIPE,
     PEAK_VALUE_WITH_VOLUME_RECIPE,
+    extract_price_params,
     peak_valley,
     peak_value_with_volume,
+    rewrite_recipe_params,
 )
 from app.market_signal.compiler import (
     ChannelTrace,
@@ -120,6 +122,7 @@ __all__ = [
     "dry_run_recipe",
     "evaluate",
     "evaluate_bar_holding",
+    "extract_price_params",
     "get_market_signal_strategy",
     "hash_recipe",
     "match_ladder_idx",
@@ -128,6 +131,7 @@ __all__ = [
     "peak_valley",
     "peak_value_with_volume",
     "risk_params_from_resolved",
+    "rewrite_recipe_params",
     "suggest_sell_pct_for_ladder",
     "validate_recipe",
 ]

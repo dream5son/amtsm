@@ -10,8 +10,10 @@ from app.services.backtest_service import (
     BacktestApplyError,
     _load_bars,
     apply_job_params,
+    create_jobs,
     get_kline_data,
 )
+from app.services.signal_strategy_service import create_strategy
 from app.services.strategy_service import get_override, get_strategy
 
 _SAMPLE_PARAMS = {
@@ -39,7 +41,9 @@ def _seed_job(
         status=status,
         start_date=start_date,
         end_date=end_date,
-        params_json=json.dumps(params if params is not None else {}, separators=(",", ":")),
+        params_json=json.dumps(
+            params if params is not None else {}, separators=(",", ":")
+        ),
         params_hash="h",
         compare_group_id="g",
     )
@@ -57,7 +61,12 @@ def test_get_kline_data_drops_unsanitary_ohlc_bars(tmp_path, monkeypatch) -> Non
     init_db()
 
     with get_db() as session:
-        job_id = _seed_job(session, stock_code="sh600660", start_date="2000-01-01", end_date="2000-01-12")
+        job_id = _seed_job(
+            session,
+            stock_code="sh600660",
+            start_date="2000-01-01",
+            end_date="2000-01-12",
+        )
         session.add_all(
             [
                 DailyMarketSnapshot(
@@ -131,7 +140,9 @@ def test_get_kline_data_drops_unsanitary_ohlc_bars(tmp_path, monkeypatch) -> Non
     assert result["has_more_after"] is False
 
 
-def _valid_snapshot(stock_code: str, trade_date: str, close: float = 10.0) -> DailyMarketSnapshot:
+def _valid_snapshot(
+    stock_code: str, trade_date: str, close: float = 10.0
+) -> DailyMarketSnapshot:
     return DailyMarketSnapshot(
         stock_code=stock_code,
         trade_date=trade_date,
@@ -186,7 +197,9 @@ def test_get_kline_data_limit_returns_tail_page(tmp_path, monkeypatch) -> None:
     assert len(result["trades"]) == 1
 
 
-def test_get_kline_data_before_and_after_pages_do_not_overlap(tmp_path, monkeypatch) -> None:
+def test_get_kline_data_before_and_after_pages_do_not_overlap(
+    tmp_path, monkeypatch
+) -> None:
     monkeypatch.setattr(settings, "sqlite_path", str(tmp_path / "amtsm.db"))
     init_db()
     with get_db() as session:
@@ -334,7 +347,9 @@ def test_get_kline_data_backfills_empty_snapshot_cache(tmp_path, monkeypatch) ->
     assert result["has_more_after"] is False
 
 
-def test_get_kline_data_has_more_before_without_older_cached_rows(tmp_path, monkeypatch) -> None:
+def test_get_kline_data_has_more_before_without_older_cached_rows(
+    tmp_path, monkeypatch
+) -> None:
     """A full tail page that does not reach job.start_date can still page left,
     even before older snapshots have been backfilled."""
     monkeypatch.setattr(settings, "sqlite_path", str(tmp_path / "amtsm.db"))
@@ -403,7 +418,9 @@ def test_coverage_holes_detects_interior_year_gap() -> None:
         date(2009, 12, 31),
     )
     assert holes
-    interior = [h for h in holes if h[0] > date(2008, 1, 1) and h[1] < date(2009, 12, 31)]
+    interior = [
+        h for h in holes if h[0] > date(2008, 1, 1) and h[1] < date(2009, 12, 31)
+    ]
     assert interior
     assert interior[0][0] == date(2008, 5, 8)
     assert interior[0][1] == date(2009, 5, 17)
@@ -434,7 +451,9 @@ def test_ensure_snapshot_range_refetches_interior_hole(tmp_path, monkeypatch) ->
             }
         ]
 
-    monkeypatch.setattr("app.services.backtest_service.fetch_qfq_bars_range", fake_fetch)
+    monkeypatch.setattr(
+        "app.services.backtest_service.fetch_qfq_bars_range", fake_fetch
+    )
     monkeypatch.setattr(
         "app.engine.tasks.upsert_qfq_bars",
         lambda stock_code, bars: len(bars),
@@ -445,7 +464,9 @@ def test_ensure_snapshot_range_refetches_interior_hole(tmp_path, monkeypatch) ->
     assert fetched[0] == (date(2008, 1, 1), date(2009, 12, 31))
 
 
-def test_ensure_snapshot_range_fetches_only_holes_when_count_ok(tmp_path, monkeypatch) -> None:
+def test_ensure_snapshot_range_fetches_only_holes_when_count_ok(
+    tmp_path, monkeypatch
+) -> None:
     from datetime import timedelta
 
     from app.services.backtest_service import _ensure_snapshot_range
@@ -473,12 +494,16 @@ def test_ensure_snapshot_range_fetches_only_holes_when_count_ok(tmp_path, monkey
         fetched.append((start, end))
         return []
 
-    monkeypatch.setattr("app.services.backtest_service.fetch_qfq_bars_range", fake_fetch)
+    monkeypatch.setattr(
+        "app.services.backtest_service.fetch_qfq_bars_range", fake_fetch
+    )
     _ensure_snapshot_range("sh600900", start, end)
     assert fetched == [(hole_start, hole_end)]
 
 
-def test_load_and_validate_bars_refetches_unadjusted_cache(tmp_path, monkeypatch) -> None:
+def test_load_and_validate_bars_refetches_unadjusted_cache(
+    tmp_path, monkeypatch
+) -> None:
     from app.services.backtest_service import _load_and_validate_bars
 
     monkeypatch.setattr(settings, "sqlite_path", str(tmp_path / "amtsm.db"))
@@ -546,7 +571,9 @@ def test_load_and_validate_bars_refetches_unadjusted_cache(tmp_path, monkeypatch
             session.commit()
         return qfq_bars
 
-    monkeypatch.setattr("app.services.backtest_service.fetch_qfq_bars_range", fake_fetch)
+    monkeypatch.setattr(
+        "app.services.backtest_service.fetch_qfq_bars_range", fake_fetch
+    )
 
     start = date(2010, 7, 19)
     end = date(2010, 7, 20)
@@ -584,7 +611,9 @@ def test_apply_job_params_writes_stock_override_only(tmp_path, monkeypatch) -> N
     init_db()
 
     with get_db() as session:
-        session.add(Watchlist(stock_code="sh600519", stock_name="茅台", status="NORMAL"))
+        session.add(
+            Watchlist(stock_code="sh600519", stock_name="茅台", status="NORMAL")
+        )
         job_id = _seed_job(
             session,
             stock_code="sh600519",
@@ -616,7 +645,9 @@ def test_apply_job_params_update_global(tmp_path, monkeypatch) -> None:
     init_db()
 
     with get_db() as session:
-        session.add(Watchlist(stock_code="sz000001", stock_name="平安", status="NORMAL"))
+        session.add(
+            Watchlist(stock_code="sz000001", stock_name="平安", status="NORMAL")
+        )
         job_id = _seed_job(
             session,
             stock_code="sz000001",
@@ -642,7 +673,9 @@ def test_apply_job_params_rejects_non_success(tmp_path, monkeypatch) -> None:
     init_db()
 
     with get_db() as session:
-        session.add(Watchlist(stock_code="sh600519", stock_name="茅台", status="NORMAL"))
+        session.add(
+            Watchlist(stock_code="sh600519", stock_name="茅台", status="NORMAL")
+        )
         job_id = _seed_job(
             session,
             stock_code="sh600519",
@@ -664,7 +697,9 @@ def test_apply_job_params_idempotent(tmp_path, monkeypatch) -> None:
     init_db()
 
     with get_db() as session:
-        session.add(Watchlist(stock_code="sh600519", stock_name="茅台", status="NORMAL"))
+        session.add(
+            Watchlist(stock_code="sh600519", stock_name="茅台", status="NORMAL")
+        )
         job_id = _seed_job(
             session,
             stock_code="sh600519",
@@ -676,8 +711,94 @@ def test_apply_job_params_idempotent(tmp_path, monkeypatch) -> None:
     first = apply_job_params(job_id)
     second = apply_job_params(job_id)
     assert first["override"]["custom_n"] == second["override"]["custom_n"]
-    assert abs(first["override"]["stop_loss_pct"] - second["override"]["stop_loss_pct"]) < 1e-9
+    assert (
+        abs(first["override"]["stop_loss_pct"] - second["override"]["stop_loss_pct"])
+        < 1e-9
+    )
     assert first["override"]["trailing_ladder"] == second["override"]["trailing_ladder"]
+
+
+def test_create_jobs_snapshots_each_selected_signal_strategy(
+    tmp_path, monkeypatch
+) -> None:
+    from app.market_signal.builtin_recipes import (
+        PEAK_VALLEY_RECIPE,
+        PEAK_VALUE_WITH_VOLUME_RECIPE,
+        rewrite_recipe_params,
+    )
+
+    monkeypatch.setattr(settings, "sqlite_path", str(tmp_path / "amtsm.db"))
+    init_db()
+    with get_db() as session:
+        session.add(
+            Watchlist(stock_code="sh600519", stock_name="茅台", status="NORMAL")
+        )
+        session.commit()
+
+    price_only = create_strategy("回测价格策略", None, PEAK_VALLEY_RECIPE)
+    volume_gated = create_strategy(
+        "回测量价策略",
+        None,
+        rewrite_recipe_params(PEAK_VALUE_WITH_VOLUME_RECIPE, buy_vol=0.5),
+    )
+
+    result = create_jobs(
+        "sh600519",
+        date(2024, 1, 1),
+        date(2024, 12, 31),
+        [
+            {"signal_strategy_id": price_only["id"]},
+            {"signal_strategy_id": volume_gated["id"]},
+        ],
+    )
+
+    assert len(result["jobs"]) == 2
+    assert {job["signal_strategy_id"] for job in result["jobs"]} == {
+        price_only["id"],
+        volume_gated["id"],
+    }
+    assert len({job["params_hash"] for job in result["jobs"]}) == 2
+    snapshots = [json.loads(job["params_json"]) for job in result["jobs"]]
+    assert all(snapshot["schema_version"] == 2 for snapshot in snapshots)
+    assert {snapshot["signal_strategy"]["id"] for snapshot in snapshots} == {
+        price_only["id"],
+        volume_gated["id"],
+    }
+    assert {snapshot["signal_strategy"]["hash"] for snapshot in snapshots} == {
+        price_only["recipe_hash"],
+        volume_gated["recipe_hash"],
+    }
+
+
+def test_create_jobs_legacy_price_overrides_snapshot_temporary_recipe(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setattr(settings, "sqlite_path", str(tmp_path / "amtsm.db"))
+    init_db()
+    with get_db() as session:
+        session.add(
+            Watchlist(stock_code="sh600519", stock_name="茅台", status="NORMAL")
+        )
+        session.commit()
+
+    result = create_jobs(
+        "sh600519",
+        date(2024, 1, 1),
+        date(2024, 12, 31),
+        [{"n": 30, "x": 1.05, "y": 0.95}],
+    )
+    job = result["jobs"][0]
+    snapshot = json.loads(job["params_json"])
+
+    assert snapshot["schema_version"] == 2
+    assert snapshot["signal_strategy"]["id"] is None
+    assert snapshot["signal_strategy"]["builtin_key"] == "peak_value_with_volume"
+    assert (snapshot["n"], snapshot["x"], snapshot["y"]) == (30, 1.05, 0.95)
+    buy_params = snapshot["signal_strategy"]["recipe"]["channels"]["buy"]["all"][0][
+        "params"
+    ]
+    assert buy_params == {"lookback_days": 30, "factor": 1.05}
+    assert job["strategy_recipe_hash"] == snapshot["signal_strategy"]["hash"]
 
 
 def test_run_job_qfq_data_avoids_ex_rights_false_stop(tmp_path, monkeypatch) -> None:
@@ -689,7 +810,9 @@ def test_run_job_qfq_data_avoids_ex_rights_false_stop(tmp_path, monkeypatch) -> 
     monkeypatch.setattr(settings, "sqlite_path", str(tmp_path / "amtsm.db"))
     init_db()
     with get_db() as session:
-        session.add(Watchlist(stock_code="sh600900", stock_name="长江电力", status="NORMAL"))
+        session.add(
+            Watchlist(stock_code="sh600900", stock_name="长江电力", status="NORMAL")
+        )
         job = BacktestJob(
             stock_code="sh600900",
             status="PENDING",
@@ -764,7 +887,9 @@ def test_run_job_qfq_data_avoids_ex_rights_false_stop(tmp_path, monkeypatch) -> 
             session.commit()
         return chunk
 
-    monkeypatch.setattr("app.services.backtest_service.fetch_qfq_bars_range", fake_fetch)
+    monkeypatch.setattr(
+        "app.services.backtest_service.fetch_qfq_bars_range", fake_fetch
+    )
 
     run_job(job_id)
 
@@ -772,14 +897,14 @@ def test_run_job_qfq_data_avoids_ex_rights_false_stop(tmp_path, monkeypatch) -> 
         job = session.get(BacktestJob, job_id)
         assert job.status == "SUCCESS"
         trades = (
-            session.query(BacktestTrade)
-            .filter(BacktestTrade.job_id == job_id)
-            .all()
+            session.query(BacktestTrade).filter(BacktestTrade.job_id == job_id).all()
         )
         bad = [
             t
             for t in trades
-            if t.exit_date == "2010-07-20" and t.exit_reason == "STOP_LOSS" and t.pnl_pct < -0.20
+            if t.exit_date == "2010-07-20"
+            and t.exit_reason == "STOP_LOSS"
+            and t.pnl_pct < -0.20
         ]
         assert not bad
 

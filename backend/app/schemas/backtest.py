@@ -15,6 +15,7 @@ class BacktestParamsOverride(BaseModel):
     strategy params — see ``app.services.strategy_service.resolve_params``.
     """
 
+    signal_strategy_id: int | None = Field(default=None, gt=0)
     n: int | None = Field(default=None, gt=0)
     x: float | None = Field(default=None, gt=0)
     y: float | None = Field(default=None, gt=0)
@@ -50,6 +51,10 @@ class BacktestJobResponse(BaseModel):
     params_json: str
     params_hash: str
     compare_group_id: str
+    signal_strategy_id: int | None
+    strategy_name_snapshot: str | None
+    strategy_version: int | None
+    strategy_recipe_hash: str | None
     win_rate: float | None
     avg_win_loss_ratio: float | None
     max_drawdown: float | None

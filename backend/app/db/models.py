@@ -97,7 +97,9 @@ class StockStrategyOverride(Base):
     custom_n: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)
     custom_x: Mapped[float | None] = mapped_column(Float, nullable=True, default=None)
     custom_y: Mapped[float | None] = mapped_column(Float, nullable=True, default=None)
-    stop_loss_pct: Mapped[float | None] = mapped_column(Float, nullable=True, default=None)
+    stop_loss_pct: Mapped[float | None] = mapped_column(
+        Float, nullable=True, default=None
+    )
     break_even_trigger_pct: Mapped[float | None] = mapped_column(
         Float, nullable=True, default=None
     )
@@ -140,9 +142,7 @@ class Position(Base):
 
 class PositionLedger(Base):
     __tablename__ = "position_ledgers"
-    __table_args__ = (
-        Index("idx_ledger_stock_time", "stock_code", "trade_date", "id"),
-    )
+    __table_args__ = (Index("idx_ledger_stock_time", "stock_code", "trade_date", "id"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     stock_code: Mapped[str] = mapped_column(String(10), nullable=False)
@@ -281,6 +281,14 @@ class BacktestJob(Base):
     params_json: Mapped[str] = mapped_column(Text, nullable=False)
     params_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     compare_group_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    signal_strategy_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("signal_strategies.id"), nullable=True
+    )
+    strategy_name_snapshot: Mapped[str | None] = mapped_column(
+        String(100), nullable=True
+    )
+    strategy_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    strategy_recipe_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     win_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
     avg_win_loss_ratio: Mapped[float | None] = mapped_column(Float, nullable=True)
     max_drawdown: Mapped[float | None] = mapped_column(Float, nullable=True)

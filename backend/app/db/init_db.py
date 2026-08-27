@@ -62,19 +62,27 @@ def _ensure_strategy_columns() -> None:
     with get_engine().begin() as conn:
         if "global_buy_n" not in existing_columns:
             conn.execute(
-                text("ALTER TABLE strategy_config ADD COLUMN global_buy_n INTEGER DEFAULT 60")
+                text(
+                    "ALTER TABLE strategy_config ADD COLUMN global_buy_n INTEGER DEFAULT 60"
+                )
             )
         if "global_buy_x" not in existing_columns:
             conn.execute(
-                text("ALTER TABLE strategy_config ADD COLUMN global_buy_x REAL DEFAULT 1.10")
+                text(
+                    "ALTER TABLE strategy_config ADD COLUMN global_buy_x REAL DEFAULT 1.10"
+                )
             )
         if "global_sell_n" not in existing_columns:
             conn.execute(
-                text("ALTER TABLE strategy_config ADD COLUMN global_sell_n INTEGER DEFAULT 60")
+                text(
+                    "ALTER TABLE strategy_config ADD COLUMN global_sell_n INTEGER DEFAULT 60"
+                )
             )
         if "global_sell_y" not in existing_columns:
             conn.execute(
-                text("ALTER TABLE strategy_config ADD COLUMN global_sell_y REAL DEFAULT 0.90")
+                text(
+                    "ALTER TABLE strategy_config ADD COLUMN global_sell_y REAL DEFAULT 0.90"
+                )
             )
 
         legacy_n_expr = "global_n" if "global_n" in existing_columns else "NULL"
@@ -120,6 +128,25 @@ def _ensure_signal_strategy_columns() -> None:
                     "INTEGER NULL REFERENCES signal_strategies(id)"
                 )
             )
+
+
+def _ensure_backtest_signal_strategy_columns() -> None:
+    existing_columns = _existing_columns("backtest_jobs")
+    if not existing_columns:
+        return
+    alters = [
+        (
+            "signal_strategy_id",
+            "INTEGER NULL REFERENCES signal_strategies(id)",
+        ),
+        ("strategy_name_snapshot", "VARCHAR(100) NULL"),
+        ("strategy_version", "INTEGER NULL"),
+        ("strategy_recipe_hash", "VARCHAR(64) NULL"),
+    ]
+    with get_engine().begin() as conn:
+        for name, ddl in alters:
+            if name not in existing_columns:
+                conn.execute(text(f"ALTER TABLE backtest_jobs ADD COLUMN {name} {ddl}"))
 
 
 def _recipe_json(recipe) -> str:
@@ -288,7 +315,9 @@ def _ensure_alert_log_columns() -> None:
 
     with get_engine().begin() as conn:
         if "error_code" not in existing_columns:
-            conn.execute(text("ALTER TABLE alert_logs ADD COLUMN error_code VARCHAR(32)"))
+            conn.execute(
+                text("ALTER TABLE alert_logs ADD COLUMN error_code VARCHAR(32)")
+            )
         if "error_message" not in existing_columns:
             conn.execute(text("ALTER TABLE alert_logs ADD COLUMN error_message TEXT"))
 
@@ -303,7 +332,9 @@ def _ensure_stop_loss_pct_column() -> None:
 
     with get_engine().begin() as conn:
         conn.execute(
-            text("ALTER TABLE strategy_config ADD COLUMN stop_loss_pct REAL DEFAULT 0.08")
+            text(
+                "ALTER TABLE strategy_config ADD COLUMN stop_loss_pct REAL DEFAULT 0.08"
+            )
         )
         conn.execute(
             text(
@@ -329,7 +360,9 @@ def _ensure_v2_risk_strategy_columns() -> None:
     with get_engine().begin() as conn:
         for name, ddl in alters:
             if name not in existing_columns:
-                conn.execute(text(f"ALTER TABLE strategy_config ADD COLUMN {name} {ddl}"))
+                conn.execute(
+                    text(f"ALTER TABLE strategy_config ADD COLUMN {name} {ddl}")
+                )
 
         conn.execute(
             text(
@@ -355,7 +388,9 @@ def _ensure_v2_risk_strategy_columns() -> None:
         )
 
 
-def _ladder_signature(raw: str | list | None) -> list[tuple[float, float | None, float]]:
+def _ladder_signature(
+    raw: str | list | None,
+) -> list[tuple[float, float | None, float]]:
     levels = parse_trailing_ladder(raw)
     return [
         (
@@ -427,10 +462,13 @@ def get_price_adjust_version() -> str:
                 "value TEXT NOT NULL)"
             )
         )
-        return conn.execute(
-            text("SELECT value FROM schema_meta WHERE key = :key"),
-            {"key": _PRICE_ADJUST_META_KEY},
-        ).scalar() or _PRICE_ADJUST_QFQ
+        return (
+            conn.execute(
+                text("SELECT value FROM schema_meta WHERE key = :key"),
+                {"key": _PRICE_ADJUST_META_KEY},
+            ).scalar()
+            or _PRICE_ADJUST_QFQ
+        )
 
 
 def get_price_adjust_migrated_at() -> datetime | None:
@@ -502,6 +540,7 @@ def init_db() -> None:
     Base.metadata.create_all(get_engine())
     _ensure_strategy_columns()
     _ensure_signal_strategy_columns()
+    _ensure_backtest_signal_strategy_columns()
     _ensure_alert_log_columns()
     _ensure_stop_loss_pct_column()
     _ensure_v2_risk_strategy_columns()

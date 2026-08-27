@@ -79,7 +79,9 @@ _START_DATE = "2024-01-05"
 
 def test_buy_then_stop_loss_exit() -> None:
     bars = _WARMUP + [
-        _bar(_START_DATE, 10.0, 10.1, 9.9, 10.0, _SURGE_VOL),  # entry: close 10.0 <= 10.34
+        _bar(
+            _START_DATE, 10.0, 10.1, 9.9, 10.0, _SURGE_VOL
+        ),  # entry: close 10.0 <= 10.34
         _bar("2024-01-08", 9.0, 10.1, 8.9, 8.95),  # gap-down through stop
     ]
     result = run_backtest(bars, start_date=_START_DATE, n=3, x=1.10, risk=_params())
@@ -119,7 +121,9 @@ def test_buy_then_trailing_take_profit_exit() -> None:
 
     # Cross-check against a hand-rolled risk_rules.evaluate replay (design.md
     # 关键点2: live engine and backtest must reuse the same rule core).
-    step1 = evaluate(avg_cost=10.0, highest_since_hold=10.0, prev_stop=None, price=10.0, params=risk)
+    step1 = evaluate(
+        avg_cost=10.0, highest_since_hold=10.0, prev_stop=None, price=10.0, params=risk
+    )
     assert abs(step1.stop_price - 9.2) < 1e-9
 
     step2 = evaluate(
@@ -133,7 +137,9 @@ def test_buy_then_trailing_take_profit_exit() -> None:
     assert 11.0 <= step2.stop_price  # day-2 low breaches -> same-day exit
     manual_exit_price = min(11.0, step2.stop_price)
     assert abs(manual_exit_price - trade.exit_price) < 1e-9
-    manual_reason = EXIT_STOP_LOSS if manual_exit_price < 10.0 - 1e-12 else EXIT_TAKE_PROFIT
+    manual_reason = (
+        EXIT_STOP_LOSS if manual_exit_price < 10.0 - 1e-12 else EXIT_TAKE_PROFIT
+    )
     assert manual_reason == trade.exit_reason
 
 
@@ -247,9 +253,13 @@ def test_no_entry_until_full_n_day_window() -> None:
     """Partial windows must not trigger buys even if close looks cheap vs a short low_min."""
     bars = [
         _bar("2024-01-02", 10.0, 10.2, 9.9, 10.0),  # idx=0 skipped
-        _bar("2024-01-03", 9.5, 9.6, 9.4, 9.5),  # idx=1 skipped; would buy on a 1-day window
+        _bar(
+            "2024-01-03", 9.5, 9.6, 9.4, 9.5
+        ),  # idx=1 skipped; would buy on a 1-day window
         _bar("2024-01-04", 9.5, 9.6, 9.4, 9.5),  # idx=2 skipped
-        _bar("2024-01-05", 9.5, 9.6, 9.4, 9.5),  # idx=3: first full n=3, low_min=9.4, thr=10.34
+        _bar(
+            "2024-01-05", 9.5, 9.6, 9.4, 9.5
+        ),  # idx=3: first full n=3, low_min=9.4, thr=10.34
         _bar("2024-01-08", 9.5, 9.6, 9.4, 9.5),
     ]
     result = run_backtest(bars, start_date="2024-01-02", n=3, x=1.10, risk=_params())
@@ -309,6 +319,48 @@ def test_quiet_volume_still_enters() -> None:
     assert len(result.trades) == 1
     assert result.trades[0].entry_date == _START_DATE
     assert result.trades[0].exit_reason == EXIT_PERIOD_END
+
+
+def test_compiled_volume_recipe_can_block_price_only_entry() -> None:
+    from app.market_signal import EvaluationPolicy, analyze_recipe, compile_recipe
+    from app.market_signal.builtin_recipes import (
+        PEAK_VALLEY_RECIPE,
+        PEAK_VALUE_WITH_VOLUME_RECIPE,
+        rewrite_recipe_params,
+    )
+
+    bars = _WARMUP + [
+        _bar(_START_DATE, 10.0, 10.1, 9.9, 10.0, _QUIET_VOL),
+    ]
+    price_recipe = rewrite_recipe_params(
+        PEAK_VALLEY_RECIPE,
+        lookback_days=3,
+    )
+    volume_recipe = rewrite_recipe_params(
+        PEAK_VALUE_WITH_VOLUME_RECIPE,
+        lookback_days=3,
+        buy_vol=0.5,
+    )
+    policy = EvaluationPolicy(require_full_buy_window=True)
+
+    price_result = run_backtest(
+        bars,
+        start_date=_START_DATE,
+        risk=_params(),
+        strategy=compile_recipe(price_recipe, policy=policy),
+        requirements=analyze_recipe(price_recipe),
+    )
+    volume_result = run_backtest(
+        bars,
+        start_date=_START_DATE,
+        risk=_params(),
+        strategy=compile_recipe(volume_recipe, policy=policy),
+        requirements=analyze_recipe(volume_recipe),
+    )
+
+    assert len(price_result.trades) == 1
+    assert price_result.trades[0].exit_reason == EXIT_PERIOD_END
+    assert volume_result.trades == []
 
 
 def test_entry_when_volume_key_missing() -> None:
@@ -373,9 +425,13 @@ def test_negative_qfq_prefix_does_not_shrink_series() -> None:
         _bar("2023-12-20", -1.0, -0.9, -1.1, -1.0),
         _bar("2023-12-21", -0.8, -0.7, -0.9, -0.75),
     ]
-    bars = prefix + _WARMUP + [
-        _bar(_START_DATE, 10.0, 10.1, 9.9, 10.0, _SURGE_VOL),
-    ]
+    bars = (
+        prefix
+        + _WARMUP
+        + [
+            _bar(_START_DATE, 10.0, 10.1, 9.9, 10.0, _SURGE_VOL),
+        ]
+    )
     result = run_backtest(bars, start_date=_START_DATE, n=3, x=1.10, risk=_params())
     assert result.summary.qfq_prefix_skipped == 2
     assert result.summary.effective_start_date == _START_DATE
@@ -424,7 +480,9 @@ def test_voided_gap_allows_fresh_buy_after_window_rebuilds() -> None:
     """After a hold is voided by a large gap, a later continuous N-day window
     may enter again and complete a normal stop-loss trade."""
     bars = _WARMUP + [
-        _bar(_START_DATE, 10.0, 10.1, 9.9, 10.0, _SURGE_VOL),  # first entry — later voided
+        _bar(
+            _START_DATE, 10.0, 10.1, 9.9, 10.0, _SURGE_VOL
+        ),  # first entry — later voided
         # Large hole voids the open position; no SL/TP row.
         _bar("2024-03-01", 10.0, 10.2, 9.9, 10.0),
         # Rebuild a continuous N=3 baseline after the hole (Mar1/4/5 → buy on Mar6).
@@ -574,7 +632,9 @@ def test_trailing_band_locks_gain_instead_of_stop_below_cost() -> None:
         _bar("2024-01-05", 3.94, 3.95, 3.89, 3.90, _SURGE_VOL),
         _bar("2024-01-08", 4.34, 4.76, 4.29, 4.29),
     ]
-    result = run_backtest(bars, start_date="2024-01-05", n=3, x=1.10, risk=_growth_risk())
+    result = run_backtest(
+        bars, start_date="2024-01-05", n=3, x=1.10, risk=_growth_risk()
+    )
     assert len(result.trades) == 1
     trade = result.trades[0]
     assert trade.entry_date == "2024-01-05"
@@ -605,7 +665,9 @@ def test_sh600660_style_trailing_locks_most_of_peak_gain() -> None:
         _bar("2024-01-08", 9.90, 10.07, 9.60, 9.70),
         _bar("2024-01-09", 9.60, 9.60, 9.40, 9.45),
     ]
-    result = run_backtest(bars, start_date="2024-01-05", n=3, x=1.10, risk=_growth_risk())
+    result = run_backtest(
+        bars, start_date="2024-01-05", n=3, x=1.10, risk=_growth_risk()
+    )
     assert len(result.trades) == 1
     trade = result.trades[0]
     assert trade.entry_date == "2024-01-05"
