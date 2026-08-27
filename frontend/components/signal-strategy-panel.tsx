@@ -356,6 +356,15 @@ export default function SignalStrategyPanel({ onChanged }: SignalStrategyPanelPr
       if (cancelled) return;
       if (strategyResult.status === "fulfilled") {
         setStrategies(strategyResult.value);
+        const markedDefault = strategyResult.value.find((strategy) => strategy.is_default);
+        if (markedDefault) {
+          setDefaultStrategyId(markedDefault.id);
+        } else if (watchlistResult.status === "fulfilled") {
+          const inherited = watchlistResult.value.find((item) => item.signal_strategy_id == null);
+          if (inherited?.effective_signal_strategy_id != null) {
+            setDefaultStrategyId(inherited.effective_signal_strategy_id);
+          }
+        }
         setDryStrategyId((current) =>
           strategyResult.value.some((strategy) => String(strategy.id) === current)
             ? current
@@ -366,10 +375,6 @@ export default function SignalStrategyPanel({ onChanged }: SignalStrategyPanelPr
       }
       if (operatorResult.status === "fulfilled") {
         setOperators(operatorResult.value);
-      }
-      if (watchlistResult.status === "fulfilled") {
-        const inherited = watchlistResult.value.find((item) => item.signal_strategy_id == null);
-        setDefaultStrategyId(inherited?.effective_signal_strategy_id ?? null);
       }
       setLoading(false);
     });

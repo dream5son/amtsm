@@ -250,6 +250,7 @@ export type SignalStrategy = {
   recipe_version: number;
   recipe_hash: string;
   is_archived: boolean;
+  is_default?: boolean;
   created_at: string;
   updated_at: string;
 };

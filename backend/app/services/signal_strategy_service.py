@@ -94,11 +94,18 @@ def list_operators() -> list[dict[str, Any]]:
 
 def list_strategies(include_archived: bool = False) -> list[dict[str, Any]]:
     with get_db() as session:
+        config = session.get(StrategyConfig, 1)
+        default_id = (
+            config.default_signal_strategy_id if config is not None else None
+        )
         query = session.query(SignalStrategy)
         if not include_archived:
             query = query.filter(SignalStrategy.is_archived == 0)
         rows = query.order_by(SignalStrategy.builtin_key.desc(), SignalStrategy.id).all()
-        return [_strategy_dict(row) for row in rows]
+        return [
+            {**_strategy_dict(row), "is_default": row.id == default_id}
+            for row in rows
+        ]
 
 
 def get_strategy(strategy_id: int) -> dict[str, Any]:
