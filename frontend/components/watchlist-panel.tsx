@@ -240,6 +240,11 @@ export default function WatchlistPanel({ onOpenStrategy }: WatchlistPanelProps) 
     [watchlist],
   );
 
+  const showPositionRiskColumns = useMemo(
+    () => watchlist.some((item) => item.position_qty > 0),
+    [watchlist],
+  );
+
   const liveStrategyTarget = useMemo(() => {
     if (!strategyTarget) return null;
     return (
@@ -335,7 +340,13 @@ export default function WatchlistPanel({ onOpenStrategy }: WatchlistPanelProps) 
 
       <div className="min-w-0 overflow-x-auto">
         {watchlist.length > 0 ? (
-          <table className="w-full min-w-[1540px] border-collapse text-sm">
+          <table
+            className={
+              showPositionRiskColumns
+                ? "w-full min-w-[1540px] border-collapse text-sm"
+                : "w-full min-w-[1220px] border-collapse text-sm"
+            }
+          >
             <thead>
               <tr className="border-b border-slate-200 text-slate-500">
                 <th
@@ -350,10 +361,14 @@ export default function WatchlistPanel({ onOpenStrategy }: WatchlistPanelProps) 
                 <th className="whitespace-nowrap py-2 pr-2 text-left font-medium">涨跌幅</th>
                 <th className="whitespace-nowrap py-2 pr-2 text-left font-medium">持仓状态</th>
                 <th className="whitespace-nowrap py-2 pr-2 text-left font-medium">持仓数量</th>
-                <th className="whitespace-nowrap py-2 pr-2 text-left font-medium">成本价</th>
-                <th className="whitespace-nowrap py-2 pr-2 text-left font-medium">浮动盈亏</th>
-                <th className="whitespace-nowrap py-2 pr-2 text-left font-medium">止损参考价</th>
-                <th className="whitespace-nowrap py-2 pr-2 text-left font-medium">距止损</th>
+                {showPositionRiskColumns ? (
+                  <>
+                    <th className="whitespace-nowrap py-2 pr-2 text-left font-medium">成本价</th>
+                    <th className="whitespace-nowrap py-2 pr-2 text-left font-medium">浮动盈亏</th>
+                    <th className="whitespace-nowrap py-2 pr-2 text-left font-medium">止损参考价</th>
+                    <th className="whitespace-nowrap py-2 pr-2 text-left font-medium">距止损</th>
+                  </>
+                ) : null}
                 <th className="min-w-[140px] whitespace-nowrap py-2 pr-2 text-left font-medium">信号策略</th>
                 <th className="whitespace-nowrap py-2 pr-2 text-left font-medium">状态</th>
                 <th className="whitespace-nowrap py-2 pr-2 text-left font-medium">信号</th>
@@ -386,30 +401,34 @@ export default function WatchlistPanel({ onOpenStrategy }: WatchlistPanelProps) 
                     </td>
                     <td className={riskCls}>{positionStatusLabel(item.position_status)}</td>
                     <td className={riskCls}>{holding ? item.position_qty : "0"}</td>
-                    <td className={riskCls}>
-                      {holding && item.avg_cost != null ? item.avg_cost.toFixed(3) : "-"}
-                    </td>
-                    <td
-                      className={
-                        !holding
-                          ? "py-2 pr-2 text-slate-500"
-                          : item.unrealized_pnl != null && item.unrealized_pnl > 0
-                            ? "py-2 pr-2 font-semibold text-rose-700"
-                            : item.unrealized_pnl != null && item.unrealized_pnl < 0
-                              ? "py-2 pr-2 font-semibold text-emerald-700"
-                              : "py-2 pr-2 font-semibold text-slate-900"
-                      }
-                    >
-                      {holding && item.unrealized_pnl != null
-                        ? `${item.unrealized_pnl.toFixed(2)} (${formatPctRatio(item.unrealized_pnl_pct)})`
-                        : "-"}
-                    </td>
-                    <td className={riskCls}>
-                      {holding && item.stop_price != null ? item.stop_price.toFixed(3) : "-"}
-                    </td>
-                    <td className={riskCls}>
-                      {holding ? formatPctRatio(item.stop_distance_pct) : "-"}
-                    </td>
+                    {showPositionRiskColumns ? (
+                      <>
+                        <td className={riskCls}>
+                          {holding && item.avg_cost != null ? item.avg_cost.toFixed(3) : ""}
+                        </td>
+                        <td
+                          className={
+                            !holding
+                              ? "py-2 pr-2 text-slate-500"
+                              : item.unrealized_pnl != null && item.unrealized_pnl > 0
+                                ? "py-2 pr-2 font-semibold text-rose-700"
+                                : item.unrealized_pnl != null && item.unrealized_pnl < 0
+                                  ? "py-2 pr-2 font-semibold text-emerald-700"
+                                  : "py-2 pr-2 font-semibold text-slate-900"
+                          }
+                        >
+                          {holding && item.unrealized_pnl != null
+                            ? `${item.unrealized_pnl.toFixed(2)} (${formatPctRatio(item.unrealized_pnl_pct)})`
+                            : ""}
+                        </td>
+                        <td className={riskCls}>
+                          {holding && item.stop_price != null ? item.stop_price.toFixed(3) : ""}
+                        </td>
+                        <td className={riskCls}>
+                          {holding ? formatPctRatio(item.stop_distance_pct) : ""}
+                        </td>
+                      </>
+                    ) : null}
                     <td className="min-w-[140px] py-2 pr-2">
                       <div className="flex items-center gap-1.5">
                         <span
