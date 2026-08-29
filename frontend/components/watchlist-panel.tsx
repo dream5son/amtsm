@@ -343,8 +343,8 @@ export default function WatchlistPanel({ onOpenStrategy }: WatchlistPanelProps) 
           <table
             className={
               showPositionRiskColumns
-                ? "w-full min-w-[1540px] border-collapse text-sm"
-                : "w-full min-w-[1220px] border-collapse text-sm"
+                ? "w-full min-w-[1460px] border-collapse text-sm"
+                : "w-full min-w-[1140px] border-collapse text-sm"
             }
           >
             <thead>
@@ -360,7 +360,7 @@ export default function WatchlistPanel({ onOpenStrategy }: WatchlistPanelProps) 
                 <th className="whitespace-nowrap py-2 pr-2 text-left font-medium">最新价</th>
                 <th className="whitespace-nowrap py-2 pr-2 text-left font-medium">涨跌幅</th>
                 <th className="whitespace-nowrap py-2 pr-2 text-left font-medium">持仓状态</th>
-                <th className="whitespace-nowrap py-2 pr-2 text-left font-medium">持仓数量</th>
+                <th className="w-[190px] min-w-[190px] max-w-[190px] whitespace-nowrap py-2 pr-2 text-left font-medium">持仓数量</th>
                 {showPositionRiskColumns ? (
                   <>
                     <th className="whitespace-nowrap py-2 pr-2 text-left font-medium">成本价</th>
@@ -372,7 +372,7 @@ export default function WatchlistPanel({ onOpenStrategy }: WatchlistPanelProps) 
                 <th className="min-w-[140px] whitespace-nowrap py-2 pr-2 text-left font-medium">信号策略</th>
                 <th className="whitespace-nowrap py-2 pr-2 text-left font-medium">状态</th>
                 <th className="whitespace-nowrap py-2 pr-2 text-left font-medium">信号</th>
-                <th className="w-[400px] min-w-[400px] whitespace-nowrap py-2 text-left font-medium">操作</th>
+                <th className="w-[180px] min-w-[180px] whitespace-nowrap py-2 text-left font-medium">操作</th>
               </tr>
             </thead>
             <tbody>
@@ -400,7 +400,36 @@ export default function WatchlistPanel({ onOpenStrategy }: WatchlistPanelProps) 
                       {formatChangePct(item.change_pct)}
                     </td>
                     <td className={riskCls}>{positionStatusLabel(item.position_status)}</td>
-                    <td className={riskCls}>{holding ? item.position_qty : "0"}</td>
+                    <td className="w-[190px] min-w-[190px] max-w-[190px] py-2 pr-2">
+                      <div className="flex flex-wrap items-center gap-1">
+                        <span className={holding ? "font-semibold text-slate-900" : "text-slate-500"}>
+                          {holding ? item.position_qty : "0"}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => setBuyTarget(item)}
+                          className="rounded-md border border-sky-300 px-2 py-1 text-xs font-medium text-sky-700 transition-colors hover:bg-sky-50"
+                        >
+                          买入
+                        </button>
+                        {holding ? (
+                          <button
+                            type="button"
+                            onClick={() => setSellTarget(item)}
+                            className="rounded-md border border-amber-300 px-2 py-1 text-xs font-medium text-amber-800 transition-colors hover:bg-amber-50"
+                          >
+                            减持
+                          </button>
+                        ) : null}
+                        <button
+                          type="button"
+                          onClick={() => setLedgerTarget(item)}
+                          className="rounded-md border border-slate-300 px-2 py-1 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-100"
+                        >
+                          流水
+                        </button>
+                      </div>
+                    </td>
                     {showPositionRiskColumns ? (
                       <>
                         <td className={riskCls}>
@@ -464,10 +493,15 @@ export default function WatchlistPanel({ onOpenStrategy }: WatchlistPanelProps) 
                     <td className="py-2 pr-2">
                       <StatusBadge status={item.status} />
                     </td>
-                    <td className={`py-2 pr-2 ${signal.cls}`}>
-                      <span className="inline-flex items-center gap-1">
-                        <span>{signal.dot}</span>
-                        <span className="text-xs">{signal.label}</span>
+                    <td className="py-2 pr-2">
+                      <div className="flex items-center gap-1">
+                        <span
+                          className={signal.cls}
+                          title={signal.label}
+                          aria-label={signal.label}
+                        >
+                          {signal.dot}
+                        </span>
                         {item.signal_t1_note ? (
                           <span
                             className="cursor-help text-[10px] font-semibold text-amber-700"
@@ -486,40 +520,31 @@ export default function WatchlistPanel({ onOpenStrategy }: WatchlistPanelProps) 
                             停
                           </span>
                         ) : null}
-                      </span>
-                    </td>
-                    <td className="w-[400px] min-w-[400px] py-2">
-                      <div className="flex flex-wrap gap-1">
-                        <button
-                          type="button"
-                          onClick={() => setBuyTarget(item)}
-                          className="rounded-md border border-sky-300 px-2 py-1 text-xs font-medium text-sky-700 transition-colors hover:bg-sky-50"
-                        >
-                          买入
-                        </button>
-                        {holding ? (
-                          <button
-                            type="button"
-                            onClick={() => setSellTarget(item)}
-                            className="rounded-md border border-amber-300 px-2 py-1 text-xs font-medium text-amber-800 transition-colors hover:bg-amber-50"
-                          >
-                            减持
-                          </button>
-                        ) : null}
-                        <button
-                          type="button"
-                          onClick={() => setLedgerTarget(item)}
-                          className="rounded-md border border-slate-300 px-2 py-1 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-100"
-                        >
-                          流水
-                        </button>
                         <button
                           type="button"
                           onClick={() => setSignalHistoryTarget(item)}
-                          className="rounded-md border border-slate-300 px-2 py-1 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-100"
+                          aria-label={`查看 ${item.stock_name} 的历史信号`}
+                          title="历史信号"
+                          className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-slate-500 transition-colors hover:bg-slate-100 hover:text-slate-800"
                         >
-                          历史信号
+                          <svg
+                            xmlns="http://www.w3.org/2000/svg"
+                            viewBox="0 0 20 20"
+                            fill="currentColor"
+                            className="h-3.5 w-3.5"
+                            aria-hidden="true"
+                          >
+                            <path
+                              fillRule="evenodd"
+                              d="M6 4.75A.75.75 0 0 1 6.75 4h10.5a.75.75 0 0 1 0 1.5H6.75A.75.75 0 0 1 6 4.75ZM6 10a.75.75 0 0 1 .75-.75h10.5a.75.75 0 0 1 0 1.5H6.75A.75.75 0 0 1 6 10Zm0 5.25a.75.75 0 0 1 .75-.75h10.5a.75.75 0 0 1 0 1.5H6.75a.75.75 0 0 1-.75-.75ZM1.99 4.75a1 1 0 0 1 1-1h.01a1 1 0 0 1 1 1v.01a1 1 0 0 1-1 1h-.01a1 1 0 0 1-1-1v-.01ZM1.99 15.25a1 1 0 0 1 1-1h.01a1 1 0 0 1 1 1v.01a1 1 0 0 1-1 1h-.01a1 1 0 0 1-1-1v-.01ZM1.99 10a1 1 0 0 1 1-1h.01a1 1 0 0 1 1 1v.01a1 1 0 0 1-1 1h-.01a1 1 0 0 1-1-1V10Z"
+                              clipRule="evenodd"
+                            />
+                          </svg>
                         </button>
+                      </div>
+                    </td>
+                    <td className="w-[180px] min-w-[180px] py-2">
+                      <div className="flex flex-wrap gap-1">
                         <button
                           type="button"
                           onClick={() => onOpenStrategy?.(item)}
