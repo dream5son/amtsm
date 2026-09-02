@@ -1035,8 +1035,8 @@ def market_polling_task() -> None:
                 continue
 
             # EMPTY mode — V1 BUY/SELL
-            # SELL is still recorded for the list/UI, but notifications are
-            # suppressed when holdings are 0 (nothing to sell).
+            # SELL still enters the alert pipeline so alert_logs is written;
+            # process_sell_alert suppresses delivery when holdings are 0.
             signal_type: str | None = None
             if decision.buy:
                 signal_type = SIGNAL_BUY
@@ -1048,19 +1048,6 @@ def market_polling_task() -> None:
                     reference = decision.buy_reference
                     buy_candidates += 1
                     runtime_state.set_signal(code, signal_type)
-                    candidates.append(
-                        {
-                            "stock_code": code,
-                            "stock_name": stock["stock_name"],
-                            "signal_type": signal_type,
-                            "price": price,
-                            "trade_date": trade_date,
-                            "baseline_price": reference.baseline_price,
-                            "used_coeff": reference.used_coeff,
-                            "actual_n": int(baseline["actual_n"]),
-                            "prev_close": prev_close,
-                        }
-                    )
                 else:
                     reference = decision.sell_reference
                     sell_candidates += 1
@@ -1075,13 +1062,22 @@ def market_polling_task() -> None:
                     runtime_state.set_signal(
                         code, signal_type, is_limit_up=limit_flag
                     )
-                    logger.info(
-                        "sell_signal recorded without notify "
-                        "stock=%s trade_date=%s price=%s (qty=0)",
-                        code,
-                        trade_date,
-                        price,
-                    )
+                candidate: dict = {
+                    "stock_code": code,
+                    "stock_name": stock["stock_name"],
+                    "signal_type": signal_type,
+                    "price": price,
+                    "trade_date": trade_date,
+                    "baseline_price": reference.baseline_price,
+                    "used_coeff": reference.used_coeff,
+                    "actual_n": int(baseline["actual_n"]),
+                    "prev_close": prev_close,
+                }
+                if signal_type == SIGNAL_SELL:
+                    candidate["is_limit_up"] = runtime_state.signal_meta.get(
+                        code, {}
+                    ).get("is_limit_up", False)
+                candidates.append(candidate)
 
     if batches_attempted > 0 and batch_errors == batches_attempted:
         record_poll_round_failure(

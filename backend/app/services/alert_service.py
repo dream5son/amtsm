@@ -48,6 +48,7 @@ RISK_SIGNAL_TYPES = frozenset(
 STATUS_PENDING = "PENDING"
 STATUS_SUCCESS = "SUCCESS"
 STATUS_FAILED = "FAILED"
+STATUS_SKIPPED = "SKIPPED"
 
 LIMIT_BOARD_NOTE = "（注：该股当前可能处于涨跌停状态，请注意流动性风险）"
 T1_NOTE = "（注：当日买入部分暂受T+1限制，无法当日卖出）"
@@ -562,7 +563,7 @@ def _claim_alert_slot(
     existing = get_alert(stock_code, trade_date, signal_type)
     if existing is not None:
         status = existing.get("sent_status")
-        if status == STATUS_SUCCESS:
+        if status in {STATUS_SUCCESS, STATUS_SKIPPED}:
             runtime_state.sent_signal_keys.add(
                 _freq_key(stock_code, trade_date, signal_type)
             )
@@ -859,6 +860,102 @@ def _position_qty(stock_code: str) -> int:
         return int(pos.qty) if pos is not None else 0
 
 
+def _record_sell_without_notify(candidate: dict[str, Any]) -> AlertProcessResult:
+    """Persist a SELL alert_logs row without sending when holdings are empty."""
+    parsed, invalid = _parse_candidate(candidate)
+    if invalid is not None:
+        logger.error(
+            "sell_alert invalid candidate %s: %s", candidate, invalid.message
+        )
+        return invalid
+    assert parsed is not None
+
+    stock_code = parsed["stock_code"]
+    trade_date = parsed["trade_date"]
+    price = parsed["price"]
+    baseline_price = parsed["baseline_price"]
+    used_coeff = parsed["used_coeff"]
+    key = _freq_key(stock_code, trade_date, SIGNAL_SELL)
+    skip_message = "no position; notification skipped"
+
+    if key in runtime_state.sent_signal_keys:
+        return AlertProcessResult(
+            outcome=AlertOutcome.SKIPPED_MEMORY,
+            stock_code=stock_code,
+            message="already recorded today (memory)",
+        )
+
+    existing = get_alert(stock_code, trade_date, SIGNAL_SELL)
+    if existing is not None:
+        status = existing.get("sent_status")
+        if status == STATUS_SUCCESS:
+            runtime_state.sent_signal_keys.add(key)
+            return AlertProcessResult(
+                outcome=AlertOutcome.SKIPPED_ALREADY_SENT,
+                stock_code=stock_code,
+                message="already sent today (db)",
+            )
+        if status == STATUS_SKIPPED:
+            runtime_state.sent_signal_keys.add(key)
+            return AlertProcessResult(
+                outcome=AlertOutcome.SKIPPED_NO_POSITION,
+                stock_code=stock_code,
+                message=skip_message,
+            )
+        # FAILED / PENDING: keep the slot, mark as recorded-without-send.
+        update_alert_result(
+            int(existing["id"]),
+            trigger_price=price,
+            baseline_price=baseline_price,
+            used_coeff=used_coeff,
+            sent_status=STATUS_SKIPPED,
+            error_code=None,
+            error_message=skip_message,
+        )
+        runtime_state.sent_signal_keys.add(key)
+        logger.info(
+            "sell_alert SKIPPED(no position) stock=%s date=%s price=%s (updated)",
+            stock_code,
+            trade_date,
+            price,
+        )
+        return AlertProcessResult(
+            outcome=AlertOutcome.SKIPPED_NO_POSITION,
+            stock_code=stock_code,
+            message=skip_message,
+        )
+
+    row_id = insert_alert(
+        stock_code=stock_code,
+        trade_date=trade_date,
+        signal_type=SIGNAL_SELL,
+        trigger_price=price,
+        baseline_price=baseline_price,
+        used_coeff=used_coeff,
+        sent_status=STATUS_SKIPPED,
+        error_message=skip_message,
+    )
+    if row_id is None:
+        return AlertProcessResult(
+            outcome=AlertOutcome.SKIPPED_RACE,
+            stock_code=stock_code,
+            message="unique constraint race",
+        )
+
+    runtime_state.sent_signal_keys.add(key)
+    logger.info(
+        "sell_alert SKIPPED(no position) stock=%s date=%s price=%s",
+        stock_code,
+        trade_date,
+        price,
+    )
+    return AlertProcessResult(
+        outcome=AlertOutcome.SKIPPED_NO_POSITION,
+        stock_code=stock_code,
+        message=skip_message,
+    )
+
+
 def process_buy_alert(candidate: dict[str, Any]) -> AlertProcessResult:
     """Process a single BUY candidate end-to-end."""
     return process_alert(candidate, signal_type=SIGNAL_BUY)
@@ -867,22 +964,13 @@ def process_buy_alert(candidate: dict[str, Any]) -> AlertProcessResult:
 def process_sell_alert(candidate: dict[str, Any]) -> AlertProcessResult:
     """Process a single SELL candidate end-to-end.
 
-    Empty holdings still allow the polling engine to record the SELL signal for
-    UI display, but notifications are suppressed here when qty is 0.
+    Empty holdings still record the SELL into ``alert_logs`` (sent_status=SKIPPED)
+    for history, but suppress WeChat/email delivery when qty is 0.
     """
     stock_code = str(candidate.get("stock_code") or "")
     qty = _position_qty(stock_code)
     if qty <= 0:
-        logger.info(
-            "sell_alert skip notify: no position stock=%s qty=%s",
-            stock_code or "unknown",
-            qty,
-        )
-        return AlertProcessResult(
-            outcome=AlertOutcome.SKIPPED_NO_POSITION,
-            stock_code=stock_code or "unknown",
-            message="no position; signal recorded without notification",
-        )
+        return _record_sell_without_notify(candidate)
     return process_alert(candidate, signal_type=SIGNAL_SELL)
 
 
@@ -899,7 +987,12 @@ def _process_candidates(
     log_prefix = _log_prefix_for(signal_type)
     for candidate in filtered:
         try:
-            results.append(process_alert(candidate, signal_type=signal_type))
+            # SELL goes through process_sell_alert so empty holdings are logged
+            # without delivery; other types use the shared pipeline.
+            if signal_type == SIGNAL_SELL:
+                results.append(process_sell_alert(candidate))
+            else:
+                results.append(process_alert(candidate, signal_type=signal_type))
         except Exception as exc:
             code = str(candidate.get("stock_code") or "unknown")
             logger.exception("%s unexpected error stock=%s", log_prefix, code)

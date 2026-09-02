@@ -44,6 +44,9 @@ function sentStatusLabel(status: AlertSentStatus): { label: string; cls: string 
   if (status === "PENDING") {
     return { label: "待发送", cls: "text-amber-700" };
   }
+  if (status === "SKIPPED") {
+    return { label: "已记录未发送", cls: "text-slate-500" };
+  }
   return { label: status, cls: "text-slate-500" };
 }
 
