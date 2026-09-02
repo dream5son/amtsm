@@ -212,11 +212,23 @@ def test_process_sell_alert_skips_notify_when_qty_zero(tmp_path, monkeypatch) ->
     result = process_sell_alert(_candidate())
     assert result.outcome == AlertOutcome.SKIPPED_NO_POSITION
     mock_send.assert_not_called()
-    assert ("sh600519", "2026-08-05", "SELL") not in runtime_state.sent_signal_keys
+    assert ("sh600519", "2026-08-05", "SELL") in runtime_state.sent_signal_keys
 
     with get_db() as session:
-        count = session.query(AlertLog).count()
-    assert count == 0
+        row = session.query(AlertLog).one()
+    assert row.sent_status == "SKIPPED"
+    assert row.signal_type == "SELL"
+    assert row.trigger_price == 117.0
+    assert row.baseline_price == 130.0
+    assert row.used_coeff == 0.90
+    assert "no position" in (row.error_message or "")
+
+    # Second call same day: still no send, no duplicate row.
+    second = process_sell_alert(_candidate(price=118.0))
+    assert second.outcome == AlertOutcome.SKIPPED_MEMORY
+    mock_send.assert_not_called()
+    with get_db() as session:
+        assert session.query(AlertLog).count() == 1
 
 
 def test_process_sell_alert_skips_second_send_same_day(tmp_path, monkeypatch) -> None:
@@ -394,7 +406,7 @@ def test_buy_and_sell_same_day_independent_freq(tmp_path, monkeypatch) -> None:
 
 
 def test_market_polling_empty_records_sell_without_notify(tmp_path, monkeypatch) -> None:
-    """Empty holdings: SELL is recorded for UI, but no WeChat notification."""
+    """Empty holdings: SELL is recorded in alert_logs, but no WeChat notification."""
     sqlite_path = tmp_path / "amtsm.db"
     monkeypatch.setattr(settings, "sqlite_path", str(sqlite_path))
     monkeypatch.setattr(settings, "polling_batch_size", 50)
@@ -455,8 +467,13 @@ def test_market_polling_empty_records_sell_without_notify(tmp_path, monkeypatch)
     assert runtime_state.signal_meta.get("sh600519", {}).get("is_limit_up") is True
     mock_send.assert_not_called()
     with get_db() as session:
-        count = session.query(AlertLog).filter_by(stock_code="sh600519").count()
-    assert count == 0
+        row = session.query(AlertLog).filter_by(stock_code="sh600519").one()
+    assert row.sent_status == "SKIPPED"
+    assert row.signal_type == "SELL"
+    assert row.trigger_price == 121.0
+    assert row.baseline_price == 130.0
+    assert row.used_coeff == 0.90
+    assert "no position" in (row.error_message or "")
 
 
 def test_market_polling_holding_tech_sell_notifies(tmp_path, monkeypatch) -> None:
