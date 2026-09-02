@@ -77,6 +77,11 @@ def _candidate(**overrides) -> dict:
     return base
 
 
+def _hold(stock_code: str = "sh600519", qty: int = 100) -> None:
+    """Seed in-memory holdings so SELL notifications are allowed."""
+    runtime_state.position_cache[stock_code] = {"qty": qty}
+
+
 def _seed_volume_history(session, stock_code: str, before: str, *, n: int = 7, volume: float = 1000.0) -> None:
     day = date.fromisoformat(before) - timedelta(days=1)
     for _ in range(n):
@@ -162,6 +167,7 @@ def test_process_sell_alert_sends_and_logs_success(tmp_path, monkeypatch) -> Non
     monkeypatch.setattr(settings, "alert_send_max_retries", 0)
     init_db()
     runtime_state.reset_daily()
+    _hold()
 
     mock_send = MagicMock(
         return_value=SendResult(ok=True, errcode=0, errmsg="ok", message="发送成功")
@@ -190,12 +196,36 @@ def test_process_sell_alert_sends_and_logs_success(tmp_path, monkeypatch) -> Non
     assert ("sh600519", "2026-08-05", "SELL") in runtime_state.sent_signal_keys
 
 
+def test_process_sell_alert_skips_notify_when_qty_zero(tmp_path, monkeypatch) -> None:
+    sqlite_path = tmp_path / "amtsm.db"
+    monkeypatch.setattr(settings, "sqlite_path", str(sqlite_path))
+    monkeypatch.setattr(settings, "alert_send_max_retries", 0)
+    init_db()
+    runtime_state.reset_daily()
+    runtime_state.position_cache.clear()
+
+    mock_send = MagicMock(
+        return_value=SendResult(ok=True, errcode=0, errmsg="ok", message="发送成功")
+    )
+    monkeypatch.setattr(alert_service.wechat_notifier, "send_text", mock_send)
+
+    result = process_sell_alert(_candidate())
+    assert result.outcome == AlertOutcome.SKIPPED_NO_POSITION
+    mock_send.assert_not_called()
+    assert ("sh600519", "2026-08-05", "SELL") not in runtime_state.sent_signal_keys
+
+    with get_db() as session:
+        count = session.query(AlertLog).count()
+    assert count == 0
+
+
 def test_process_sell_alert_skips_second_send_same_day(tmp_path, monkeypatch) -> None:
     sqlite_path = tmp_path / "amtsm.db"
     monkeypatch.setattr(settings, "sqlite_path", str(sqlite_path))
     monkeypatch.setattr(settings, "alert_send_max_retries", 0)
     init_db()
     runtime_state.reset_daily()
+    _hold()
 
     mock_send = MagicMock(
         return_value=SendResult(ok=True, errcode=0, errmsg="ok", message="发送成功")
@@ -219,6 +249,7 @@ def test_process_sell_alert_logs_failed_with_error_code(tmp_path, monkeypatch) -
     monkeypatch.setattr(settings, "alert_send_max_retries", 0)
     init_db()
     runtime_state.reset_daily()
+    _hold()
 
     mock_send = MagicMock(
         return_value=SendResult(
@@ -250,6 +281,7 @@ def test_process_sell_alert_retries_after_failure(tmp_path, monkeypatch) -> None
     monkeypatch.setattr(settings, "alert_send_retry_backoff_seconds", 0)
     init_db()
     runtime_state.reset_daily()
+    _hold()
 
     fail = SendResult(
         ok=False,
@@ -300,6 +332,8 @@ def test_process_sell_candidates_isolates_failures(tmp_path, monkeypatch) -> Non
     monkeypatch.setattr(settings, "alert_send_max_retries", 0)
     init_db()
     runtime_state.reset_daily()
+    _hold("sh600000")
+    _hold("sh600519")
 
     def _send(content: str) -> SendResult:
         if "sh600000" in content:
@@ -325,6 +359,7 @@ def test_buy_and_sell_same_day_independent_freq(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(settings, "alert_send_max_retries", 0)
     init_db()
     runtime_state.reset_daily()
+    _hold()
 
     mock_send = MagicMock(
         return_value=SendResult(ok=True, errcode=0, errmsg="ok", message="发送成功")
@@ -358,7 +393,8 @@ def test_buy_and_sell_same_day_independent_freq(tmp_path, monkeypatch) -> None:
     assert [r.signal_type for r in rows] == ["BUY", "SELL"]
 
 
-def test_market_polling_triggers_sell_alert(tmp_path, monkeypatch) -> None:
+def test_market_polling_empty_records_sell_without_notify(tmp_path, monkeypatch) -> None:
+    """Empty holdings: SELL is recorded for UI, but no WeChat notification."""
     sqlite_path = tmp_path / "amtsm.db"
     monkeypatch.setattr(settings, "sqlite_path", str(sqlite_path))
     monkeypatch.setattr(settings, "polling_batch_size", 50)
@@ -393,6 +429,87 @@ def test_market_polling_triggers_sell_alert(tmp_path, monkeypatch) -> None:
 
     monkeypatch.setattr("app.engine.tasks.datetime", _FrozenDateTime())
     # sell_threshold = 130 * 0.9 = 117; price 121 also hits main-board limit-up vs 110
+    monkeypatch.setattr(
+        "app.engine.tasks.fetch_realtime_quotes_batch",
+        lambda *args, **kwargs: {
+            "sh600519": {
+                "stock_name": "贵州茅台",
+                "price": 121.0,
+                "open": 110.0,
+                "prev_close": 110.0,
+                "volume": 1500.0,
+                "quote_date": "2026-08-05",
+                "quote_time": "10:00:00",
+                "is_halted": False,
+            }
+        },
+    )
+    mock_send = MagicMock(
+        return_value=SendResult(ok=True, errcode=0, errmsg="ok", message="发送成功")
+    )
+    monkeypatch.setattr(alert_service.wechat_notifier, "send_text", mock_send)
+
+    market_polling_task()
+
+    assert runtime_state.signal_state["sh600519"] == "SELL"
+    assert runtime_state.signal_meta.get("sh600519", {}).get("is_limit_up") is True
+    mock_send.assert_not_called()
+    with get_db() as session:
+        count = session.query(AlertLog).filter_by(stock_code="sh600519").count()
+    assert count == 0
+
+
+def test_market_polling_holding_tech_sell_notifies(tmp_path, monkeypatch) -> None:
+    """Holding + enable_tech_sell_while_holding: SELL still notifies."""
+    from app.db.models import Position
+
+    sqlite_path = tmp_path / "amtsm.db"
+    monkeypatch.setattr(settings, "sqlite_path", str(sqlite_path))
+    monkeypatch.setattr(settings, "polling_batch_size", 50)
+    monkeypatch.setattr(settings, "alert_send_max_retries", 0)
+    init_db()
+    runtime_state.reset_daily()
+    add_watchlist(WatchlistCreate(stock_code="600519", stock_name="贵州茅台"))
+
+    with get_db() as session:
+        cfg = session.get(StrategyConfig, 1)
+        cfg.global_buy_x = 1.10
+        cfg.global_sell_y = 0.90
+        cfg.enable_tech_sell_while_holding = 1
+        # Keep risk exits from firing so tech SELL can surface.
+        cfg.global_stop_loss_pct = 0.50
+        cfg.global_break_even_trigger_pct = 0.99
+        session.add(
+            DailyBaseline(
+                stock_code="sh600519",
+                trade_date="2026-08-05",
+                low_min=100.0,
+                high_max=130.0,
+                actual_n=60,
+            )
+        )
+        session.add(
+            Position(
+                stock_code="sh600519",
+                qty=100,
+                avg_cost=100.0,
+                highest_since_hold=120.0,
+                stop_price=85.0,
+                position_status="HOLDING",
+            )
+        )
+        _seed_volume_history(session, "sh600519", "2026-08-05")
+        session.commit()
+
+    fake_now = datetime(2026, 8, 5, 10, 0, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+
+    class _FrozenDateTime:
+        def now(self, tz=None):
+            if tz is None:
+                return fake_now
+            return fake_now.astimezone(tz)
+
+    monkeypatch.setattr("app.engine.tasks.datetime", _FrozenDateTime())
     monkeypatch.setattr(
         "app.engine.tasks.fetch_realtime_quotes_batch",
         lambda *args, **kwargs: {

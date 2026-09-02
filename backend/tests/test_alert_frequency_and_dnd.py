@@ -249,6 +249,7 @@ def test_buy_and_sell_independent_freq_keys(tmp_path, monkeypatch) -> None:
     )
     init_db()
     runtime_state.reset_daily()
+    runtime_state.position_cache["sh600519"] = {"qty": 100}
 
     mock_send = MagicMock(return_value=_ok_send())
     monkeypatch.setattr(alert_service.wechat_notifier, "send_text", mock_send)
@@ -288,6 +289,7 @@ def test_daily_cap_blocks_second_signal_same_stock(
     _patch_alert_window(monkeypatch)
     init_db()
     runtime_state.reset_daily()
+    runtime_state.position_cache["sh600519"] = {"qty": 100}
 
     mock_send = MagicMock(return_value=_ok_send())
     monkeypatch.setattr(alert_service.wechat_notifier, "send_text", mock_send)
@@ -368,6 +370,7 @@ def test_daily_cap_zero_is_unlimited(tmp_path, monkeypatch) -> None:
     _patch_alert_window(monkeypatch)
     init_db()
     runtime_state.reset_daily()
+    runtime_state.position_cache["sh600519"] = {"qty": 100}
 
     mock_send = MagicMock(return_value=_ok_send())
     monkeypatch.setattr(alert_service.wechat_notifier, "send_text", mock_send)

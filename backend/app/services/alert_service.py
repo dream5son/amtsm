@@ -20,7 +20,7 @@ from sqlalchemy.exc import IntegrityError
 
 from app.config import settings
 from app.db.connection import get_db
-from app.db.models import AlertLog, Watchlist
+from app.db.models import AlertLog, Position, Watchlist
 from app.engine.market_hours import is_alert_window_open, to_api_iso
 from app.engine.state import runtime_state
 from app.services.market_data.numbers import coerce_optional_float
@@ -199,6 +199,7 @@ class AlertOutcome(str, Enum):
     SKIPPED_RACE = "skipped_race"
     SKIPPED_INVALID = "skipped_invalid"
     SKIPPED_DAILY_CAP = "skipped_daily_cap"
+    SKIPPED_NO_POSITION = "skipped_no_position"
 
 
 @dataclass
@@ -846,13 +847,42 @@ def process_alert(candidate: dict[str, Any], *, signal_type: str) -> AlertProces
     )
 
 
+def _position_qty(stock_code: str) -> int:
+    """Return current holding qty from cache, falling back to DB."""
+    if not stock_code:
+        return 0
+    cached = runtime_state.position_cache.get(stock_code)
+    if cached is not None:
+        return int(cached.get("qty") or 0)
+    with get_db() as session:
+        pos = session.get(Position, stock_code)
+        return int(pos.qty) if pos is not None else 0
+
+
 def process_buy_alert(candidate: dict[str, Any]) -> AlertProcessResult:
     """Process a single BUY candidate end-to-end."""
     return process_alert(candidate, signal_type=SIGNAL_BUY)
 
 
 def process_sell_alert(candidate: dict[str, Any]) -> AlertProcessResult:
-    """Process a single SELL candidate end-to-end."""
+    """Process a single SELL candidate end-to-end.
+
+    Empty holdings still allow the polling engine to record the SELL signal for
+    UI display, but notifications are suppressed here when qty is 0.
+    """
+    stock_code = str(candidate.get("stock_code") or "")
+    qty = _position_qty(stock_code)
+    if qty <= 0:
+        logger.info(
+            "sell_alert skip notify: no position stock=%s qty=%s",
+            stock_code or "unknown",
+            qty,
+        )
+        return AlertProcessResult(
+            outcome=AlertOutcome.SKIPPED_NO_POSITION,
+            stock_code=stock_code or "unknown",
+            message="no position; signal recorded without notification",
+        )
     return process_alert(candidate, signal_type=SIGNAL_SELL)
 
 
