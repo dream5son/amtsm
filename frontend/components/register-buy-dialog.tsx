@@ -146,7 +146,7 @@ export default function RegisterBuyDialog({
             <input
               type="number"
               min={0}
-              step={0.01}
+              step={0.001}
               value={price}
               onChange={(e) => setPrice(e.target.value)}
               className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-slate-900 outline-none ring-sky-200 focus:ring"
