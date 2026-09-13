@@ -567,6 +567,7 @@ export type SystemStatus = {
   consecutive_poll_failures: number;
   quote_delay_since: string | null;
   failure_threshold: number;
+  snapshot_persist_failed: boolean;
 };
 
 export async function fetchSystemStatus(): Promise<SystemStatus> {

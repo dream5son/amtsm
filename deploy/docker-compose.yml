@@ -13,6 +13,9 @@ services:
     build:
       context: ..
       dockerfile: deploy/Dockerfile.backend
+      args:
+        # Replace deb.debian.org with Aliyun before apt-get (see Dockerfiles).
+        DEBIAN_MIRROR: mirrors.aliyun.com
     command:
       [
         "uvicorn",
@@ -54,6 +57,7 @@ services:
       context: ..
       dockerfile: deploy/Dockerfile.frontend
       args:
+        DEBIAN_MIRROR: mirrors.aliyun.com
         # NEXT_PUBLIC_* is baked at build time. Empty = same-origin /api via nginx.
         # Do not pass frontend/.env (local-dev http://localhost:8800) into the image.
         NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-}

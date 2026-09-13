@@ -71,6 +71,7 @@ export default function WatchlistPanel({ onOpenStrategy }: WatchlistPanelProps) 
   const [strategyTarget, setStrategyTarget] = useState<WatchlistItem | null>(null);
   const [message, setMessage] = useState("");
   const [quoteDelay, setQuoteDelay] = useState(false);
+  const [snapshotPersistFailed, setSnapshotPersistFailed] = useState(false);
   const [buyTarget, setBuyTarget] = useState<WatchlistItem | null>(null);
   const [sellTarget, setSellTarget] = useState<WatchlistItem | null>(null);
   const [ledgerTarget, setLedgerTarget] = useState<WatchlistItem | null>(null);
@@ -103,7 +104,7 @@ export default function WatchlistPanel({ onOpenStrategy }: WatchlistPanelProps) 
 
     const timer = window.setInterval(() => {
       void silentRefreshWatchlist();
-    }, 60_000);
+    }, 30_000);
     return () => {
       cancelled = true;
       window.clearInterval(timer);
@@ -150,8 +151,12 @@ export default function WatchlistPanel({ onOpenStrategy }: WatchlistPanelProps) 
     const es = new EventSource(url);
     es.onmessage = (event) => {
       try {
-        const status = JSON.parse(event.data) as { quote_delay?: boolean };
+        const status = JSON.parse(event.data) as {
+          quote_delay?: boolean;
+          snapshot_persist_failed?: boolean;
+        };
         setQuoteDelay(Boolean(status.quote_delay));
+        setSnapshotPersistFailed(Boolean(status.snapshot_persist_failed));
       } catch {
         // Keep last known flag; status stream is best-effort.
       }
@@ -274,6 +279,15 @@ export default function WatchlistPanel({ onOpenStrategy }: WatchlistPanelProps) 
           className="mb-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900"
         >
           行情延迟：实时行情接口连续失败，系统已标记延迟状态，信号判定可能滞后。
+        </div>
+      ) : null}
+
+      {snapshotPersistFailed ? (
+        <div
+          role="status"
+          className="mb-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900"
+        >
+          行情落库失败：实时价仍会刷新，但快照未能写入数据库，重启后可能回退到旧价。
         </div>
       ) : null}
 

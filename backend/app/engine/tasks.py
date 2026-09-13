@@ -291,13 +291,14 @@ def _intraday_snapshot_due(now: datetime) -> bool:
 
 def _upsert_intraday_snapshots_from_quotes(
     trade_date: str, quotes: dict[str, dict], codes: list[str]
-) -> tuple[int, int]:
+) -> tuple[int, int, int]:
     """UPSERT today's snapshot from already-fetched realtime quotes.
 
-    Returns (success_count, skipped_count).
+    Returns (success_count, skipped_count, persist_errors).
     """
     success_count = 0
     skipped_count = 0
+    persist_errors = 0
     for code in codes:
         quote = quotes.get(code) or {}
         try:
@@ -307,12 +308,36 @@ def _upsert_intraday_snapshots_from_quotes(
                 skipped_count += 1
         except Exception as exc:  # noqa: BLE001
             skipped_count += 1
+            persist_errors += 1
             logger.warning(
                 "intraday_snapshot upsert failed for %s: %s",
                 code,
                 exc,
             )
-    return success_count, skipped_count
+    return success_count, skipped_count, persist_errors
+
+
+def _cache_live_quotes(
+    quotes: dict[str, dict],
+    codes: list[str],
+    *,
+    trade_date: str,
+    now: datetime,
+) -> None:
+    """Keep same-day realtime prices in memory for UI overlay."""
+    for code in codes:
+        quote = quotes.get(code) or {}
+        price = coerce_optional_float(quote.get("price"))
+        if price is None or price <= 0:
+            continue
+        if quote.get("quote_date") != trade_date:
+            continue
+        runtime_state.last_quotes[code] = {
+            "price": price,
+            "open": coerce_optional_float(quote.get("open")),
+            "quote_date": trade_date,
+            "ts": now,
+        }
 
 
 def _upsert_snapshot_from_quote(stock_code: str, trade_date: str, quote: dict) -> bool:
@@ -493,7 +518,7 @@ def intraday_snapshot_task() -> None:
             skipped_count += len(batch)
             continue
 
-        written, skipped = _upsert_intraday_snapshots_from_quotes(
+        written, skipped, _persist_errors = _upsert_intraday_snapshots_from_quotes(
             trade_date, quotes, batch
         )
         success_count += written
@@ -791,6 +816,7 @@ def market_polling_task() -> None:
     write_snapshots = _intraday_snapshot_due(now)
     snapshot_success = 0
     snapshot_skipped = 0
+    snapshot_persist_errors = 0
 
     for i in range(0, len(valid_stocks), batch_size):
         batch = valid_stocks[i : i + batch_size]
@@ -814,12 +840,15 @@ def market_polling_task() -> None:
                 snapshot_skipped += len(batch)
             continue
 
+        _cache_live_quotes(quotes, codes, trade_date=trade_date, now=now)
+
         if write_snapshots:
-            written, skipped = _upsert_intraday_snapshots_from_quotes(
+            written, skipped, persist_errors = _upsert_intraday_snapshots_from_quotes(
                 trade_date, quotes, codes
             )
             snapshot_success += written
             snapshot_skipped += skipped
+            snapshot_persist_errors += persist_errors
 
         for stock in batch:
             code = stock["stock_code"]
@@ -1095,12 +1124,26 @@ def market_polling_task() -> None:
     _emit_signal_candidates(candidates)
 
     if write_snapshots:
-        runtime_state.last_intraday_snapshot_at = now
+        runtime_state.snapshot_persist_failed = snapshot_persist_errors > 0
+        all_persist_failed = snapshot_persist_errors > 0 and snapshot_success == 0
+        if all_persist_failed:
+            logger.error(
+                "intraday_snapshot persist failed trade_date=%s success=0 "
+                "skipped=%d persist_errors=%d",
+                trade_date,
+                snapshot_skipped,
+                snapshot_persist_errors,
+            )
+        else:
+            runtime_state.last_intraday_snapshot_at = now
         logger.info(
-            "market_polling_task snapshot trade_date=%s success=%d skipped=%d",
+            "market_polling_task snapshot trade_date=%s success=%d skipped=%d "
+            "persist_errors=%d persist_failed=%s",
             trade_date,
             snapshot_success,
             snapshot_skipped,
+            snapshot_persist_errors,
+            runtime_state.snapshot_persist_failed,
         )
 
     logger.info(
@@ -1134,6 +1177,7 @@ def _sync_signal_trade_date(trade_date: str) -> None:
         runtime_state.daily_cap_reached.clear()
         runtime_state.partial_tp_ladder_idx.clear()
         runtime_state.exit_fired_today.clear()
+        runtime_state.last_quotes.clear()
 
 
 def _ensure_baseline_cache_for_trade_date(trade_date: str) -> bool:

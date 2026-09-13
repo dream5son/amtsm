@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+from datetime import datetime
+
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
 from app.db.connection import get_db
 from app.db.models import Position, PositionLedger, StockStrategyOverride, Watchlist
+from app.engine.market_hours import SH_TZ
 from app.engine.state import runtime_state
 from app.schemas.watchlist import WatchlistCreate
 from app.services.backtest_service import get_watchlist_backtest_summary
@@ -118,8 +121,12 @@ def list_watchlist(limit: int = 50, offset: int = 0) -> list[dict]:
             {"limit": limit, "offset": offset},
         ).mappings().all()
     data = [dict(row) for row in rows]
+    trade_date = (
+        runtime_state.signal_trade_date or datetime.now(SH_TZ).date().isoformat()
+    )
     backtest_summaries = get_watchlist_backtest_summary([item["stock_code"] for item in data])
     for item in data:
+        _overlay_live_quote(item, trade_date)
         code = item["stock_code"]
         item["signal_type"] = runtime_state.signal_state.get(code)
         meta = runtime_state.signal_meta.get(code) or {}
@@ -145,6 +152,29 @@ def list_watchlist(limit: int = 50, offset: int = 0) -> list[dict]:
             )
         item.update(backtest_summaries.get(item["stock_code"], _EMPTY_BACKTEST_SUMMARY))
     return data
+
+
+def _overlay_live_quote(item: dict, trade_date: str) -> None:
+    """Replace snapshot price with same-day in-memory realtime quote when present."""
+    quote = runtime_state.last_quotes.get(item["stock_code"])
+    if not quote or quote.get("quote_date") != trade_date:
+        return
+    try:
+        price = float(quote["price"]) if quote.get("price") is not None else None
+    except (TypeError, ValueError):
+        return
+    if price is None or price <= 0:
+        return
+    item["latest_price"] = price
+    try:
+        open_price = float(quote["open"]) if quote.get("open") is not None else None
+    except (TypeError, ValueError):
+        open_price = None
+    if open_price is not None and open_price > 0:
+        item["change_pct"] = round((price - open_price) * 100.0 / open_price, 2)
+    else:
+        item["change_pct"] = None
+
 
 def add_watchlist(payload: WatchlistCreate) -> None:
     normalized_code = normalize_stock_code(payload.stock_code)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
@@ -9,6 +10,11 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import settings
+
+logger = logging.getLogger(__name__)
+
+# SQLite waits this many milliseconds (and SQLAlchemy seconds) on a locked DB.
+_SQLITE_BUSY_TIMEOUT_MS = 5000
 
 _engine: Engine | None = None
 _SessionLocal: sessionmaker[Session] | None = None
@@ -26,6 +32,7 @@ def _sqlite_url(path: str) -> str:
 def _set_sqlite_pragma(dbapi_connection, _connection_record) -> None:
     cursor = dbapi_connection.cursor()
     cursor.execute("PRAGMA journal_mode=WAL")
+    cursor.execute(f"PRAGMA busy_timeout={_SQLITE_BUSY_TIMEOUT_MS}")
     cursor.close()
 
 
@@ -43,7 +50,10 @@ def get_engine() -> Engine:
     ensure_db_parent_dir()
     engine = create_engine(
         _sqlite_url(path),
-        connect_args={"check_same_thread": False},
+        connect_args={
+            "check_same_thread": False,
+            "timeout": _SQLITE_BUSY_TIMEOUT_MS / 1000.0,
+        },
     )
     event.listen(engine, "connect", _set_sqlite_pragma)
     _engine = engine
@@ -76,3 +86,19 @@ def enable_wal() -> None:
     """Ensure WAL is enabled (also applied on every new connection)."""
     with get_engine().connect() as conn:
         conn.execute(text("PRAGMA journal_mode=WAL"))
+
+
+def check_sqlite_integrity() -> str:
+    """Run ``PRAGMA integrity_check`` and log ERROR when the image is not ok."""
+    try:
+        with get_engine().connect() as conn:
+            rows = conn.execute(text("PRAGMA integrity_check")).fetchall()
+        result = "; ".join(str(row[0]) for row in rows) if rows else "unknown"
+    except Exception as exc:  # noqa: BLE001
+        logger.error("sqlite integrity_check raised: %s", exc)
+        return f"error: {exc}"
+    if result != "ok":
+        logger.error("sqlite integrity_check failed: %s", result)
+    else:
+        logger.info("sqlite integrity_check ok")
+    return result

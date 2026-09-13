@@ -22,6 +22,10 @@ class RuntimeState:
         self.no_baseline_warned_date: str | None = None
         # Throttle for folding intraday snapshot writes into market polling.
         self.last_intraday_snapshot_at: datetime | None = None
+        # Latest realtime quotes for UI overlay (independent of snapshot UPSERT).
+        self.last_quotes: dict[str, dict] = {}
+        # True when the last snapshot persist attempt had write errors.
+        self.snapshot_persist_failed: bool = False
         # V2 risk: position snapshot cache + partial-TP ladder progress
         self.position_cache: dict[str, dict] = {}
         self.partial_tp_ladder_idx: dict[str, int] = {}
@@ -38,14 +42,16 @@ class RuntimeState:
         self.exit_fired_today.clear()
         self.no_baseline_warned_date = None
         self.last_intraday_snapshot_at = None
-        # Quote-delay is a live system flag; keep across day reset unless cleared by success.
-        # position_cache is reloaded from DB as needed; keep across day.
+        self.last_quotes.clear()
+        # Quote-delay / persist-failed are live system flags; keep across day reset
+        # unless cleared by a later success. position_cache is reloaded from DB.
 
     def drop_stock(self, stock_code: str) -> None:
         """Drop per-stock in-memory state after a watchlist removal."""
         self.baseline_cache.pop(stock_code, None)
         self.signal_state.pop(stock_code, None)
         self.signal_meta.pop(stock_code, None)
+        self.last_quotes.pop(stock_code, None)
         self.position_cache.pop(stock_code, None)
         self.partial_tp_ladder_idx.pop(stock_code, None)
         self.exit_fired_today.discard(stock_code)

@@ -268,6 +268,8 @@ SQLITE_DATA_DIR=./data
 
 Compose 对应挂载为 `${SQLITE_DATA_DIR:-./data}:/data`。该目录不进镜像，也不由 named volume 管理，`deploy/data/` 已在仓库 `.gitignore` 中忽略。
 
+Docker Desktop（尤其是 macOS bind mount）上跑 SQLite WAL 可能出现 `database disk image is malformed`。若反复损坏，把 `SQLITE_DATA_DIR` 改到 Linux VM 内路径，或改用 named volume 再拷回文件，避免把 WAL 数据库直接放在 osxfs/virtiofs 上。启动时 backend 会跑 `PRAGMA integrity_check`，失败会打 ERROR 日志。
+
 **不会丢掉数据：**
 
 - `docker compose up -d --build`（重建镜像、重建容器）

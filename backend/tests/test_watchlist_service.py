@@ -80,6 +80,11 @@ def test_remove_watchlist_normalizes_code(tmp_path, monkeypatch) -> None:
 
     runtime_state.baseline_cache["sh600519"] = {"trade_date": "2026-08-05"}
     runtime_state.set_signal("sh600519", "BUY")
+    runtime_state.last_quotes["sh600519"] = {
+        "price": 108.0,
+        "open": 107.0,
+        "quote_date": "2026-08-05",
+    }
     runtime_state.position_cache["sh600519"] = {"qty": 100}
     runtime_state.partial_tp_ladder_idx["sh600519"] = 1
     runtime_state.exit_fired_today.add("sh600519")
@@ -93,6 +98,7 @@ def test_remove_watchlist_normalizes_code(tmp_path, monkeypatch) -> None:
     assert "sh600519" not in runtime_state.baseline_cache
     assert "sh600519" not in runtime_state.signal_state
     assert "sh600519" not in runtime_state.signal_meta
+    assert "sh600519" not in runtime_state.last_quotes
     assert "sh600519" not in runtime_state.position_cache
     assert "sh600519" not in runtime_state.partial_tp_ladder_idx
     assert "sh600519" not in runtime_state.exit_fired_today
@@ -234,3 +240,41 @@ def test_list_watchlist_includes_runtime_signal_type(tmp_path, monkeypatch) -> N
     assert rows[0]["signal_type"] == "SELL"
     assert rows[0]["signal_t1_note"] is False
     assert rows[0]["signal_limit_board"] is True
+
+
+def test_list_watchlist_overlays_same_day_live_quote(tmp_path, monkeypatch) -> None:
+    sqlite_path = tmp_path / "amtsm.db"
+    monkeypatch.setattr(settings, "sqlite_path", str(sqlite_path))
+
+    init_db()
+    runtime_state.reset_daily()
+    add_watchlist(WatchlistCreate(stock_code="600519", stock_name="贵州茅台"))
+
+    with get_db() as session:
+        session.add(
+            DailyMarketSnapshot(
+                stock_code="sh600519",
+                trade_date="2026-08-01",
+                open_price=100.0,
+                high_price=101.0,
+                low_price=99.0,
+                close_price=104.0,
+                volume=1000000.0,
+            )
+        )
+        session.commit()
+
+    runtime_state.signal_trade_date = "2026-08-01"
+    runtime_state.last_quotes["sh600519"] = {
+        "price": 120.5,
+        "open": 100.0,
+        "quote_date": "2026-08-01",
+    }
+    item = list_watchlist()[0]
+    assert item["latest_price"] == 120.5
+    assert item["change_pct"] == 20.5
+
+    runtime_state.last_quotes["sh600519"]["quote_date"] = "2026-07-31"
+    item = list_watchlist()[0]
+    assert item["latest_price"] == 104.0
+    assert item["change_pct"] == 4.0

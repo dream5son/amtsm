@@ -1,7 +1,9 @@
 # Python 3.12 only (pyproject requires >=3.12,<3.13; uv.lock ==3.12.*)
 FROM python:3.12-slim-bookworm AS builder
 
-RUN apt-get update \
+ARG DEBIAN_MIRROR=mirrors.aliyun.com
+RUN sed -i "s/deb.debian.org/${DEBIAN_MIRROR}/g" /etc/apt/sources.list.d/debian.sources \
+    && apt-get update \
     && apt-get install -y --no-install-recommends \
         build-essential \
         libffi-dev \
@@ -24,7 +26,9 @@ RUN uv sync --frozen --no-dev
 
 FROM python:3.12-slim-bookworm
 
-RUN apt-get update \
+ARG DEBIAN_MIRROR=mirrors.aliyun.com
+RUN sed -i "s/deb.debian.org/${DEBIAN_MIRROR}/g" /etc/apt/sources.list.d/debian.sources \
+    && apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
         libffi8 \

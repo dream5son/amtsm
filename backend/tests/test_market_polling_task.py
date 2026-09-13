@@ -398,6 +398,84 @@ def test_market_polling_skips_removed_watchlist_stock(tmp_path, monkeypatch) -> 
     assert "sz000001" in fetched
 
 
+def test_market_polling_caches_quote_when_snapshot_upsert_fails(
+    tmp_path, monkeypatch
+) -> None:
+    import sqlite3
+
+    from app.services.watchlist_service import list_watchlist
+
+    sqlite_path = tmp_path / "amtsm.db"
+    monkeypatch.setattr(settings, "sqlite_path", str(sqlite_path))
+    monkeypatch.setattr(settings, "polling_batch_size", 50)
+    monkeypatch.setattr(settings, "intraday_snapshot_interval_seconds", 60)
+    init_db()
+    runtime_state.reset_daily()
+    runtime_state.snapshot_persist_failed = False
+    add_watchlist(WatchlistCreate(stock_code="600519", stock_name="贵州茅台"))
+
+    with get_db() as session:
+        session.add(
+            DailyBaseline(
+                stock_code="sh600519",
+                trade_date="2026-08-05",
+                low_min=100.0,
+                high_max=130.0,
+                actual_n=60,
+            )
+        )
+        session.add(
+            DailyMarketSnapshot(
+                stock_code="sh600519",
+                trade_date="2026-08-05",
+                open_price=100.0,
+                high_price=101.0,
+                low_price=99.0,
+                close_price=104.0,
+                volume=1000.0,
+            )
+        )
+        _seed_volume_history(session, "sh600519", "2026-08-05")
+        session.commit()
+
+    fake_now = datetime(2026, 8, 5, 10, 0, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+    monkeypatch.setattr("app.engine.tasks.datetime", _FrozenDateTime(fake_now))
+    monkeypatch.setattr("app.engine.tasks.process_buy_candidates", lambda candidates: [])
+    monkeypatch.setattr("app.engine.tasks.process_sell_candidates", lambda candidates: [])
+    monkeypatch.setattr("app.engine.tasks.process_risk_candidates", lambda candidates: [])
+    monkeypatch.setattr(
+        "app.engine.tasks.fetch_realtime_quotes_batch",
+        lambda *args, **kwargs: {
+            "sh600519": {
+                "stock_name": "贵州茅台",
+                "price": 108.0,
+                "open": 107.0,
+                "high": 109.0,
+                "low": 106.5,
+                "prev_close": 107.0,
+                "volume": 1500.0,
+                "quote_date": "2026-08-05",
+                "quote_time": "10:00:00",
+                "is_halted": False,
+            }
+        },
+    )
+
+    def _boom(*_args, **_kwargs):
+        raise sqlite3.DatabaseError("database disk image is malformed")
+
+    monkeypatch.setattr("app.engine.tasks.upsert_snapshot", _boom)
+
+    market_polling_task()
+    assert runtime_state.last_intraday_snapshot_at is None
+    assert runtime_state.snapshot_persist_failed is True
+    assert runtime_state.last_quotes["sh600519"]["price"] == 108.0
+
+    item = list_watchlist()[0]
+    assert item["latest_price"] == 108.0
+    assert item["change_pct"] == round((108.0 - 107.0) * 100.0 / 107.0, 2)
+
+
 class _FrozenDateTime:
     def __init__(self, now: datetime) -> None:
         self._now = now

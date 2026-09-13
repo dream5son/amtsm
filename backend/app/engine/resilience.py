@@ -94,4 +94,5 @@ def get_system_status() -> dict:
         "consecutive_poll_failures": int(runtime_state.consecutive_poll_failures),
         "quote_delay_since": runtime_state.quote_delay_since,
         "failure_threshold": int(settings.polling_consecutive_failure_threshold),
+        "snapshot_persist_failed": bool(runtime_state.snapshot_persist_failed),
     }

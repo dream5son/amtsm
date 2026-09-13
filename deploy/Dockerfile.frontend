@@ -28,7 +28,9 @@ ENV NODE_ENV=production \
     HOSTNAME=0.0.0.0 \
     TZ=Asia/Shanghai
 
-RUN apt-get update \
+ARG DEBIAN_MIRROR=mirrors.aliyun.com
+RUN sed -i "s/deb.debian.org/${DEBIAN_MIRROR}/g" /etc/apt/sources.list.d/debian.sources \
+    && apt-get update \
     && apt-get install -y --no-install-recommends tzdata ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 

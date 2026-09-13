@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from sqlalchemy import inspect, text
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
-from app.db.connection import enable_wal, get_db, get_engine
+from app.db.connection import check_sqlite_integrity, enable_wal, get_db, get_engine
 from app.db.models import (
     Base,
     SignalStrategy,
@@ -537,6 +537,7 @@ def _migrate_snapshots_to_qfq() -> None:
 
 def init_db() -> None:
     enable_wal()
+    check_sqlite_integrity()
     Base.metadata.create_all(get_engine())
     _ensure_strategy_columns()
     _ensure_signal_strategy_columns()

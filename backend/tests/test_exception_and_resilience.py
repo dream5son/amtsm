@@ -46,6 +46,7 @@ def _reset_runtime() -> None:
     runtime_state.quote_delay = False
     runtime_state.quote_delay_since = None
     runtime_state.last_internal_alert_key = None
+    runtime_state.snapshot_persist_failed = False
     runtime_state.job_status = "IDLE"
 
 
@@ -402,6 +403,7 @@ def test_system_status_endpoint() -> None:
     assert body["consecutive_poll_failures"] == 5
     assert body["quote_delay_since"] == "2026-08-05T02:00:00+00:00"
     assert body["failure_threshold"] >= 1
+    assert body["snapshot_persist_failed"] is False
 
 
 def test_system_status_stream_emits_initial_then_changes() -> None:
