@@ -33,6 +33,9 @@ export type WatchlistItem = {
   unrealized_pnl: number | null;
   unrealized_pnl_pct: number | null;
   stop_distance_pct: number | null;
+  year_low: number | null;
+  year_high: number | null;
+  water_level: number | null;
   backtest_status: BacktestStatus;
   backtest_job_id: number | null;
   backtest_win_rate: number | null;

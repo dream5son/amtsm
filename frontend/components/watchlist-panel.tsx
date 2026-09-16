@@ -48,6 +48,13 @@ function formatPctRatio(value: number | null): string {
   return `${sign}${pct.toFixed(2)}%`;
 }
 
+function yearRangeTitle(item: WatchlistItem): string | undefined {
+  if (item.water_level == null || item.year_low == null || item.year_high == null) {
+    return undefined;
+  }
+  return `一年水位 ${(item.water_level * 100).toFixed(0)}%（最低 ${formatPrice(item.year_low)} / 最高 ${formatPrice(item.year_high)}）`;
+}
+
 function positionStatusLabel(status: WatchlistItem["position_status"]): string {
   if (status === "HOLDING") return "持仓中";
   if (status === "PARTIAL") return "部分减持";
@@ -394,8 +401,24 @@ export default function WatchlistPanel({ onOpenStrategy }: WatchlistPanelProps) 
                 const signal = renderSignal(item.signal_type);
                 const holding = item.position_status !== "EMPTY" && item.position_qty > 0;
                 const riskCls = holding ? "py-2 pr-2 font-semibold text-slate-900" : "py-2 pr-2 text-slate-500";
+                const waterPct =
+                  item.water_level == null
+                    ? 0
+                    : Math.max(0, Math.min(100, item.water_level * 100));
+                const rangeTitle = yearRangeTitle(item);
                 return (
-                  <tr key={item.stock_code} className="border-b border-slate-100">
+                  <tr
+                    key={item.stock_code}
+                    className="border-b border-slate-100"
+                    title={rangeTitle}
+                    aria-label={rangeTitle}
+                    style={{
+                      backgroundImage: `linear-gradient(to right, rgb(14 165 233) ${waterPct}%, rgb(226 232 240) ${waterPct}%)`,
+                      backgroundSize: "100% 3px",
+                      backgroundRepeat: "no-repeat",
+                      backgroundPosition: "left bottom",
+                    }}
+                  >
                     <td className="py-2 pr-2">
                       <BacktestRing item={item} onClick={setDetailTarget} />
                     </td>

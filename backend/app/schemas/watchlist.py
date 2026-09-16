@@ -32,3 +32,6 @@ class WatchlistItem(BaseModel):
     unrealized_pnl: float | None = None
     unrealized_pnl_pct: float | None = None
     stop_distance_pct: float | None = None
+    year_low: float | None = None
+    year_high: float | None = None
+    water_level: float | None = None

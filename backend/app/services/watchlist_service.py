@@ -6,13 +6,25 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
 from app.db.connection import get_db
-from app.db.models import Position, PositionLedger, StockStrategyOverride, Watchlist
+from app.db.models import (
+    Position,
+    PositionLedger,
+    StockStrategyOverride,
+    StockYearRange,
+    Watchlist,
+)
 from app.engine.market_hours import SH_TZ
 from app.engine.state import runtime_state
 from app.schemas.watchlist import WatchlistCreate
 from app.services.backtest_service import get_watchlist_backtest_summary
 from app.services.position_math import stop_distance_pct, unrealized_pnl
 from app.services.stock_search_service import normalize_stock_code
+from app.services.year_range_service import (
+    compute_water_level,
+    load_year_high_lows,
+    upsert_year_ranges,
+    year_range_since,
+)
 
 _EMPTY_BACKTEST_SUMMARY = {
     "backtest_status": "NONE",
@@ -103,12 +115,16 @@ def list_watchlist(limit: int = 50, offset: int = 0) -> list[dict]:
                     COALESCE(p.position_status, 'EMPTY') AS position_status,
                     COALESCE(p.qty, 0) AS position_qty,
                     p.avg_cost,
-                    p.stop_price
+                    p.stop_price,
+                    syr.year_low,
+                    syr.year_high,
+                    syr.water_level
                 FROM watchlist w
                 JOIN strategy_config sc ON sc.id = 1
                 LEFT JOIN latest_snapshots ls ON ls.stock_code = w.stock_code
                 LEFT JOIN latest_baselines lb ON lb.stock_code = w.stock_code
                 LEFT JOIN positions p ON p.stock_code = w.stock_code
+                LEFT JOIN stock_year_ranges syr ON syr.stock_code = w.stock_code
                 LEFT JOIN signal_strategies effective_strategy
                     ON effective_strategy.id = COALESCE(
                         w.signal_strategy_id,
@@ -151,6 +167,8 @@ def list_watchlist(limit: int = 50, offset: int = 0) -> list[dict]:
                 item.get("latest_price"), item.get("stop_price")
             )
         item.update(backtest_summaries.get(item["stock_code"], _EMPTY_BACKTEST_SUMMARY))
+        _normalize_year_range(item)
+    _fill_missing_year_ranges(data, trade_date)
     return data
 
 
@@ -174,6 +192,7 @@ def _overlay_live_quote(item: dict, trade_date: str) -> None:
         item["change_pct"] = round((price - open_price) * 100.0 / open_price, 2)
     else:
         item["change_pct"] = None
+    _recompute_water_level(item, price)
 
 
 def add_watchlist(payload: WatchlistCreate) -> None:
@@ -204,6 +223,9 @@ def remove_watchlist(stock_code: str) -> int:
         session.query(Position).filter(Position.stock_code == normalized_code).delete()
         session.query(StockStrategyOverride).filter(
             StockStrategyOverride.stock_code == normalized_code
+        ).delete()
+        session.query(StockYearRange).filter(
+            StockYearRange.stock_code == normalized_code
         ).delete()
         deleted = (
             session.query(Watchlist)
@@ -253,3 +275,73 @@ def restore_halted_to_normal(stock_codes: list[str]) -> int:
         )
         session.commit()
     return updated
+
+
+def _normalize_year_range(item: dict) -> None:
+    item["year_low"] = _optional_positive_float(item.get("year_low"))
+    item["year_high"] = _optional_positive_float(item.get("year_high"))
+    water = item.get("water_level")
+    try:
+        item["water_level"] = float(water) if water is not None else None
+    except (TypeError, ValueError):
+        item["water_level"] = None
+    latest = _optional_positive_float(item.get("latest_price"))
+    if latest is not None:
+        _recompute_water_level(item, latest)
+
+
+def _fill_missing_year_ranges(items: list[dict], trade_date: str) -> None:
+    """Compute last-year high/low from snapshots when the persist row is absent."""
+    missing = [
+        item["stock_code"]
+        for item in items
+        if item.get("year_low") is None or item.get("year_high") is None
+    ]
+    if not missing:
+        return
+    hist = load_year_high_lows(missing, year_range_since(trade_date))
+    persist_rows: list[dict] = []
+    for item in items:
+        if item.get("year_low") is not None and item.get("year_high") is not None:
+            continue
+        pair = hist.get(item["stock_code"])
+        if pair is None:
+            continue
+        item["year_low"], item["year_high"] = pair
+        price = _optional_positive_float(item.get("latest_price"))
+        if price is None:
+            continue
+        _recompute_water_level(item, price)
+        persist_rows.append(
+            {
+                "stock_code": item["stock_code"],
+                "year_low": item["year_low"],
+                "year_high": item["year_high"],
+                "current_price": price,
+                "water_level": item["water_level"],
+            }
+        )
+    if persist_rows:
+        upsert_year_ranges(persist_rows)
+
+
+def _recompute_water_level(item: dict, price: float) -> None:
+    year_low = _optional_positive_float(item.get("year_low"))
+    year_high = _optional_positive_float(item.get("year_high"))
+    if year_low is None or year_high is None:
+        return
+    year_low = min(year_low, price)
+    year_high = max(year_high, price)
+    item["year_low"] = year_low
+    item["year_high"] = year_high
+    item["water_level"] = compute_water_level(price, year_low, year_high)
+
+
+def _optional_positive_float(value: object) -> float | None:
+    try:
+        number = float(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+    if number is None or number <= 0:
+        return None
+    return number

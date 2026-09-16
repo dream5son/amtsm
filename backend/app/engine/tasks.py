@@ -69,6 +69,10 @@ from app.services.watchlist_service import (
     restore_halted_to_normal,
     update_watchlist_status,
 )
+from app.services.year_range_service import (
+    refresh_year_range_from_snapshots,
+    refresh_year_range_stats,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -422,6 +426,43 @@ def _bootstrap_from_daily_bars(stock_code: str, *, lookback_days: int = 5) -> bo
     return False
 
 
+def _refresh_watchlist_year_ranges(
+    *, as_of: str | None = None, codes: list[str] | None = None
+) -> None:
+    """Best-effort year-range persist from snapshots; never raises."""
+    try:
+        target = codes
+        if target is None:
+            with get_db() as session:
+                target = list(
+                    session.scalars(
+                        select(Watchlist.stock_code).where(Watchlist.status == "NORMAL")
+                    ).all()
+                )
+        if not target:
+            return
+        written = refresh_year_range_from_snapshots(target, as_of=as_of)
+        logger.info(
+            "year_range snapshot refresh written=%d codes=%d as_of=%s",
+            written,
+            len(target),
+            as_of,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("year_range snapshot refresh failed: %s", exc)
+
+
+def _refresh_year_range_after_quote(
+    stock_code: str, trade_date: str, quote: dict
+) -> None:
+    try:
+        refresh_year_range_stats(trade_date, {stock_code: quote}, [stock_code])
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "year_range quote refresh failed stock=%s error=%s", stock_code, exc
+        )
+
+
 def bootstrap_watchlist_snapshot(stock_code: str) -> None:
     """Fetch and persist a market snapshot after a stock is added to the watchlist."""
     today = datetime.now(SH_TZ).date()
@@ -443,6 +484,7 @@ def bootstrap_watchlist_snapshot(stock_code: str) -> None:
                 stock_code,
                 trade_date,
             )
+            _refresh_year_range_after_quote(stock_code, trade_date, quote)
             return
     except Exception as exc:  # noqa: BLE001
         logger.warning(
@@ -457,6 +499,7 @@ def bootstrap_watchlist_snapshot(stock_code: str) -> None:
                 "bootstrap_watchlist_snapshot upserted %s from daily bar fallback",
                 stock_code,
             )
+            _refresh_watchlist_year_ranges(codes=[stock_code])
         else:
             logger.warning(
                 "bootstrap_watchlist_snapshot found no snapshot data for %s",
@@ -841,6 +884,11 @@ def market_polling_task() -> None:
             continue
 
         _cache_live_quotes(quotes, codes, trade_date=trade_date, now=now)
+
+        try:
+            refresh_year_range_stats(trade_date, quotes, codes)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("year_range_stats refresh failed: %s", exc)
 
         if write_snapshots:
             written, skipped, persist_errors = _upsert_intraday_snapshots_from_quotes(
@@ -1445,6 +1493,11 @@ def daily_snapshot_task() -> None:
             skipped_count,
         )
 
+    _refresh_watchlist_year_ranges(
+        as_of=trade_date,
+        codes=[stock["stock_code"] for stock in stocks],
+    )
+
 
 def _watchlist_missing_today_snapshots(trade_date: str) -> bool:
     """True when any NORMAL watchlist stock lacks a snapshot for trade_date."""
@@ -1478,44 +1531,47 @@ def startup_market_data_catchup() -> None:
     trade_date = today.isoformat()
     current_time = now.time()
 
-    if not is_trading_day(today):
-        logger.info(
-            "startup_market_data_catchup skipped: not trading day (%s)", trade_date
-        )
-        return
+    try:
+        if not is_trading_day(today):
+            logger.info(
+                "startup_market_data_catchup skipped: not trading day (%s)", trade_date
+            )
+            return
 
-    baseline_cutoff = time(settings.baseline_hour, settings.baseline_minute)
-    if current_time >= baseline_cutoff:
-        if not get_baselines_by_date(trade_date):
-            logger.info(
-                "startup_market_data_catchup running missed baseline_precompute for %s",
-                trade_date,
-            )
-            baseline_precompute_task()
-        else:
-            logger.info(
-                "startup_market_data_catchup skip baseline: already present for %s",
-                trade_date,
-            )
+        baseline_cutoff = time(settings.baseline_hour, settings.baseline_minute)
+        if current_time >= baseline_cutoff:
+            if not get_baselines_by_date(trade_date):
+                logger.info(
+                    "startup_market_data_catchup running missed baseline_precompute for %s",
+                    trade_date,
+                )
+                baseline_precompute_task()
+            else:
+                logger.info(
+                    "startup_market_data_catchup skip baseline: already present for %s",
+                    trade_date,
+                )
 
-    if is_in_trading_session(current_time):
-        logger.info(
-            "startup_market_data_catchup running immediate intraday snapshot for %s",
-            trade_date,
-        )
-        intraday_snapshot_task()
-        return
+        if is_in_trading_session(current_time):
+            logger.info(
+                "startup_market_data_catchup running immediate intraday snapshot for %s",
+                trade_date,
+            )
+            intraday_snapshot_task()
+            return
 
-    snapshot_cutoff = time(settings.snapshot_hour, settings.snapshot_minute)
-    if current_time >= snapshot_cutoff:
-        if _watchlist_missing_today_snapshots(trade_date):
-            logger.info(
-                "startup_market_data_catchup running missed daily_snapshot for %s",
-                trade_date,
-            )
-            daily_snapshot_task()
-        else:
-            logger.info(
-                "startup_market_data_catchup skip daily snapshot: already present for %s",
-                trade_date,
-            )
+        snapshot_cutoff = time(settings.snapshot_hour, settings.snapshot_minute)
+        if current_time >= snapshot_cutoff:
+            if _watchlist_missing_today_snapshots(trade_date):
+                logger.info(
+                    "startup_market_data_catchup running missed daily_snapshot for %s",
+                    trade_date,
+                )
+                daily_snapshot_task()
+            else:
+                logger.info(
+                    "startup_market_data_catchup skip daily snapshot: already present for %s",
+                    trade_date,
+                )
+    finally:
+        _refresh_watchlist_year_ranges(as_of=trade_date)

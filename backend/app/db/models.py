@@ -186,6 +186,23 @@ class DailyMarketSnapshot(Base):
     )
 
 
+class StockYearRange(Base):
+    """Last-year high/low and current-price water level for a watchlist stock."""
+
+    __tablename__ = "stock_year_ranges"
+
+    stock_code: Mapped[str] = mapped_column(
+        String(10), ForeignKey("watchlist.stock_code"), primary_key=True
+    )
+    year_low: Mapped[float] = mapped_column(Float, nullable=False)
+    year_high: Mapped[float] = mapped_column(Float, nullable=False)
+    current_price: Mapped[float] = mapped_column(Float, nullable=False)
+    water_level: Mapped[float] = mapped_column(Float, nullable=False)
+    updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime, server_default=func.current_timestamp()
+    )
+
+
 class AlertLog(Base):
     __tablename__ = "alert_logs"
     __table_args__ = (
