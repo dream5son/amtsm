@@ -55,6 +55,13 @@ function yearRangeTitle(item: WatchlistItem): string | undefined {
   return `一年水位 ${(item.water_level * 100).toFixed(0)}%（最低 ${formatPrice(item.year_low)} / 最高 ${formatPrice(item.year_high)}）`;
 }
 
+function waterLevelPercent(item: WatchlistItem): number | null {
+  if (item.water_level == null) {
+    return null;
+  }
+  return Math.max(0, Math.min(100, item.water_level * 100));
+}
+
 function positionStatusLabel(status: WatchlistItem["position_status"]): string {
   if (status === "HOLDING") return "持仓中";
   if (status === "PARTIAL") return "部分减持";
@@ -364,8 +371,8 @@ export default function WatchlistPanel({ onOpenStrategy }: WatchlistPanelProps) 
           <table
             className={
               showPositionRiskColumns
-                ? "w-full min-w-[1460px] border-collapse text-sm"
-                : "w-full min-w-[1140px] border-collapse text-sm"
+                ? "w-full min-w-[1600px] border-collapse text-sm"
+                : "w-full min-w-[1280px] border-collapse text-sm"
             }
           >
             <thead>
@@ -380,6 +387,12 @@ export default function WatchlistPanel({ onOpenStrategy }: WatchlistPanelProps) 
                 <th className="whitespace-nowrap py-2 pr-2 text-left font-medium">名称</th>
                 <th className="whitespace-nowrap py-2 pr-2 text-left font-medium">最新价</th>
                 <th className="whitespace-nowrap py-2 pr-2 text-left font-medium">涨跌幅</th>
+                <th
+                  className="whitespace-nowrap py-2 pr-2 text-left font-medium"
+                  title="当前价在近一年最低价与最高价之间的位置"
+                >
+                  一年水位
+                </th>
                 <th className="whitespace-nowrap py-2 pr-2 text-left font-medium">持仓状态</th>
                 <th className="w-[190px] min-w-[190px] max-w-[190px] whitespace-nowrap py-2 pr-2 text-left font-medium">持仓数量</th>
                 {showPositionRiskColumns ? (
@@ -401,24 +414,10 @@ export default function WatchlistPanel({ onOpenStrategy }: WatchlistPanelProps) 
                 const signal = renderSignal(item.signal_type);
                 const holding = item.position_status !== "EMPTY" && item.position_qty > 0;
                 const riskCls = holding ? "py-2 pr-2 font-semibold text-slate-900" : "py-2 pr-2 text-slate-500";
-                const waterPct =
-                  item.water_level == null
-                    ? 0
-                    : Math.max(0, Math.min(100, item.water_level * 100));
+                const waterPct = waterLevelPercent(item);
                 const rangeTitle = yearRangeTitle(item);
                 return (
-                  <tr
-                    key={item.stock_code}
-                    className="border-b border-slate-100"
-                    title={rangeTitle}
-                    aria-label={rangeTitle}
-                    style={{
-                      backgroundImage: `linear-gradient(to right, rgb(14 165 233) ${waterPct}%, rgb(226 232 240) ${waterPct}%)`,
-                      backgroundSize: "100% 3px",
-                      backgroundRepeat: "no-repeat",
-                      backgroundPosition: "left bottom",
-                    }}
-                  >
+                  <tr key={item.stock_code} className="border-b border-slate-100">
                     <td className="py-2 pr-2">
                       <BacktestRing item={item} onClick={setDetailTarget} />
                     </td>
@@ -435,6 +434,26 @@ export default function WatchlistPanel({ onOpenStrategy }: WatchlistPanelProps) 
                       }
                     >
                       {formatChangePct(item.change_pct)}
+                    </td>
+                    <td className="py-2 pr-2" title={rangeTitle} aria-label={rangeTitle}>
+                      {waterPct == null ? (
+                        <span className="text-slate-400">--</span>
+                      ) : (
+                        <div className="flex items-center gap-2">
+                          <span className="w-8 tabular-nums text-sky-800">
+                            {waterPct.toFixed(0)}%
+                          </span>
+                          <span
+                            className="relative h-1.5 w-16 overflow-hidden rounded-full bg-slate-200"
+                            aria-hidden
+                          >
+                            <span
+                              className="absolute inset-y-0 left-0 bg-sky-500"
+                              style={{ width: `${waterPct}%` }}
+                            />
+                          </span>
+                        </div>
+                      )}
                     </td>
                     <td className={riskCls}>{positionStatusLabel(item.position_status)}</td>
                     <td className="w-[190px] min-w-[190px] max-w-[190px] py-2 pr-2">
