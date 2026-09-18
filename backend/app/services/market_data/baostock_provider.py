@@ -33,6 +33,8 @@ logger = logging.getLogger(__name__)
 
 _DAILY_FIELDS = "date,open,high,low,close,volume,turn"
 _STOCK_TYPE = "1"
+_FUND_TYPE = "5"  # baostock: ETF / 场内基金
+_UNIVERSE_TYPES = {_STOCK_TYPE, _FUND_TYPE}
 _LISTED_STATUS = "1"
 
 _ADJUSTFLAG = {
@@ -255,7 +257,7 @@ class BaostockMarketDataProvider(MarketDataProvider):
 
         items: list[StockMeta] = []
         for row in rows:
-            if str(row.get("type", "")).strip() != _STOCK_TYPE:
+            if str(row.get("type", "")).strip() not in _UNIVERSE_TYPES:
                 continue
             if str(row.get("status", "")).strip() != _LISTED_STATUS:
                 continue

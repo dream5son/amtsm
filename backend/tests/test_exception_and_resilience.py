@@ -223,18 +223,134 @@ def test_halt_persisted_and_excluded_from_polling(tmp_path, monkeypatch) -> None
     assert status == "HALT"
     assert "sh600519" not in runtime_state.signal_state
 
-    # Second round must not request quotes for HALT stocks.
-    called = {"hit": False}
+    # Second round still quotes HALT stocks so a live last price can resume them.
+    called = {"codes": []}
 
-    def _should_not_call(*args, **kwargs):
-        called["hit"] = True
-        return {}
+    def _still_halted(*args, **kwargs):
+        called["codes"] = list(args[0]) if args else list(kwargs.get("stock_codes") or [])
+        return {
+            "sh600519": {
+                "stock_name": "贵州茅台",
+                "price": 0.0,
+                "open": 0.0,
+                "prev_close": 110.0,
+                "quote_date": "2026-08-05",
+                "quote_time": "10:01:00",
+                "is_halted": True,
+                "has_quote": True,
+            }
+        }
 
     monkeypatch.setattr(
-        "app.engine.tasks.fetch_realtime_quotes_batch", _should_not_call
+        "app.engine.tasks.fetch_realtime_quotes_batch", _still_halted
     )
     market_polling_task()
-    assert called["hit"] is False
+    assert called["codes"] == ["sh600519"]
+    with get_db() as session:
+        status = session.query(Watchlist).filter_by(stock_code="sh600519").one().status
+    assert status == "HALT"
+
+
+def test_halted_stock_resumes_when_quote_has_last_price(tmp_path, monkeypatch) -> None:
+    sqlite_path = tmp_path / "amtsm.db"
+    monkeypatch.setattr(settings, "sqlite_path", str(sqlite_path))
+    monkeypatch.setattr(settings, "polling_request_retries", 0)
+    monkeypatch.setattr(settings, "polling_request_retry_backoff_seconds", 0.0)
+    init_db()
+    _reset_runtime()
+    add_watchlist(WatchlistCreate(stock_code="159941", stock_name="广发纳指100ETF"))
+    with get_db() as session:
+        session.query(Watchlist).filter_by(stock_code="sz159941").update(
+            {"status": "HALT"}
+        )
+        session.add(
+            DailyBaseline(
+                stock_code="sz159941",
+                trade_date="2026-08-05",
+                low_min=1.0,
+                high_max=2.0,
+                actual_n=60,
+            )
+        )
+        session.commit()
+
+    fake_now = datetime(2026, 8, 5, 10, 0, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+    monkeypatch.setattr("app.engine.tasks.datetime", _FrozenDateTime(fake_now))
+    monkeypatch.setattr(
+        "app.engine.tasks.process_buy_candidates", lambda candidates: []
+    )
+    monkeypatch.setattr(
+        "app.engine.tasks.process_sell_candidates", lambda candidates: []
+    )
+    monkeypatch.setattr(
+        "app.engine.tasks.fetch_realtime_quotes_batch",
+        lambda *args, **kwargs: {
+            "sz159941": {
+                "stock_name": "纳指ETF",
+                "price": 1.664,
+                "open": 1.659,
+                "prev_close": 1.64,
+                "volume": 209614807.0,
+                "quote_date": "2026-08-05",
+                "quote_time": "10:00:00",
+                "is_halted": False,
+                "has_quote": True,
+            }
+        },
+    )
+
+    market_polling_task()
+
+    with get_db() as session:
+        status = session.query(Watchlist).filter_by(stock_code="sz159941").one().status
+    assert status == "NORMAL"
+
+
+def test_etf_zero_price_with_volume_does_not_persist_halt(tmp_path, monkeypatch) -> None:
+    sqlite_path = tmp_path / "amtsm.db"
+    monkeypatch.setattr(settings, "sqlite_path", str(sqlite_path))
+    monkeypatch.setattr(settings, "polling_request_retries", 0)
+    monkeypatch.setattr(settings, "polling_request_retry_backoff_seconds", 0.0)
+    init_db()
+    _reset_runtime()
+    add_watchlist(WatchlistCreate(stock_code="159941", stock_name="广发纳指100ETF"))
+
+    with get_db() as session:
+        session.add(
+            DailyBaseline(
+                stock_code="sz159941",
+                trade_date="2026-08-05",
+                low_min=1.0,
+                high_max=2.0,
+                actual_n=60,
+            )
+        )
+        session.commit()
+
+    fake_now = datetime(2026, 8, 5, 10, 0, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+    monkeypatch.setattr("app.engine.tasks.datetime", _FrozenDateTime(fake_now))
+    monkeypatch.setattr(
+        "app.engine.tasks.fetch_realtime_quotes_batch",
+        lambda *args, **kwargs: {
+            "sz159941": {
+                "stock_name": "纳指ETF",
+                "price": 0.0,
+                "open": 0.0,
+                "prev_close": 1.64,
+                "volume": 1000.0,
+                "quote_date": "2026-08-05",
+                "quote_time": "09:30:01",
+                "is_halted": True,
+                "has_quote": True,
+            }
+        },
+    )
+
+    market_polling_task()
+
+    with get_db() as session:
+        status = session.query(Watchlist).filter_by(stock_code="sz159941").one().status
+    assert status == "NORMAL"
 
 
 def test_missing_quote_does_not_persist_halt(tmp_path, monkeypatch) -> None:

@@ -14,6 +14,7 @@ from app.services.market_data.base import (
     StockMeta,
     bar_date_str,
     normalize_stock_code,
+    quote_indicates_halt,
     to_numeric_code,
 )
 from app.services.market_data.failover import FailoverMarketDataProvider
@@ -47,5 +48,6 @@ __all__ = [
     "bar_date_str",
     "get_market_data_provider",
     "normalize_stock_code",
+    "quote_indicates_halt",
     "to_numeric_code",
 ]

@@ -110,14 +110,44 @@ def normalize_stock_code(raw: str) -> str:
 
     if len(value) == 6 and value.isdigit():
         first = value[0]
-        if first in {"6", "9"}:
+        head2 = value[:2]
+        # 5xxxxx: Shanghai ETF; 11xxxx: Shanghai convertible bonds.
+        if first in {"5", "6", "9"} or head2 == "11":
             return f"sh{value}"
-        if first in {"0", "2", "3"}:
+        # 15/16/17/18xxxx: Shenzhen ETF/LOF; 12xxxx: Shenzhen convertibles.
+        if first in {"0", "2", "3"} or head2 in {"12", "15", "16", "17", "18"}:
             return f"sz{value}"
         if first in {"4", "8"}:
             return f"bj{value}"
 
     raise ValueError("invalid stock code")
+
+
+def quote_indicates_halt(
+    *,
+    has_quote: bool,
+    price: float | None,
+    open_price: float | None = None,
+    volume: float | None = None,
+    prev_close: float | None = None,
+) -> bool:
+    """True when a parsed quote payload looks like an exchange halt.
+
+    A non-positive last price is necessary but not sufficient. Missing quotes,
+    conversion failures, and zero-price ticks that still show an open or
+    volume (common on ETF feeds at the open) must not be persisted as 停牌.
+    """
+    if not has_quote:
+        return False
+    if price is None or price > 0:
+        return False
+    if volume is not None and volume > 0:
+        return False
+    if open_price is not None and open_price > 0:
+        return False
+    if prev_close is None or prev_close <= 0:
+        return False
+    return True
 
 
 def to_numeric_code(stock_code: str) -> str:

@@ -281,3 +281,71 @@ def test_list_watchlist_overlays_same_day_live_quote(tmp_path, monkeypatch) -> N
     item = list_watchlist()[0]
     assert item["latest_price"] == 104.0
     assert item["change_pct"] == 4.0
+
+
+def test_list_watchlist_resumes_halt_when_live_price_positive(tmp_path, monkeypatch) -> None:
+    sqlite_path = tmp_path / "amtsm.db"
+    monkeypatch.setattr(settings, "sqlite_path", str(sqlite_path))
+
+    init_db()
+    runtime_state.reset_daily()
+    add_watchlist(WatchlistCreate(stock_code="159941", stock_name="广发纳指100ETF"))
+    with get_db() as session:
+        session.query(Watchlist).filter_by(stock_code="sz159941").update(
+            {"status": "HALT"}
+        )
+        session.commit()
+
+    monkeypatch.setattr(
+        "app.services.market_data_service.fetch_realtime_quotes_batch",
+        lambda *args, **kwargs: {
+            "sz159941": {
+                "stock_name": "纳指ETF",
+                "price": 1.664,
+                "open": 1.659,
+                "prev_close": 1.64,
+                "quote_date": "2026-09-18",
+                "has_quote": True,
+                "is_halted": False,
+            }
+        },
+    )
+
+    item = list_watchlist()[0]
+    assert item["stock_code"] == "sz159941"
+    assert item["status"] == "NORMAL"
+    with get_db() as session:
+        status = session.query(Watchlist).filter_by(stock_code="sz159941").one().status
+    assert status == "NORMAL"
+
+
+def test_list_watchlist_keeps_halt_when_quote_has_no_price(tmp_path, monkeypatch) -> None:
+    sqlite_path = tmp_path / "amtsm.db"
+    monkeypatch.setattr(settings, "sqlite_path", str(sqlite_path))
+
+    init_db()
+    runtime_state.reset_daily()
+    add_watchlist(WatchlistCreate(stock_code="159941", stock_name="广发纳指100ETF"))
+    with get_db() as session:
+        session.query(Watchlist).filter_by(stock_code="sz159941").update(
+            {"status": "HALT"}
+        )
+        session.commit()
+
+    monkeypatch.setattr(
+        "app.services.market_data_service.fetch_realtime_quotes_batch",
+        lambda *args, **kwargs: {
+            "sz159941": {
+                "stock_name": "纳指ETF",
+                "price": 0.0,
+                "open": 0.0,
+                "prev_close": 1.64,
+                "quote_date": "2026-09-18",
+                "has_quote": True,
+                "is_halted": True,
+            }
+        },
+    )
+
+    item = list_watchlist()[0]
+    assert item["status"] == "HALT"

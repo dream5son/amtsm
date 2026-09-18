@@ -12,6 +12,16 @@ def test_normalize_stock_code_supports_main_board_prefixes() -> None:
     assert normalize_stock_code("sh600519") == "sh600519"
 
 
+def test_normalize_stock_code_supports_etf_and_convertible_prefixes() -> None:
+    assert normalize_stock_code("159941") == "sz159941"
+    assert normalize_stock_code("sz159941") == "sz159941"
+    assert normalize_stock_code("159915") == "sz159915"
+    assert normalize_stock_code("510300") == "sh510300"
+    assert normalize_stock_code("588000") == "sh588000"
+    assert normalize_stock_code("110059") == "sh110059"
+    assert normalize_stock_code("123456") == "sz123456"
+
+
 def test_search_stocks_ranks_code_and_initials(monkeypatch) -> None:
     items = [
         StockMeta(

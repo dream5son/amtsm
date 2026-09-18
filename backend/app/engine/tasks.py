@@ -54,6 +54,7 @@ from app.services.alert_service import (
     process_risk_candidates,
     process_sell_candidates,
 )
+from app.services.market_data.base import quote_indicates_halt
 from app.services.market_data.numbers import coerce_optional_float, parse_float
 from app.services.market_data_service import (
     MarketDataUnavailableError,
@@ -784,10 +785,10 @@ def market_polling_task() -> None:
     if not _ensure_baseline_cache_for_trade_date(trade_date):
         if runtime_state.no_baseline_warned_date != trade_date:
             logger.warning(
-                "market_polling_task skipped: no baselines for %s", trade_date
+                "market_polling_task: no baselines for %s; halt-resume probe only",
+                trade_date,
             )
             runtime_state.no_baseline_warned_date = trade_date
-        return
 
     _load_position_cache()
 
@@ -799,11 +800,12 @@ def market_polling_task() -> None:
                 SELECT
                     w.stock_code,
                     w.stock_name,
+                    w.status,
                     COALESCE(w.custom_x, sc.global_buy_x) AS effective_x,
                     COALESCE(w.custom_y, sc.global_sell_y) AS effective_y
                 FROM watchlist w
                 JOIN strategy_config sc ON sc.id = 1
-                WHERE w.status = 'NORMAL'
+                WHERE w.status IN ('NORMAL', 'HALT')
                 """
                 )
             )
@@ -813,28 +815,32 @@ def market_polling_task() -> None:
 
     stocks = [dict(row) for row in rows]
     if not stocks:
-        logger.info("market_polling_task: no NORMAL stocks")
+        logger.info("market_polling_task: no NORMAL/HALT stocks")
         return
 
-    valid_stocks: list[dict] = []
+    fetch_stocks: list[dict] = []
     skipped_no_baseline = 0
+    signal_ready: set[str] = set()
     for stock in stocks:
         baseline = runtime_state.baseline_cache.get(stock["stock_code"])
-        if not baseline or baseline.get("trade_date") != trade_date:
+        has_baseline = bool(baseline and baseline.get("trade_date") == trade_date)
+        if has_baseline:
+            fetch_stocks.append(stock)
+            signal_ready.add(stock["stock_code"])
+        elif stock.get("status") == "HALT":
+            # Still quote halted names so a live last price can resume them.
+            fetch_stocks.append(stock)
+        else:
             skipped_no_baseline += 1
-            continue
-        valid_stocks.append(stock)
 
-    if not valid_stocks:
+    if not fetch_stocks:
         logger.warning(
             "market_polling_task: no valid stocks with baseline (trade_date=%s)",
             trade_date,
         )
         return
 
-    strategy_bindings = resolve_signal_strategies(
-        [stock["stock_code"] for stock in valid_stocks]
-    )
+    strategy_bindings = resolve_signal_strategies(list(signal_ready))
     compiled_strategies = {}
     for binding in strategy_bindings.values():
         recipe_hash = binding["hash"]
@@ -844,7 +850,7 @@ def market_polling_task() -> None:
                 policy=EvaluationPolicy(require_full_buy_window=False),
             )
     batch_size = max(1, min(50, settings.polling_batch_size))
-    total_batches = (len(valid_stocks) + batch_size - 1) // batch_size
+    total_batches = (len(fetch_stocks) + batch_size - 1) // batch_size
 
     batch_errors = 0
     batches_attempted = 0
@@ -852,6 +858,7 @@ def market_polling_task() -> None:
     skipped_invalid_quote = 0
     skipped_halted = 0
     halted_persisted = 0
+    halt_resumed = 0
     buy_candidates = 0
     sell_candidates = 0
     risk_candidates = 0
@@ -861,8 +868,8 @@ def market_polling_task() -> None:
     snapshot_skipped = 0
     snapshot_persist_errors = 0
 
-    for i in range(0, len(valid_stocks), batch_size):
-        batch = valid_stocks[i : i + batch_size]
+    for i in range(0, len(fetch_stocks), batch_size):
+        batch = fetch_stocks[i : i + batch_size]
         codes = [item["stock_code"] for item in batch]
         batches_attempted += 1
         try:
@@ -903,33 +910,62 @@ def market_polling_task() -> None:
             quote = quotes.get(code) or {}
             price = quote.get("price")
             quote_date = quote.get("quote_date")
-            is_halted = bool(quote.get("is_halted"))
             if "has_quote" in quote:
                 has_quote = bool(quote["has_quote"])
             else:
                 # Backward-compatible for callers/tests that omit has_quote.
                 has_quote = price is not None
+            is_halted = quote_indicates_halt(
+                has_quote=has_quote,
+                price=coerce_optional_float(price),
+                open_price=coerce_optional_float(quote.get("open")),
+                volume=coerce_optional_float(quote.get("volume")),
+                prev_close=coerce_optional_float(quote.get("prev_close")),
+            )
 
-            # Persist HALT only when the provider returned a quote payload indicating halt.
-            if is_halted and has_quote:
+            # Persist HALT only when the payload matches the zero-price halt pattern.
+            if is_halted:
                 skipped_halted += 1
+                if stock.get("status") != "HALT":
+                    try:
+                        updated = update_watchlist_status(code, "HALT")
+                        if updated:
+                            halted_persisted += 1
+                            runtime_state.last_quotes.pop(code, None)
+                            logger.info(
+                                "watchlist_status_halted stock=%s trade_date=%s",
+                                code,
+                                trade_date,
+                            )
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning(
+                            "watchlist_halt_persist_failed stock=%s error=%s",
+                            code,
+                            exc,
+                        )
+                continue
+
+            if not has_quote or price is None or price <= 0 or quote_date != trade_date:
+                skipped_invalid_quote += 1
+                continue
+
+            if stock.get("status") == "HALT":
                 try:
-                    updated = update_watchlist_status(code, "HALT")
+                    updated = update_watchlist_status(code, "NORMAL")
                     if updated:
-                        halted_persisted += 1
+                        halt_resumed += 1
                         logger.info(
-                            "watchlist_status_halted stock=%s trade_date=%s",
+                            "watchlist_status_resumed stock=%s trade_date=%s",
                             code,
                             trade_date,
                         )
                 except Exception as exc:  # noqa: BLE001
                     logger.warning(
-                        "watchlist_halt_persist_failed stock=%s error=%s", code, exc
+                        "watchlist_halt_resume_failed stock=%s error=%s", code, exc
                     )
-                continue
+                stock["status"] = "NORMAL"
 
-            if not has_quote or price is None or price <= 0 or quote_date != trade_date:
-                skipped_invalid_quote += 1
+            if code not in signal_ready:
                 continue
 
             success_quotes += 1
@@ -1197,7 +1233,7 @@ def market_polling_task() -> None:
     logger.info(
         "market_polling_task summary trade_date=%s batches=%d batch_errors=%d "
         "success_quotes=%d skipped_no_baseline=%d skipped_halted=%d "
-        "halted_persisted=%d skipped_invalid_quote=%d buy_candidates=%d "
+        "halted_persisted=%d halt_resumed=%d skipped_invalid_quote=%d buy_candidates=%d "
         "sell_candidates=%d risk_candidates=%d quote_delay=%s consecutive_failures=%d",
         trade_date,
         total_batches,
@@ -1206,6 +1242,7 @@ def market_polling_task() -> None:
         skipped_no_baseline,
         skipped_halted,
         halted_persisted,
+        halt_resumed,
         skipped_invalid_quote,
         buy_candidates,
         sell_candidates,

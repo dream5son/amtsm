@@ -75,7 +75,9 @@ def test_to_baostock_code_formats_internal_and_numeric() -> None:
     assert to_baostock_code("600519") == "sh.600519"
     assert to_baostock_code("sh.600519") == "sh.600519"
     assert to_baostock_code("000001") == "sz.000001"
+    assert to_baostock_code("159941") == "sz.159941"
     assert from_baostock_code("sh.600519") == "sh600519"
+    assert from_baostock_code("sz.159941") == "sz159941"
 
 
 def test_fetch_daily_ohlcv_maps_code_and_adjustflag() -> None:
@@ -170,15 +172,19 @@ def test_list_a_share_universe_filters_index_and_delisted() -> None:
             ["sh.000001", "上证综指", "2", "1"],
             ["sz.000001", "平安银行", "1", "0"],
             ["sz.000002", "万  科Ａ", "1", "1"],
+            ["sz.159941", "广发纳指100ETF", "5", "1"],
+            ["sz.159915", "创业板ETF", "5", "0"],
         ],
     )
     provider = BaostockMarketDataProvider(client=client)
     items = provider.list_a_share_universe()
 
-    assert [item.stock_code for item in items] == ["sh600519", "sz000002"]
+    assert [item.stock_code for item in items] == ["sh600519", "sz000002", "sz159941"]
     assert items[0].exchange == "SH"
     assert items[0].initials == "GZMT"
     assert items[0].short_code == "600519"
+    assert items[2].stock_name == "广发纳指100ETF"
+    assert items[2].exchange == "SZ"
 
 
 def test_login_failure_raises_unavailable() -> None:
