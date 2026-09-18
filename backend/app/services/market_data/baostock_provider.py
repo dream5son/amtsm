@@ -33,7 +33,9 @@ install_baostock_socket_patch()
 logger = logging.getLogger(__name__)
 
 _DAILY_FIELDS = "date,open,high,low,close,volume,turn"
-_UNIVERSE_TYPES = {"1", "5"}
+_STOCK_TYPE = "1"
+_FUND_TYPE = "5"  # baostock: ETF / 场内基金
+_UNIVERSE_TYPES = {_STOCK_TYPE, _FUND_TYPE}
 _LISTED_STATUS = "1"
 
 _ADJUSTFLAG = {

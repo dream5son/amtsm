@@ -18,6 +18,7 @@ from app.services.market_data.base import (
     MarketDataProvider,
     MarketDataUnavailableError,
     StockMeta,
+    quote_indicates_halt,
 )
 from app.services.market_data.failover import FailoverMarketDataProvider
 from app.services.market_data_service import (
@@ -47,6 +48,56 @@ def test_parse_sina_realtime_quotes() -> None:
     assert data["sz000001"]["high"] is None
     assert data["sz000001"]["has_quote"] is False
     assert data["sz000001"]["is_halted"] is False
+
+
+def test_code_prefixed_maps_shenzhen_etf_to_sz() -> None:
+    assert _code_prefixed("159941") == "sz159941"
+    assert _code_prefixed("159915") == "sz159915"
+    assert _code_prefixed("510300") == "sh510300"
+    assert _code_prefixed("588000") == "sh588000"
+    assert _code_prefixed("600519") == "sh600519"
+    assert _code_prefixed("000001") == "sz000001"
+
+
+def test_quote_indicates_halt_requires_zero_open_and_volume() -> None:
+    assert quote_indicates_halt(
+        has_quote=True, price=0.0, open_price=0.0, volume=0.0, prev_close=1.64
+    )
+    assert not quote_indicates_halt(
+        has_quote=True, price=0.0, open_price=1.659, volume=0.0, prev_close=1.64
+    )
+    assert not quote_indicates_halt(
+        has_quote=True, price=0.0, open_price=0.0, volume=209614807.0, prev_close=1.64
+    )
+    assert not quote_indicates_halt(
+        has_quote=True, price=1.664, open_price=1.659, volume=1.0, prev_close=1.64
+    )
+
+
+def test_parse_etf_trading_quote_is_not_halt() -> None:
+    raw = (
+        'var hq_str_sz159941="纳指ETF,1.659,1.640,1.664,1.665,1.655,1.664,1.665,'
+        "209614807,347735928.608,873398,1.664,1072100,1.663,1618100,1.662,"
+        "1031100,1.661,1047400,1.660,3599400,1.665,3781800,1.666,989800,1.667,"
+        '1520600,1.668,894200,1.669,2026-09-18,11:30:00,00";\n'
+    )
+    data = _parse_sina_realtime_quotes(raw, ["sz159941"])
+    assert data["sz159941"]["has_quote"] is True
+    assert data["sz159941"]["price"] == 1.664
+    assert data["sz159941"]["is_halted"] is False
+
+
+def test_parse_zero_price_with_volume_is_not_halt() -> None:
+    raw = (
+        'var hq_str_sz159941="纳指ETF,0.00,1.640,0.00,0.00,0.00,0.00,0.00,'
+        "1000,1000,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,"
+        '2026-09-18,09:30:01,00";\n'
+    )
+    data = _parse_sina_realtime_quotes(raw, ["sz159941"])
+    assert data["sz159941"]["has_quote"] is True
+    assert data["sz159941"]["price"] == 0.0
+    assert data["sz159941"]["volume"] == 1000.0
+    assert data["sz159941"]["is_halted"] is False
 
 
 def test_akshare_sources_include_sina() -> None:

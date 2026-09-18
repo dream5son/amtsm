@@ -15,6 +15,7 @@ from app.services.market_data.base import (
     bar_date_str,
     is_etf_code,
     normalize_stock_code,
+    quote_indicates_halt,
     to_numeric_code,
 )
 from app.services.market_data.failover import FailoverMarketDataProvider
@@ -49,5 +50,6 @@ __all__ = [
     "get_market_data_provider",
     "is_etf_code",
     "normalize_stock_code",
+    "quote_indicates_halt",
     "to_numeric_code",
 ]

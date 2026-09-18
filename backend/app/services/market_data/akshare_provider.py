@@ -24,6 +24,7 @@ from app.services.market_data.base import (
     build_daily_bar,
     is_etf_code,
     normalize_stock_code,
+    quote_indicates_halt,
     to_numeric_code,
 )
 from app.services.market_data.numbers import coerce_optional_float
@@ -201,8 +202,15 @@ def _parse_sina_realtime_quotes(
             fields[31].strip() if len(fields) >= 32 and fields[31].strip() else None
         )
 
-        # Halt is a parsed non-positive price, not a missing/unparseable field.
-        is_halted = has_quote and price is not None and price <= 0
+        # Halt is the classic zero-price/zero-volume pattern, not a missing field
+        # or a zero last tick that still has open/volume (ETF false positives).
+        is_halted = quote_indicates_halt(
+            has_quote=has_quote,
+            price=price,
+            open_price=open_price,
+            volume=volume,
+            prev_close=prev_close,
+        )
 
         result[code] = {
             "stock_name": name,

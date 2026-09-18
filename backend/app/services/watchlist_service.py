@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 
 from sqlalchemy import text
@@ -25,6 +26,8 @@ from app.services.year_range_service import (
     upsert_year_ranges,
     year_range_since,
 )
+
+logger = logging.getLogger(__name__)
 
 _EMPTY_BACKTEST_SUMMARY = {
     "backtest_status": "NONE",
@@ -140,6 +143,7 @@ def list_watchlist(limit: int = 50, offset: int = 0) -> list[dict]:
     trade_date = (
         runtime_state.signal_trade_date or datetime.now(SH_TZ).date().isoformat()
     )
+    _resume_halted_if_quoting(data, trade_date)
     backtest_summaries = get_watchlist_backtest_summary([item["stock_code"] for item in data])
     for item in data:
         _overlay_live_quote(item, trade_date)
@@ -170,6 +174,47 @@ def list_watchlist(limit: int = 50, offset: int = 0) -> list[dict]:
         _normalize_year_range(item)
     _fill_missing_year_ranges(data, trade_date)
     return data
+
+
+def _resume_halted_if_quoting(items: list[dict], trade_date: str) -> None:
+    """Clear persisted HALT when a live last price > 0 shows the name is trading.
+
+    False halt marks (ETF zero ticks at the open, vendor glitches) are otherwise
+    sticky: polling used to skip HALT rows, so the UI stayed on 停牌 all day.
+    """
+    halted = [item for item in items if item.get("status") == "HALT"]
+    if not halted:
+        return
+
+    codes = [item["stock_code"] for item in halted]
+    try:
+        from app.services.market_data_service import fetch_realtime_quotes_batch
+
+        quotes = fetch_realtime_quotes_batch(codes, retries=0)
+    except Exception as exc:  # noqa: BLE001 - listing must not fail on probe
+        logger.warning("watchlist halt-resume quote probe failed: %s", exc)
+        quotes = {}
+
+    resumed: list[str] = []
+    for item in halted:
+        quote = quotes.get(item["stock_code"]) or {}
+        price = _optional_positive_float(quote.get("price"))
+        if price is None:
+            continue
+        runtime_state.last_quotes[item["stock_code"]] = {
+            "price": price,
+            "open": _optional_positive_float(quote.get("open")),
+            "quote_date": quote.get("quote_date") or trade_date,
+        }
+        item["status"] = "NORMAL"
+        resumed.append(item["stock_code"])
+    if resumed:
+        restored = restore_halted_to_normal(resumed)
+        logger.info(
+            "watchlist_halt_resumed_on_list count=%d codes=%s",
+            restored,
+            ",".join(resumed[:20]),
+        )
 
 
 def _overlay_live_quote(item: dict, trade_date: str) -> None:
