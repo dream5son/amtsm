@@ -311,7 +311,7 @@ export default function WatchlistPanel({ onOpenStrategy }: WatchlistPanelProps) 
             <input
               value={query}
               onChange={(event) => setQuery(event.target.value)}
-              placeholder="输入 600519 / GZMT / 贵州茅台"
+              placeholder="输入 600519 / 510300 / GZMT / 贵州茅台"
               className="min-w-[240px] flex-1 rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 outline-none ring-sky-200 transition focus:ring"
             />
             <button

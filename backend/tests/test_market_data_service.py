@@ -10,6 +10,7 @@ from app.services.market_data.akshare_provider import (
     _AKSHARE_SOURCES,
     AkshareMarketDataProvider,
     _code_em,
+    _code_prefixed,
     _normalize_df_em,
     _parse_sina_realtime_quotes,
 )
@@ -575,10 +576,94 @@ def test_akshare_list_a_share_universe_normalizes_codes(monkeypatch) -> None:
         "app.services.market_data.akshare_provider.ak.stock_info_a_code_name",
         lambda: df,
     )
+    monkeypatch.setattr(
+        "app.services.market_data.akshare_provider.ak.fund_etf_spot_em",
+        lambda: pd.DataFrame(columns=["代码", "名称"]),
+    )
     items = AkshareMarketDataProvider(sources=[]).list_a_share_universe()
     assert items[0].stock_code == "sh600519"
     assert items[0].exchange == "SH"
     assert items[0].initials == "GZMT"
+
+
+def test_akshare_list_a_share_universe_merges_etfs(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "app.services.market_data.akshare_provider.ak.stock_info_a_code_name",
+        lambda: pd.DataFrame([{"code": "600519", "name": "贵州茅台"}]),
+    )
+    monkeypatch.setattr(
+        "app.services.market_data.akshare_provider.ak.fund_etf_spot_em",
+        lambda: pd.DataFrame(
+            [
+                {"代码": "510300", "名称": "沪深300ETF"},
+                {"代码": "159941", "名称": "纳指ETF广发"},
+            ]
+        ),
+    )
+    items = AkshareMarketDataProvider(sources=[]).list_a_share_universe()
+    by_code = {item.stock_code: item for item in items}
+    assert set(by_code) == {"sh600519", "sh510300", "sz159941"}
+    assert by_code["sh510300"].exchange == "SH"
+    assert by_code["sz159941"].stock_name == "纳指ETF广发"
+    assert by_code["sz159941"].initials == "NZETFGF"
+
+
+def test_akshare_list_a_share_universe_keeps_etfs_when_stocks_fail(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "app.services.market_data.akshare_provider.ak.stock_info_a_code_name",
+        lambda: (_ for _ in ()).throw(RuntimeError("stocks down")),
+    )
+    monkeypatch.setattr(
+        "app.services.market_data.akshare_provider.ak.fund_etf_spot_em",
+        lambda: pd.DataFrame([{"代码": "510300", "名称": "沪深300ETF"}]),
+    )
+    items = AkshareMarketDataProvider(sources=[]).list_a_share_universe()
+    assert [item.stock_code for item in items] == ["sh510300"]
+
+
+def test_code_prefixed_maps_etf_to_exchange() -> None:
+    assert _code_prefixed("159941") == "sz159941"
+    assert _code_prefixed("510300") == "sh510300"
+    assert _code_prefixed("600519") == "sh600519"
+    assert _code_prefixed("000001") == "sz000001"
+
+
+def test_akshare_etf_uses_fund_etf_hist_em(monkeypatch) -> None:
+    called: dict[str, object] = {}
+
+    def fake_etf_hist(**kwargs: object) -> pd.DataFrame:
+        called.update(kwargs)
+        return _make_em_df()
+
+    monkeypatch.setattr(
+        "app.services.market_data.akshare_provider.ak.fund_etf_hist_em",
+        fake_etf_hist,
+    )
+    mock_em = MagicMock(side_effect=AssertionError("stock source should not run"))
+    provider = AkshareMarketDataProvider(
+        sources=[("eastmoney", mock_em, _code_em, _normalize_df_em)]
+    )
+    bars = _fetch(provider, "159941")
+    assert len(bars) == 1
+    assert bars[0]["close"] == 10.5
+    assert called["symbol"] == "159941"
+    assert called["period"] == "daily"
+    assert called["adjust"] == "qfq"
+    mock_em.assert_not_called()
+
+
+def test_akshare_etf_falls_back_to_stock_sources(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "app.services.market_data.akshare_provider.ak.fund_etf_hist_em",
+        lambda **kwargs: pd.DataFrame(),
+    )
+    mock_em = MagicMock(return_value=_make_em_df())
+    provider = AkshareMarketDataProvider(
+        sources=[("eastmoney", mock_em, _code_em, _normalize_df_em)]
+    )
+    bars = _fetch(provider, "510300")
+    assert bars[0]["close"] == 10.5
+    mock_em.assert_called_once()
 
 
 def test_akshare_fetch_realtime_quotes_parses_http_body(monkeypatch) -> None:

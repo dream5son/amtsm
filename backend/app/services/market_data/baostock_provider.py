@@ -24,6 +24,7 @@ from app.services.market_data.base import (
     RealtimeQuote,
     StockMeta,
     build_daily_bar,
+    is_etf_code,
     normalize_stock_code,
 )
 
@@ -32,7 +33,7 @@ install_baostock_socket_patch()
 logger = logging.getLogger(__name__)
 
 _DAILY_FIELDS = "date,open,high,low,close,volume,turn"
-_STOCK_TYPE = "1"
+_UNIVERSE_TYPES = {"1", "5"}
 _LISTED_STATUS = "1"
 
 _ADJUSTFLAG = {
@@ -224,7 +225,12 @@ class BaostockMarketDataProvider(MarketDataProvider):
                 frequency="d",
                 adjustflag=_adjustflag(adjust),
             )
-            return _normalize_daily_rows(_collect_rows(result))
+            bars = _normalize_daily_rows(_collect_rows(result))
+            if not bars and is_etf_code(stock_code):
+                raise MarketDataUnavailableError(
+                    f"baostock daily bars empty for ETF {code}"
+                )
+            return bars
         except MarketDataUnavailableError:
             raise
         except ValueError:
@@ -255,7 +261,7 @@ class BaostockMarketDataProvider(MarketDataProvider):
 
         items: list[StockMeta] = []
         for row in rows:
-            if str(row.get("type", "")).strip() != _STOCK_TYPE:
+            if str(row.get("type", "")).strip() not in _UNIVERSE_TYPES:
                 continue
             if str(row.get("status", "")).strip() != _LISTED_STATUS:
                 continue

@@ -22,6 +22,7 @@ from app.services.market_data.base import (
     StockDataFetchError,
     StockMeta,
     build_daily_bar,
+    is_etf_code,
     normalize_stock_code,
     to_numeric_code,
 )
@@ -43,13 +44,7 @@ def _code_em(numeric_code: str) -> str:
 
 def _code_prefixed(numeric_code: str) -> str:
     """Return sh/sz/bj-prefixed code expected by Sina / Tencent sources."""
-    if numeric_code.startswith(("60", "68", "90")):
-        return f"sh{numeric_code}"
-    if numeric_code.startswith(("00", "30", "20")):
-        return f"sz{numeric_code}"
-    if numeric_code.startswith(("43", "83", "87", "88")):
-        return f"bj{numeric_code}"
-    return f"sh{numeric_code}"
+    return normalize_stock_code(numeric_code)
 
 
 def _normalize_df_em(df: pd.DataFrame) -> list[DailyBar]:
@@ -245,6 +240,47 @@ def _get_initials(name: str) -> str:
     return "".join(letters).upper()
 
 
+_CODE_COLUMNS = ("code", "代码")
+_NAME_COLUMNS = ("name", "名称")
+
+
+def _column(df: pd.DataFrame, candidates: tuple[str, ...]) -> str | None:
+    return next((name for name in candidates if name in df.columns), None)
+
+
+def _meta_from_code_name(code: str, name: str) -> StockMeta | None:
+    if not code or not name:
+        return None
+    try:
+        normalized = normalize_stock_code(code)
+    except ValueError:
+        return None
+    return StockMeta(
+        stock_code=normalized,
+        stock_name=name,
+        exchange=_exchange_from_normalized(normalized),
+        short_code=normalized[2:],
+        initials=_get_initials(name),
+    )
+
+
+def _meta_items_from_df(df: pd.DataFrame | None) -> list[StockMeta]:
+    if df is None or df.empty:
+        return []
+    code_col = _column(df, _CODE_COLUMNS)
+    name_col = _column(df, _NAME_COLUMNS)
+    if code_col is None or name_col is None:
+        return []
+    items: list[StockMeta] = []
+    for record in df[[code_col, name_col]].itertuples(index=False, name=None):
+        code = str(record[0]).strip()
+        name = str(record[1]).strip()
+        meta = _meta_from_code_name(code, name)
+        if meta is not None:
+            items.append(meta)
+    return items
+
+
 class AkshareMarketDataProvider(MarketDataProvider):
     """Daily bars via akshare failover; realtime quotes via Sina HTTP."""
 
@@ -310,12 +346,50 @@ class AkshareMarketDataProvider(MarketDataProvider):
         if start_date > end_date:
             return []
         numeric_code = to_numeric_code(stock_code)
+        start = start_date.strftime("%Y%m%d")
+        end = end_date.strftime("%Y%m%d")
+        if is_etf_code(numeric_code):
+            bars = self._fetch_etf_hist(numeric_code, start, end, adjust=adjust)
+            if bars:
+                return bars
         return self._fetch_with_source_rotation(
             numeric_code,
-            start_date.strftime("%Y%m%d"),
-            end_date.strftime("%Y%m%d"),
+            start,
+            end,
             adjust=adjust,
         )
+
+    def _fetch_etf_hist(
+        self,
+        numeric_code: str,
+        start_date: str,
+        end_date: str,
+        adjust: str = QFQ,
+    ) -> list[DailyBar]:
+        try:
+            logger.debug("fetching ETF %s from akshare fund_etf_hist_em", numeric_code)
+            df = ak.fund_etf_hist_em(
+                symbol=numeric_code,
+                period="daily",
+                start_date=start_date,
+                end_date=end_date,
+                adjust=adjust,
+            )
+            if df is None or df.empty:
+                raise StockDataFetchError(
+                    f"fund_etf_hist_em returned empty data for {numeric_code}"
+                )
+            bars = _normalize_df_em(df)
+            if not bars:
+                raise StockDataFetchError(
+                    f"fund_etf_hist_em returned unusable data for {numeric_code}"
+                )
+            return bars
+        except Exception as exc:  # noqa: BLE001 - ETF hist failure falls through
+            logger.warning(
+                "akshare fund_etf_hist_em failed for %s: %s", numeric_code, exc
+            )
+            return []
 
     def _fetch_with_source_rotation(
         self,
@@ -418,28 +492,26 @@ class AkshareMarketDataProvider(MarketDataProvider):
             ) from exc
 
     def list_a_share_universe(self) -> list[StockMeta]:
-        df = ak.stock_info_a_code_name()
-        items: list[StockMeta] = []
+        items: dict[str, StockMeta] = {}
+        errors: list[str] = []
 
-        for row in df.itertuples(index=False):
-            code = str(getattr(row, "code", "")).strip()
-            name = str(getattr(row, "name", "")).strip()
-            if not code or not name:
-                continue
+        try:
+            for meta in _meta_items_from_df(ak.stock_info_a_code_name()):
+                items[meta.stock_code] = meta
+        except Exception as exc:  # noqa: BLE001 - keep ETF list if stocks fail
+            errors.append(f"stock_info_a_code_name: {exc}")
+            logger.warning("akshare stock universe unavailable: %s", exc)
 
-            try:
-                normalized = normalize_stock_code(code)
-            except ValueError:
-                continue
+        try:
+            for meta in _meta_items_from_df(ak.fund_etf_spot_em()):
+                items[meta.stock_code] = meta
+        except Exception as exc:  # noqa: BLE001 - keep stock list if ETFs fail
+            errors.append(f"fund_etf_spot_em: {exc}")
+            logger.warning("akshare ETF universe unavailable: %s", exc)
 
-            items.append(
-                StockMeta(
-                    stock_code=normalized,
-                    stock_name=name,
-                    exchange=_exchange_from_normalized(normalized),
-                    short_code=normalized[2:],
-                    initials=_get_initials(name),
-                )
+        if not items:
+            detail = "; ".join(errors) if errors else "empty lists"
+            raise MarketDataUnavailableError(
+                f"akshare stock universe unavailable: {detail}"
             )
-
-        return items
+        return list(items.values())

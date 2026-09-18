@@ -110,9 +110,11 @@ def normalize_stock_code(raw: str) -> str:
 
     if len(value) == 6 and value.isdigit():
         first = value[0]
-        if first in {"6", "9"}:
+        if first in {"5", "6", "9"}:
             return f"sh{value}"
         if first in {"0", "2", "3"}:
+            return f"sz{value}"
+        if value.startswith("15"):
             return f"sz{value}"
         if first in {"4", "8"}:
             return f"bj{value}"
@@ -126,6 +128,12 @@ def to_numeric_code(stock_code: str) -> str:
     if numeric_code[:2] in {"sh", "sz", "bj"}:
         numeric_code = numeric_code[2:]
     return numeric_code
+
+
+def is_etf_code(stock_code: str) -> bool:
+    """True for listed A-share ETFs (15xxxx Shenzhen, 5xxxxx Shanghai)."""
+    numeric = to_numeric_code(stock_code.strip().lower())
+    return len(numeric) == 6 and numeric.isdigit() and numeric.startswith(("15", "5"))
 
 
 class MarketDataProvider(ABC):

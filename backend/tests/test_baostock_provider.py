@@ -126,6 +126,15 @@ def test_fetch_daily_ohlcv_empty_rows_returns_empty_list() -> None:
     )
 
 
+def test_fetch_daily_ohlcv_empty_etf_raises_unavailable() -> None:
+    client = _FakeBaostock()
+    client.k_result = _daily_result(rows=[])
+    provider = BaostockMarketDataProvider(client=client)
+
+    with pytest.raises(MarketDataUnavailableError, match="empty for ETF"):
+        provider.fetch_daily_ohlcv("159941", date(2024, 1, 1), date(2024, 1, 1))
+
+
 def test_fetch_daily_ohlcv_skips_incomplete_rows() -> None:
     client = _FakeBaostock()
     client.k_result = _daily_result(
@@ -170,15 +179,22 @@ def test_list_a_share_universe_filters_index_and_delisted() -> None:
             ["sh.000001", "上证综指", "2", "1"],
             ["sz.000001", "平安银行", "1", "0"],
             ["sz.000002", "万  科Ａ", "1", "1"],
+            ["sh.510300", "沪深300ETF", "5", "1"],
+            ["sz.159941", "纳指ETF广发", "5", "0"],
         ],
     )
     provider = BaostockMarketDataProvider(client=client)
     items = provider.list_a_share_universe()
 
-    assert [item.stock_code for item in items] == ["sh600519", "sz000002"]
+    assert [item.stock_code for item in items] == [
+        "sh600519",
+        "sz000002",
+        "sh510300",
+    ]
     assert items[0].exchange == "SH"
     assert items[0].initials == "GZMT"
     assert items[0].short_code == "600519"
+    assert items[2].stock_name == "沪深300ETF"
 
 
 def test_login_failure_raises_unavailable() -> None:
@@ -303,6 +319,18 @@ def test_failover_does_not_fallback_on_empty_daily_bars() -> None:
         provider.fetch_daily_ohlcv("sh600519", date(2024, 1, 1), date(2024, 1, 2)) == []
     )
     assert fallback.ohlcv_calls == 0
+
+
+def test_failover_etf_empty_baostock_uses_akshare() -> None:
+    client = _FakeBaostock()
+    client.k_result = _daily_result(rows=[])
+    primary = BaostockMarketDataProvider(client=client)
+    fallback = _FakeAkshare()
+    provider = FailoverMarketDataProvider([primary, fallback])
+
+    bars = provider.fetch_daily_ohlcv("sz159941", date(2024, 1, 1), date(2024, 1, 2))
+    assert bars[0]["close"] == 1.0
+    assert fallback.ohlcv_calls == 1
 
 
 def test_failover_daily_on_unavailable() -> None:

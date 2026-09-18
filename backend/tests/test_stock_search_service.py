@@ -1,3 +1,5 @@
+import pytest
+
 from app.services.stock_search_service import (
     StockMeta,
     normalize_stock_code,
@@ -10,6 +12,18 @@ def test_normalize_stock_code_supports_main_board_prefixes() -> None:
     assert normalize_stock_code("000001") == "sz000001"
     assert normalize_stock_code("430047") == "bj430047"
     assert normalize_stock_code("sh600519") == "sh600519"
+
+
+def test_normalize_stock_code_supports_etf_prefixes() -> None:
+    assert normalize_stock_code("159941") == "sz159941"
+    assert normalize_stock_code("510300") == "sh510300"
+    assert normalize_stock_code("588000") == "sh588000"
+    assert normalize_stock_code("sz159941") == "sz159941"
+
+
+def test_normalize_stock_code_rejects_unknown_prefixes() -> None:
+    with pytest.raises(ValueError, match="invalid stock code"):
+        normalize_stock_code("110059")
 
 
 def test_search_stocks_ranks_code_and_initials(monkeypatch) -> None:
@@ -48,6 +62,34 @@ def test_search_stocks_ranks_code_and_initials(monkeypatch) -> None:
     assert by_code[0]["stock_code"] == "sh600519"
     assert by_initials[0]["stock_name"] == "贵州茅台"
     assert by_name[0]["stock_name"] == "平安银行"
+
+
+def test_search_stocks_matches_etf_code_and_name(monkeypatch) -> None:
+    items = [
+        StockMeta(
+            stock_code="sz159941",
+            stock_name="纳指ETF广发",
+            exchange="SZ",
+            short_code="159941",
+            initials="NZETFGF",
+        ),
+        StockMeta(
+            stock_code="sh510300",
+            stock_name="沪深300ETF",
+            exchange="SH",
+            short_code="510300",
+            initials="HS300ETF",
+        ),
+    ]
+    monkeypatch.setattr(
+        "app.services.stock_search_service._load_stock_meta", lambda: items
+    )
+
+    by_code = search_stocks("159941")
+    by_name = search_stocks("沪深300")
+
+    assert by_code[0]["stock_code"] == "sz159941"
+    assert by_name[0]["stock_code"] == "sh510300"
 
 
 def test_build_cache_uses_provider_universe(monkeypatch) -> None:
