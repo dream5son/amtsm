@@ -866,6 +866,16 @@ export type BacktestKlineBar = {
   volume: number;
 };
 
+export type StockKlineBar = {
+  date: string;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+  turnover_rate?: number | null;
+};
+
 export type BacktestKlineResponse = {
   job: BacktestJob;
   bars: BacktestKlineBar[];
@@ -952,6 +962,25 @@ export async function fetchBacktestKline(
     throw new Error("failed to fetch backtest kline");
   }
   return (await res.json()) as BacktestKlineResponse;
+}
+
+export async function fetchStockKline(
+  stockCode: string,
+  params?: { start?: string; end?: string; limit?: number },
+): Promise<StockKlineBar[]> {
+  const search = new URLSearchParams();
+  if (params?.start) search.set("start", params.start);
+  if (params?.end) search.set("end", params.end);
+  if (params?.limit != null) search.set("limit", String(params.limit));
+  const qs = search.toString();
+  const res = await fetch(
+    `${API_BASE}/api/stocks/${encodeURIComponent(stockCode)}/kline${qs ? `?${qs}` : ""}`,
+    { cache: "no-store" },
+  );
+  if (!res.ok) {
+    throw new Error("failed to fetch stock kline");
+  }
+  return (await res.json()) as StockKlineBar[];
 }
 
 export type BacktestApplyResponse = {

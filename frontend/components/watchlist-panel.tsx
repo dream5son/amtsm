@@ -10,6 +10,7 @@ import RegisterBuyDialog from "@/components/register-buy-dialog";
 import RegisterSellDialog from "@/components/register-sell-dialog";
 import SignalHistoryDrawer from "@/components/signal-history-drawer";
 import StatusBadge from "@/components/status-badge";
+import StockKlineDialog from "@/components/stock-kline-dialog";
 import WatchlistStrategyDialog from "@/components/watchlist-strategy-dialog";
 import {
   createWatchlist,
@@ -91,6 +92,7 @@ export default function WatchlistPanel({ onOpenStrategy }: WatchlistPanelProps) 
   const [ledgerTarget, setLedgerTarget] = useState<WatchlistItem | null>(null);
   const [signalHistoryTarget, setSignalHistoryTarget] = useState<WatchlistItem | null>(null);
   const [backtestTarget, setBacktestTarget] = useState<WatchlistItem | null>(null);
+  const [klineTarget, setKlineTarget] = useState<WatchlistItem | null>(null);
   const [detailTarget, setDetailTarget] = useState<WatchlistItem | null>(null);
 
   useEffect(() => {
@@ -631,6 +633,13 @@ export default function WatchlistPanel({ onOpenStrategy }: WatchlistPanelProps) 
                         </button>
                         <button
                           type="button"
+                          onClick={() => setKlineTarget(item)}
+                          className="rounded-md border border-violet-300 px-2 py-1 text-xs font-medium text-violet-700 transition-colors hover:bg-violet-50"
+                        >
+                          K线
+                        </button>
+                        <button
+                          type="button"
                           onClick={() => void onRemove(item)}
                           disabled={removingCode === item.stock_code}
                           className="rounded-md border border-rose-300 px-2 py-1 text-xs font-medium text-rose-700 transition-colors hover:bg-rose-50 disabled:cursor-not-allowed disabled:bg-rose-50 disabled:text-rose-300"
@@ -716,6 +725,7 @@ export default function WatchlistPanel({ onOpenStrategy }: WatchlistPanelProps) 
           void loadWatchlist();
         }}
       />
+      <StockKlineDialog open={klineTarget != null} item={klineTarget} onClose={() => setKlineTarget(null)} />
       <BacktestDetailDialog
         open={detailTarget != null}
         item={detailTarget}
