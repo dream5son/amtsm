@@ -968,13 +968,17 @@ export async function fetchStockKline(
   stockCode: string,
   params?: { start?: string; end?: string; limit?: number },
 ): Promise<StockKlineBar[]> {
+  const normalizedStockCode = stockCode.trim();
+  if (!normalizedStockCode) {
+    throw new Error("stock code is required");
+  }
   const search = new URLSearchParams();
   if (params?.start) search.set("start", params.start);
   if (params?.end) search.set("end", params.end);
   if (params?.limit != null) search.set("limit", String(params.limit));
   const qs = search.toString();
   const res = await fetch(
-    `${API_BASE}/api/stocks/${encodeURIComponent(stockCode)}/kline${qs ? `?${qs}` : ""}`,
+    `${API_BASE}/api/stocks/${encodeURIComponent(normalizedStockCode)}/kline${qs ? `?${qs}` : ""}`,
     { cache: "no-store" },
   );
   if (!res.ok) {

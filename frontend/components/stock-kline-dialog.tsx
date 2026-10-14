@@ -3,7 +3,7 @@
 import dynamic from "next/dynamic";
 import { useEffect, useState } from "react";
 
-import { fetchStockKline, StockKlineBar, WatchlistItem } from "@/lib/api";
+import { fetchStockKline, StockKlineBar } from "@/lib/api";
 
 const StockKlineChart = dynamic(() => import("@/components/stock-kline-chart"), {
   ssr: false,
@@ -16,17 +16,23 @@ const StockKlineChart = dynamic(() => import("@/components/stock-kline-chart"), 
 
 type StockKlineDialogProps = {
   open: boolean;
-  item: WatchlistItem | null;
+  stockCode: string | null;
+  stockName: string | null;
   onClose: () => void;
 };
 
-export default function StockKlineDialog({ open, item, onClose }: StockKlineDialogProps) {
+export default function StockKlineDialog({
+  open,
+  stockCode,
+  stockName,
+  onClose,
+}: StockKlineDialogProps) {
   const [bars, setBars] = useState<StockKlineBar[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
   useEffect(() => {
-    if (!open || !item) {
+    if (!open || !stockCode) {
       setBars([]);
       setError("");
       return;
@@ -36,7 +42,7 @@ export default function StockKlineDialog({ open, item, onClose }: StockKlineDial
     setLoading(true);
     setError("");
 
-    void fetchStockKline(item.stock_code, { limit: 500 })
+    void fetchStockKline(stockCode, { limit: 500 })
       .then((data) => {
         if (cancelled) return;
         setBars(data);
@@ -54,9 +60,9 @@ export default function StockKlineDialog({ open, item, onClose }: StockKlineDial
     return () => {
       cancelled = true;
     };
-  }, [open, item]);
+  }, [open, stockCode]);
 
-  if (!open || !item) return null;
+  if (!open || !stockCode || !stockName) return null;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={onClose}>
@@ -66,8 +72,8 @@ export default function StockKlineDialog({ open, item, onClose }: StockKlineDial
       >
         <div className="flex items-center justify-between border-b border-slate-200 px-5 py-4">
           <div>
-            <h2 className="text-lg font-semibold text-slate-900">{item.stock_name}</h2>
-            <p className="text-sm text-slate-500">{item.stock_code}</p>
+            <h2 className="text-lg font-semibold text-slate-900">{stockName}</h2>
+            <p className="text-sm text-slate-500">{stockCode}</p>
           </div>
           <button
             type="button"
@@ -88,7 +94,7 @@ export default function StockKlineDialog({ open, item, onClose }: StockKlineDial
               {error}
             </div>
           ) : (
-            <StockKlineChart bars={bars} symbol={item.stock_code} />
+            <StockKlineChart bars={bars} symbol={stockCode} />
           )}
         </div>
       </div>

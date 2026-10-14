@@ -73,6 +73,11 @@ type WatchlistPanelProps = {
   onOpenStrategy?: (item: WatchlistItem) => void;
 };
 
+type KlineTarget = {
+  stockCode: string;
+  stockName: string;
+};
+
 export default function WatchlistPanel({ onOpenStrategy }: WatchlistPanelProps) {
   const [watchlist, setWatchlist] = useState<WatchlistItem[]>([]);
   const [signalStrategies, setSignalStrategies] = useState<SignalStrategy[]>([]);
@@ -92,7 +97,7 @@ export default function WatchlistPanel({ onOpenStrategy }: WatchlistPanelProps) 
   const [ledgerTarget, setLedgerTarget] = useState<WatchlistItem | null>(null);
   const [signalHistoryTarget, setSignalHistoryTarget] = useState<WatchlistItem | null>(null);
   const [backtestTarget, setBacktestTarget] = useState<WatchlistItem | null>(null);
-  const [klineTarget, setKlineTarget] = useState<WatchlistItem | null>(null);
+  const [klineTarget, setKlineTarget] = useState<KlineTarget | null>(null);
   const [detailTarget, setDetailTarget] = useState<WatchlistItem | null>(null);
 
   useEffect(() => {
@@ -633,7 +638,12 @@ export default function WatchlistPanel({ onOpenStrategy }: WatchlistPanelProps) 
                         </button>
                         <button
                           type="button"
-                          onClick={() => setKlineTarget(item)}
+                          onClick={() =>
+                            setKlineTarget({
+                              stockCode: item.stock_code,
+                              stockName: item.stock_name,
+                            })
+                          }
                           className="rounded-md border border-violet-300 px-2 py-1 text-xs font-medium text-violet-700 transition-colors hover:bg-violet-50"
                         >
                           K线
@@ -725,7 +735,12 @@ export default function WatchlistPanel({ onOpenStrategy }: WatchlistPanelProps) 
           void loadWatchlist();
         }}
       />
-      <StockKlineDialog open={klineTarget != null} item={klineTarget} onClose={() => setKlineTarget(null)} />
+      <StockKlineDialog
+        open={klineTarget != null}
+        stockCode={klineTarget?.stockCode ?? null}
+        stockName={klineTarget?.stockName ?? null}
+        onClose={() => setKlineTarget(null)}
+      />
       <BacktestDetailDialog
         open={detailTarget != null}
         item={detailTarget}
