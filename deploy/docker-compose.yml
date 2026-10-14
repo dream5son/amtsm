@@ -16,6 +16,10 @@ services:
       args:
         # Replace deb.debian.org with Aliyun before apt-get (see Dockerfiles).
         DEBIAN_MIRROR: mirrors.aliyun.com
+        # uv sync --frozen downloads the wheel URLs baked into uv.lock
+        # (files.pythonhosted.org). The backend image rewrites that host to
+        # this mirror. Path layout is /pypi/packages/...
+        PYPI_MIRROR: https://mirrors.aliyun.com/pypi
     command:
       [
         "uvicorn",

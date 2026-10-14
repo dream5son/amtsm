@@ -14,12 +14,17 @@ RUN sed -i "s/deb.debian.org/${DEBIAN_MIRROR}/g" /etc/apt/sources.list.d/debian.
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
 WORKDIR /app
+ARG PYPI_MIRROR=https://mirrors.aliyun.com/pypi
 ENV UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
     UV_PYTHON_DOWNLOADS=0
 
 COPY backend/pyproject.toml backend/uv.lock ./
-RUN uv sync --frozen --no-dev --no-install-project
+# --frozen ignores index settings and fetches the files.pythonhosted.org URLs
+# recorded in uv.lock. Rewrite that host so mainland builds use the mirror.
+# Wheel hashes are unchanged.
+RUN sed -i "s|https://files.pythonhosted.org|${PYPI_MIRROR}|g" uv.lock \
+    && uv sync --frozen --no-dev --no-install-project
 
 COPY backend/app ./app
 RUN uv sync --frozen --no-dev
