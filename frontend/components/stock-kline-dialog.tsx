@@ -74,6 +74,7 @@ export default function StockKlineDialog({
           <div>
             <h2 className="text-lg font-semibold text-slate-900">{stockName}</h2>
             <p className="text-sm text-slate-500">{stockCode}</p>
+            <p className="text-xs text-slate-400">均线：MA5 / MA10 / MA20 / MA60</p>
           </div>
           <button
             type="button"
