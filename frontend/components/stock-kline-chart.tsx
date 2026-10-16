@@ -104,6 +104,7 @@ registerStyles(STYLE_THEME, {
 
 export default function StockKlineChart({ bars, symbol = "stock" }: StockKlineChartProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const maIndicatorIdRef = useRef<string | null>(null);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -119,6 +120,12 @@ export default function StockKlineChart({ bars, symbol = "stock" }: StockKlineCh
 
     chart.setSymbol({ ticker: symbol });
     chart.setPeriod({ type: "day", span: 1 });
+    if (bars.length > 0) {
+      maIndicatorIdRef.current = chart.createIndicator(
+        { name: "MA", paneId: "candle_pane", calcParams: [5, 10, 20, 60] },
+        false,
+      );
+    }
     chart.setDataLoader({
       getBars: async ({ type, callback }) => {
         if (type === "init") {
@@ -130,6 +137,10 @@ export default function StockKlineChart({ bars, symbol = "stock" }: StockKlineCh
     });
 
     return () => {
+      if (maIndicatorIdRef.current) {
+        chart.removeIndicator({ id: maIndicatorIdRef.current });
+        maIndicatorIdRef.current = null;
+      }
       dispose(container);
     };
   }, [bars, symbol]);
